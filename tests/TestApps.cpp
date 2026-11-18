@@ -561,12 +561,14 @@ TEST_F(AppsTest, ResolvesPathsAgainstTheConfig) {
 TEST_F(AppsTest, TheExampleConfigsAreRead) {
   // Every config in examples/configs is read by its command's reader
   // without a fault: a `model` that is a path is love-numbers', a config
-  // with a `kernels` block kernel's (and solve's, which checks the block),
-  // and the rest solve's, with an ocean or without one.
+  // with a `tangent` block tangent's, one with a `kernels` block kernel's
+  // (and solve's, which checks the block, where it has solve's `output`),
+  // and the rest solve's, with an ocean or without one (a tangent config
+  // without a `kernels` block solve's too where it has solve's `output`).
   const auto configs =
       fs::path{SL3DPP_TEST_DATA_DIR}.parent_path().parent_path() / "examples" /
       "configs";
-  auto read = 0;
+  auto read = 0, tangents = 0;
   for (const auto& entry : fs::directory_iterator(configs)) {
     const auto& path = entry.path();
     if (path.extension() != ".json") continue;
@@ -574,12 +576,19 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     try {
       if (top.At("model").IsString()) {
         static_cast<void>(app::ReadLoveNumbersInput(path));
-      } else if (app::Has(top, "kernels")) {
+        ++read;
+        continue;
+      }
+      if (app::Has(top, "tangent")) {
+        static_cast<void>(app::ReadTangentInput(path));
+        ++tangents;
+      }
+      if (app::Has(top, "kernels")) {
         static_cast<void>(app::ReadKernelInput(path));
         if (app::Has(top, "output")) {
           static_cast<void>(app::ReadSolveInput(path));
         }
-      } else {
+      } else if (!app::Has(top, "tangent") || app::Has(top, "output")) {
         static_cast<void>(app::ReadSolveInput(path));
       }
     } catch (const planetmodel::Error& error) {
@@ -587,7 +596,9 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 72);
+  EXPECT_EQ(read, 74);
+  // the tangent configs: tangent1d.json and tangent3d.json
+  EXPECT_EQ(tangents, 2);
   // a config that states no scheme runs the default, Sdirk2; one that
   // states the exponential trapezoid runs it
   EXPECT_EQ(app::ReadSolveInput(configs / "sea_level_1d.json").run.solver.scheme,
@@ -9689,6 +9700,134 @@ TEST_F(AppsTest, TransformDegreesOnARadialRunAreTheLateralKernels) {
   }
   ExpectRefused(app::RunSolve, timed("timed_radial", kCut, false),
                 "solver.transform_degrees", "3-D step, which a 1-D run");
+}
+
+TEST_F(AppsTest, LateralKernelsOfACalibratedRunAreItsTotalDerivatives) {
+  // `kernels.lateral` on the calibrated radial run of
+  // KernelsOfACalibratedRunAreItsTotalDerivatives, under migrating
+  // shorelines: the kernels in the viscosity as a field are the TOTAL
+  // derivatives too, the sweep that forms them forced by the measurement
+  // less the calibration's multiplier.
+  // - The radial profile beside the field is the run's without the member,
+  //   data line for data line.
+  // - The field paired with a uniform change of ln eta (the file's
+  //   `uniform_log_viscosity_pairing`) is the central difference of two
+  //   solve runs, each calibrating again, on decks of the viscosity raised
+  //   and lowered; the partial field, the option stated, misses it.
+  // - The field is the 3-D run's total kernel on the same Earth given as a
+  //   viscosity file stored on an angular grid with no lateral structure.
+  // The files say which derivatives they hold.
+  namespace pm = planetmodel;
+  const auto deck = Deck();
+  WriteToyHistory(dir_ / "history.nc", 0.0, true);
+  WriteToyNodes(dir_ / "topography.nc", "topography",
+                [](std::size_t, double theta) {
+                  const auto basin = std::exp(-std::pow(theta / 0.3, 2));
+                  const auto equator = std::exp(
+                      -std::pow((theta - std::numbers::pi / 2) / 0.15, 2));
+                  return 3000.0 * std::cos(theta) - 3500.0 * basin - equator;
+                });
+  constexpr auto kEps = 1e-3;
+  static_cast<void>(Write("up.deck", BallDeck(0.0, 1e21 * std::exp(kEps))));
+  static_cast<void>(Write("down.deck", BallDeck(0.0, 1e21 * std::exp(-kEps))));
+  WriteViscosity(dir_ / "uniform.nc", ModelOf(deck, app::ModelFormat::Gia),
+                 1e21, 0.0);
+  struct Case {
+    std::string name, model = R"("deck": "ball.deck")", kernels = "";
+  };
+  const auto config = [&](const Case& c) {
+    return Write(c.name + ".json", std::format(R"({{
+      "model": {{{}}}, "discretisation": {{"lmax": 8}},
+      "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}]}},
+      "ocean": {{"at": "end", "shorelines": "migrating",
+                "calibration": {{"rtol": 1e-12, "iterations": 60}},
+                "topography": {{"file": "topography.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "rotation": "full", "moments": "hydrostatic",
+      "solver": {{"rtol": 1e-12}},
+      "output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"parameters": ["ice", "viscosity"]{},
+        "measurements": [
+          {{"type": "relative_sea_level_cap", "name": "site",
+            "latitude": -30, "longitude": 10, "width_deg": 25}}],
+        "output": "out/{}_kernels"}}}})",
+                                               c.model, c.name, c.kernels,
+                                               c.name));
+  };
+  constexpr auto kLateral = R"(, "lateral": true)";
+  const auto summary =
+      app::RunKernel(config({.name = "lateral", .kernels = kLateral}));
+  EXPECT_NE(summary.find("; total derivatives, the initial sea level "
+                         "calibrated again, the multiplier in at most "),
+            std::string::npos)
+      << summary;
+  EXPECT_TRUE(summary.ends_with("; the kernels in the Earth as fields)"))
+      << summary;
+  static_cast<void>(app::RunKernel(config({.name = "radial"})));
+  static_cast<void>(app::RunKernel(config(
+      {.name = "partial",
+       .kernels = std::string{kLateral} +
+                  R"(, "calibration": {"derivative": "partial"})"})));
+  const auto out = dir_ / "out" / "lateral_kernels";
+  // the same radial sweep, forced alike, the field read off it
+  EXPECT_EQ(DataLines(out / "site_viscosity_kernel.txt"),
+            DataLines(dir_ / "out" / "radial_kernels" /
+                      "site_viscosity_kernel.txt"));
+  const auto metaOf = [](const fs::path& path, const std::string& key) {
+    return std::get<std::vector<double>>(
+               pm::ReadModelFile(path).Meta().at(key))
+        .front();
+  };
+  const auto field = out / "site_viscosity_kernels.nc";
+  const auto held =
+      dir_ / "out" / "partial_kernels" / "site_viscosity_kernels.nc";
+  EXPECT_EQ(metaOf(field, "calibration_total_derivative"), 1.0);
+  EXPECT_EQ(metaOf(held, "calibration_total_derivative"), 0.0);
+
+  // a uniform change of ln eta, against two runs that calibrate again
+  const auto valueOf = [&](const Case& c) {
+    static_cast<void>(app::RunSolve(config(c)));
+    return CapMeanOf(pm::ReadSurfaceFile(dir_ / "out" / (c.name + ".nc")),
+                     "relative_sea_level_change", 4, {-30.0, 10.0}, 25.0);
+  };
+  const auto difference =
+      (valueOf({.name = "up", .model = R"("deck": "up.deck")"}) -
+       valueOf({.name = "down", .model = R"("deck": "down.deck")"})) /
+      (2.0 * kEps);
+  const auto whole = metaOf(field, "uniform_log_viscosity_pairing");
+  const auto part = metaOf(held, "uniform_log_viscosity_pairing");
+  std::cout << std::format(
+      "[calibrated, lateral kernels, uniform ln(eta)] dJ/dln(eta) {:.3e}: the "
+      "total field {:.3e} from it, the partial {:.3e}\n",
+      difference, Gap(whole, difference), Gap(part, difference));
+  RecordProperty("uniform_gap", std::format("{:.3e}", Gap(whole, difference)));
+  EXPECT_LT(Gap(whole, difference), 1e-5);
+  EXPECT_GT(Gap(part, difference), 1e-2);
+
+  // the 3-D run on the same Earth with no lateral structure, its total
+  // kernels: the same field
+  static_cast<void>(app::RunKernel(config(
+      {.name = "threed",
+       .model = R"("deck": "ball.deck", "viscosity": {"file": "uniform.nc"})"})));
+  const auto mine = KernelValues(field);
+  const auto theirs = KernelValues(dir_ / "out" / "threed_kernels" /
+                                   "site_viscosity_kernels.nc");
+  ASSERT_FALSE(mine.empty());
+  ASSERT_EQ(mine.size(), theirs.size());
+  auto worst = 0.0;
+  for (const auto& [key, values] : mine) {
+    ASSERT_TRUE(theirs.contains(key)) << key.second;
+    ASSERT_EQ(values.size(), theirs.at(key).size()) << key.second;
+    worst = std::max(worst, Departure(values, theirs.at(key)));
+  }
+  std::cout << std::format(
+      "[calibrated, lateral kernels] the field {:.3e} from the 3-D run's "
+      "total kernel at no lateral structure\n",
+      worst);
+  RecordProperty("field_gap", std::format("{:.3e}", worst));
+  EXPECT_LT(worst, 1e-6);
 }
 
 TEST_F(AppsTest, Kernel1DRecordsItsTrajectoryToo) {

@@ -123,8 +123,8 @@ nodes.
 ## Over MPI ranks
 
 Built with `SL3DPP_WITH_MPI` ([building.md](building.md), The MPI build),
-`sl3d solve` and `sl3d kernel` run under `mpiexec`, the same config on
-every rank:
+`sl3d solve`, `sl3d kernel` and `sl3d tangent` run under `mpiexec`, the
+same config on every rank:
 
 ```
 OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
@@ -135,8 +135,9 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
 
 - **What is distributed.** A 3D run, split over radius, one contiguous
   radial segment per rank with its threads inside: the static problem on
-  lateral moduli, the runs through time, and the kernels about them, by
-  either sweep. A 1D run is the first rank's alone, the other ranks
+  lateral moduli, the runs through time, the kernels about them, by
+  either sweep, and the tangent-linear runs. A 1D run is the first rank's
+  alone, the other ranks
   returning at once, and `love-numbers` refuses several ranks. `kernel`
   refuses on several ranks the 3D kernels its sweeps form on one process:
   those about a run under seismic sources, and the continuous sweep's
@@ -187,8 +188,9 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
   restarts").
 - **The trajectory store.** A `trajectory` block with a `directory` makes
   `solve` record its forward run into a store on disk, from which `kernel`
-  sweeps for any number of measurements without running the forward
-  problem again, the kept 3D states read back one at a time: the lever on
+  sweeps for any number of measurements, and about which `tangent` runs
+  for any number of directions, without running the forward problem
+  again, the kept 3D states read back one at a time: the lever on
   memory at large degree. With a `checkpoint` block beside it, a run
   stopped at the wall-time limit leaves its store incomplete to the node
   it stopped at, and the job that resumes it continues the store from the

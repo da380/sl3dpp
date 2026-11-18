@@ -12,6 +12,7 @@ sl3d <command> <config.json>
 | `love-numbers` | the SI Love numbers of a radial model | a plain-text table |
 | `solve` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem the run through time from the state at an end of the window, its nodes dates before present or times on the run's own clock; without a state, the response of a body without an ocean to the loads, the tide and the sources, elastic or viscoelastic, with the rotational feedback as asked; without gravity, a radial body's response to surface loads, by their weight, and seismic sources; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
 | `kernel` | adjoint sensitivity kernels of configured measurements of the problems `solve` solves, read from the same config with a `kernels` block: in the ice history, surface loads, a tide, the moment tensors of seismic sources, the viscosity and the elastic moduli; 1D or 3D as `solve`'s run | a directory of kernel files |
+| `tangent` | the tangent-linear run of the problems `solve` solves: the first-order change of a run along a direction in its inputs, read from the same config with a `perturbation` block (terms of the ice change, the loads, the tide and the seismic sources, the viscosity, the moduli, the state's sea level) and a `tangent` block; 1D or 3D as `solve`'s run | `solve`'s surface file, its fields their first-order changes, and a table of the changes of the config's measurements |
 
 ## Running sl3d
 
@@ -38,8 +39,9 @@ sl3d <command> <config.json>
 
 ### Over MPI ranks
 
-Built with the CMake option `SL3DPP_WITH_MPI`, `solve` and `kernel` run
-under `mpiexec` over several ranks, the same config on every rank:
+Built with the CMake option `SL3DPP_WITH_MPI`, `solve`, `kernel` and
+`tangent` run under `mpiexec` over several ranks, the same config on every
+rank:
 
 ```
 OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
@@ -64,8 +66,10 @@ reference model written beside a 3D run through time is stepped on rank
 0 alone, after the run. A failure on any rank ends the whole job, the
 message naming the rank. A 1D `kernel` run is the first rank's alone,
 as `solve`'s, and a 3D one refuses on several ranks what its sweeps form
-on one process (kernel, below). `love-numbers` refuses several ranks
-(exit status 2).
+on one process (kernel, below). A 1D `tangent` run is the first rank's
+alone likewise, and a 3D one is distributed as its forward run is, the
+direction in the Earth's parameters held by each rank over its own
+segment. `love-numbers` refuses several ranks (exit status 2).
 
 The results agree with a one-process run to round-off of the radially
 substructured solves (about 1e-12 relative), not bitwise, and within the
@@ -200,13 +204,13 @@ members.
 
 ### The problem
 
-Every config of `solve` and `kernel` names its problem in the required
-top-level member `problem`:
+Every config of `solve`, `kernel` and `tangent` names its problem in the
+required top-level member `problem`:
 
 | `problem` | What is solved | `times` |
 | --- | --- | --- |
-| `"static"` | the problem at one instant: the solve at the state's date on the elastic Earth, or without a state the body's elastic response, and its kernels | refused |
-| `"quasi_static"` | the problem stepped through the nodes of a `times` block: GIA through time, or without a state the body's viscoelastic response, and its kernels | required |
+| `"static"` | the problem at one instant: the solve at the state's date on the elastic Earth, or without a state the body's elastic response, with its kernels and its tangent-linear run | refused |
+| `"quasi_static"` | the problem stepped through the nodes of a `times` block: GIA through time, or without a state the body's viscoelastic response, with its kernels and its tangent-linear run | required |
 
 The rheology is the `model` block's business, and nothing is implied by
 the presence or absence of another block: a config without `problem` is
@@ -413,8 +417,8 @@ runs the 1D problem (The model block, below).
 
 ## The blocks
 
-`solve` and `kernel` read their configs as blocks, JSON objects each
-read by one piece of code for every command that takes it:
+`solve`, `kernel` and `tangent` read their configs as blocks, JSON objects
+each read by one piece of code for every command that takes it:
 `discretisation` (the degree the run is truncated at), `model` (the
 deck, its format, the lateral moduli and the 3D viscosity),
 `times` (the time nodes of a run through time), `forcing` (what drives
@@ -422,9 +426,11 @@ the run), `ocean` (the state, the sea level and the ice at one instant,
 the shorelines and the initial sea level's calibration), `solver` (the
 solves' tolerances, budgets and transforms, and the time step),
 `checkpoint` (a run's checkpoints), `output` (solve's files),
-`trajectory` (where the forward run is recorded, for the kernels) and
-`kernels` (the measurements and the kernels written), with `problem`,
-`gravity`, `rotation`, `moments` and `restart` beside them. A
+`trajectory` (where the forward run is recorded, for the kernels and the
+tangent-linear run), `kernels` (the measurements and the kernels
+written), `perturbation` (a direction in the run's inputs) and `tangent`
+(the files of the tangent-linear run along it), with `problem`, `gravity`,
+`rotation`, `moments` and `restart` beside them. A
 member a command does not take is refused ("is not a recognised
 member"), and so is a block's member given at the top level. For the
 block members the top-level reader lists (`lmax`, `sea_level`,
@@ -436,35 +442,41 @@ not a top-level member: it belongs in `ocean.sea_level`"), and for
 `state`, `ice_history` and `coupled` the members that hold what they
 would; any other is not recognised.
 
-One config serves both commands. `solve` reads a `kernels` block with the
-same reader as `kernel`, so that a fault in it is found before the run,
-and does not otherwise use it; `kernel` reads `output`, `checkpoint` and
-`restart` with `solve`'s readers, held to the run as `solve` holds them,
-and writes no surface file, exchange table or checkpoint.
+One config serves the three commands. Each reads the blocks of the
+others with their own readers, so that a fault in one is found whichever
+command runs, and does not otherwise use them: `solve` a `kernels`, a
+`perturbation` and a `tangent` block; `kernel` and `tangent` the members
+`output`, `checkpoint` and `restart`, held to the run as `solve` holds
+them, writing no file of `solve`'s `output` block, no exchange table and
+no checkpoint; `kernel` the `perturbation` and `tangent` blocks; and
+`tangent` the `kernels` block, whose measurements it takes where its
+own block lists none (tangent, below).
 
 Which command takes which:
 
-| Block or member | `solve` | `kernel` |
-| --- | --- | --- |
-| `problem` | `"static"` or `"quasi_static"`, required | as `solve` |
-| `model.deck`, `model.format` | yes | yes |
-| `model.viscosity`, `model.burgers` | quasi-static | as `solve` |
-| `model.moduli` | yes | yes |
-| `discretisation` | required: `lmax` | as `solve` |
-| `times` | quasi-static, required: dates before present, or times counted forwards in a `unit` | as `solve` |
-| `forcing` | `ice_change`, `load`, `tide` and `seismic`, any mix (`ice_change` with an ocean alone) | as `solve` |
-| `ocean` | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration (counting forwards, at `"at": "start"` and `date_kyr_bp`); absent, a body without an ocean | as `solve` |
-| `rotation`, `moments` | yes | yes |
-| `gravity` | `"full"` or `"none"`; `"none"` a radial run under seismic sources alone | `"full"` alone: `"none"` is refused |
-| `solver.rtol` | yes | yes (the adjoint solves' too) |
-| `solver.step_rtol`, `step_max_iterations` | in a 3D run (the static problem's on lateral moduli too) | as `solve` (the reversed steps' too) |
-| `solver.transform_degrees`, `cache_mb` | in a 3D run (the static problem's on lateral moduli too); in a 1D run whose config asks for lateral kernels (`kernels.lateral` true), taken and not used | as `solve` (the reversed steps' too); in a 1D run, the lateral kernels' grids |
-| `solver.scheme` | quasi-static | as `solve` |
-| `solver.step` | in a 3D run (the static problem's on lateral moduli too) | as `solve` |
-| `checkpoint`, `restart` | quasi-static | checked as `solve` checks them, not used |
-| `output` | a block, required: `surface`, `exchange`, `exchange_nodes`, `volume` | optional, checked as `solve` checks it, not used |
-| `trajectory` | optional: `directory` records the run into the trajectory store there; `record_stride` its stride | optional: `record_stride`, the forward run's recording; `directory` sweeps from the store of the run there, or records into it (The trajectory block, below) |
-| `kernels` | optional, checked as `kernel` checks it, not used | required: the measurements, the kernels and their directory (kernel, below) |
+| Block or member | `solve` | `kernel` | `tangent` |
+| --- | --- | --- | --- |
+| `problem` | `"static"` or `"quasi_static"`, required | as `solve` | as `solve` |
+| `model.deck`, `model.format` | yes | yes | yes |
+| `model.viscosity`, `model.burgers` | quasi-static | as `solve` | as `solve` |
+| `model.moduli` | yes | yes | yes |
+| `discretisation` | required: `lmax` | as `solve` | as `solve` |
+| `times` | quasi-static, required: dates before present, or times counted forwards in a `unit` | as `solve` | as `solve` |
+| `forcing` | `ice_change`, `load`, `tide` and `seismic`, any mix (`ice_change` with an ocean alone) | as `solve` | as `solve` |
+| `ocean` | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration (counting forwards, at `"at": "start"` and `date_kyr_bp`); absent, a body without an ocean | as `solve` | as `solve` |
+| `rotation`, `moments` | yes | yes | yes |
+| `gravity` | `"full"` or `"none"`; `"none"` a radial run under seismic sources alone | `"full"` alone: `"none"` is refused | `"full"` alone: `"none"` is refused |
+| `solver.rtol` | yes | yes (the adjoint solves' too) | yes (the tangent-linear solves' too) |
+| `solver.step_rtol`, `step_max_iterations` | in a 3D run (the static problem's on lateral moduli too) | as `solve` (the reversed steps' too) | as `solve` (the tangent-linear steps' too) |
+| `solver.transform_degrees`, `cache_mb` | in a 3D run (the static problem's on lateral moduli too); in a 1D run whose config asks for lateral kernels (`kernels.lateral` true), taken and not used | as `solve` (the reversed steps' too); in a 1D run, the lateral kernels' grids | as `solve` |
+| `solver.scheme` | quasi-static | as `solve` | as `solve` |
+| `solver.step` | in a 3D run (the static problem's on lateral moduli too) | as `solve` | as `solve` |
+| `checkpoint`, `restart` | quasi-static | checked as `solve` checks them, not used | as `kernel` |
+| `output` | a block, required: `surface`, `exchange`, `exchange_nodes`, `volume` | optional, checked as `solve` checks it, not used | as `kernel`: its files go where `tangent.output` says |
+| `trajectory` | optional: `directory` records the run into the trajectory store there; `record_stride` its stride | optional: `record_stride`, the forward run's recording; `directory` sweeps from the store of the run there, or records into it (The trajectory block, below) | as `kernel` |
+| `kernels` | optional, checked as `kernel` checks it, not used | required: the measurements, the kernels and their directory (kernel, below) | optional, checked as `kernel` checks it: its measurements' first-order changes are written where `tangent.measurements` is not given (tangent, below) |
+| `perturbation` | optional, checked as `tangent` checks it, not used | as `solve` | required: the direction (The perturbation block, below) |
+| `tangent` | optional, checked as `tangent` checks it, not used | as `solve` | required: its files, its method, its measurements and a calibrated run's derivative (tangent, below) |
 
 "In a 3D run" means a run on a model the `model` block makes 3D (solve
 says when); a 1D run (the static problem on a radial Earth included)
@@ -764,10 +776,11 @@ its files go into `kernels.output` (kernel, below).
 
 ### The trajectory block
 
-Where the forward run is recorded for the kernels, and how densely:
-`solve` records its run into a trajectory store, and `kernel` sweeps from
-that store without running the forward problem again, as many times as
-there are measurements to take, in other processes, on other days. The
+Where the forward run is recorded for the kernels and the tangent-linear
+runs, and how densely: `solve` records its run into a trajectory store,
+and `kernel` sweeps from that store, and `tangent` runs about it, without
+running the forward problem again, as many times as there are
+measurements or directions to take, in other processes, on other days. The
 store is the library's (`io::TrajectoryStore`); its on-disk form is
 [trajectory-store.md](trajectory-store.md).
 
@@ -852,6 +865,11 @@ run under seismic sources, and the continuous sweep's tide kernels of a
 3D run, are formed on one process (kernel, below), so their store is
 recorded on one rank too (by `solve` on one, or by `kernel` itself).
 
+**tangent.** As `kernel`: its tangent-linear run is about the complete
+store of this run where `trajectory.directory` holds one, the forward run
+not run; otherwise the forward run runs, recorded in memory or into the
+store, which is left in place. The summary says which, as `kernel`'s does.
+
 The kernels and values from a store are bitwise those of the same
 `kernel` run doing its forward run in memory at the same stride (the
 tests hold this within one process; FFTW's measured plans are each
@@ -863,8 +881,9 @@ forward run's numbers and of the contents of the files the config names:
 the members `solve`'s checkpoints hash (Checkpoints and restarts, below),
 and the seismic sources, the static problem's dates of its terms and the
 file inputs' formats beside them. The hash covers what determines the
-forward trajectory and nothing of the reverse sweep: the `kernels`,
-`output`, `checkpoint` and `trajectory` blocks, `restart`,
+forward trajectory and nothing of the reverse sweep or of a direction:
+the `kernels`, `perturbation`, `tangent`, `output`, `checkpoint` and
+`trajectory` blocks, `restart`,
 `solver.cache_mb`, the `outside_span` of the file inputs and of a
 `fault_file` term (which cannot change a run that runs: where `"refuse"`
 succeeds no read lay outside the span, and `"hold"` reads the same there)
@@ -872,7 +891,8 @@ and the paths are left
 out, and so is `solver.transform_degrees` on a radial model, where the
 forward run has no 3D step and the member sets only the grids of the
 sweep's lateral kernels (`kernels.lateral`); so one store serves every
-kernel config of one run, at any `transform_degrees` of a radial run,
+kernel config and every tangent config of one run, whatever their
+measurements and directions, at any `transform_degrees` of a radial run,
 and a run directory can move. The stride and the ranks are checked
 beside the hash, each with its own message. Two spellings of one input
 hash alike where they resolve to the same numbers: a static field load's
@@ -921,6 +941,240 @@ viscosity) 2 MB; at L = 64 a 3D state is of order 100 MB, and a run of
 81 nodes at stride 9 about 1 GB. Under seismic sources at L = 32
 (examples/configs/kernel_postseismic.json, 1D, 8 nodes) each node's
 record is 86 MB, 655 MiB in all. The summaries give each store's size.
+
+### The perturbation block
+
+A direction in a run's inputs: what `tangent` takes the tangent-linear run
+along, and what `kernel`'s kernels pair with. The block MIRRORS THE
+INPUTS. Its members are the config's own, under the same names, in the
+same file forms and units, and are read by the readers of the things they
+perturb; each gives a CHANGE of what its counterpart in the config gives.
+The members together are one direction, their sum. A run of `solve` with
+the block's members added to its inputs, epsilon times, differs from the
+run by epsilon times the tangent-linear run along the block, to first
+order in epsilon: that is what the block means, and what the tests hold
+it to, member by member.
+
+| Member | Form | The change it gives |
+| --- | --- | --- |
+| `perturbation.forcing.ice_change` | a list of terms, as `forcing.ice_change` | of the ice thickness at each node, m: the sum of its terms, each read as a term of the run's own list is (below) |
+| `perturbation.forcing.load` | a list of surface loads, as `forcing.load` | of the surface loads at each node, kg m^-2, each term by its own `water_budget`, `moves_solid_surface` and `density_kg_m3` |
+| `perturbation.forcing.tide` | a list of coefficients, as `forcing.tide` | of the tidal potential's coefficients at each node, m^2 s^-2 |
+| `perturbation.forcing.seismic` | a list of sources, as `forcing.seismic` | of the moment tensors acting at each node, N m: a `point`, a `fault` or a `fault_file`, at any place, not only the run's own sources' |
+| `perturbation.model.viscosity` | `{"file": path}`, a planetmodel model file, as `model.viscosity`'s | of the NATURAL LOGARITHM of the viscosity, delta ln eta, a pure number, read as stored: the file's field `ln_viscosity` (every relaxing branch's alike) and its fields `ln_viscosity_branch_<b>` (one branch's alone), which add; on every rheology |
+| `perturbation.model.moduli` | `{"file": path}`, a planetmodel model file, as `model.moduli`'s | of the bulk modulus and the unrelaxed shear modulus, Pa: the file's fields `kappa` and `mu`, either alone. The RELAXATION TIMES ARE HELD, not the viscosities: a Maxwell layer's viscosity moves with its shear modulus (The moduli, below) |
+| `perturbation.ocean.sea_level`, `perturbation.ocean.topography` | a file input, as the `ocean` block's | of the state's sea level, m, given by the member the run's own `ocean` block gives its sea level by |
+
+At least one member is needed, and each of `forcing`, `model` and `ocean`
+that is given holds at least one of its own. The block is the same for
+every command that reads it, and is out of the run's hashes: a run
+recorded into the trajectory store serves any direction (The trajectory
+block, above).
+
+**The forcing.** `perturbation.forcing` is read by the reader of the
+`forcing` block, on the run's clock: every kind of term, every member,
+every default and every refusal is that block's (solve, The forcing
+block), the terms' times dates in a dated run and the static problem and
+times on the run's own clock in one counting forwards, a history beside a
+term as beside a term of the run. A term is read at the nodes the run
+steps, as the run's own terms are, and is linear in what it gives:
+
+- a `change` term is its file's field, and a `thickness` term its file's
+  field less its own value at the state's instant, as in the run;
+- a `cap_fraction` is its fraction of the STATE's ice, as in the run;
+- a `cap_thickness` is its Gaussian as it stands. The run holds a melting
+  cap to the ice the state has (it takes no more than there is); a
+  direction takes no ice, and is not held: where the state holds no ice,
+  a run with a melting cap added does not follow it;
+- a load, a tide coefficient and a source are their term's pattern times
+  its factor at the node.
+
+The terms need not be terms the run has. A run under an ice history alone
+takes a direction in a tide or in a seismic source, and its files then
+hold what a run with that term added would (a `toroidal_potential` under
+a source, say). What the run's state does not take, a direction of it
+does not either, by the same refusals: an ice change needs an ocean; with
+the state at the window's end (`"at": "end"`) the ice changes are
+`thickness` terms, and nothing acts beside the ice.
+
+**The ice at the first node** is read as `kernel`'s `thickness_dual`
+reads it (kernel, The ice and the state). With the state held (at the
+window's start, and in the static problem) a change at the first node is
+the ice change there with the state's ice held, a load at the first node
+under frozen shorelines and ice the start's solve takes under migrating
+ones. With the state at the window's end, the run starts from the first
+node's ice, which moves with it. A tangent file's `ice_views` says which
+(`state_held` or `run_start_moves`), as the kernels' ice file does, and
+either way the direction paired with `thickness_dual` over the nodes is
+the change of the measurement.
+
+**Jumps.** A term of the direction that jumps (an onset, a time of a
+`previous` history, a stored time of a file read so: solve, Jumps of the
+forcing) must jump where the run's own forcing does, at a node of the
+window or between two: the run steps a left limit and a right limit
+there, and the direction is read at both. A jump of the direction's alone
+is refused at its member: the run has no pair of nodes for it, and the
+tangent-linear run along it is not built (a term of zero amplitude with
+that jump, added to the run's `forcing`, gives the run the pair).
+
+**The viscosity.** `perturbation.model.viscosity.file` is a planetmodel
+model file on the deck's body, as `model.viscosity`'s is (3D viscosity
+models, above), of changes of the NATURAL LOGARITHM of the viscosity,
+pure numbers: a factor of ten is ln 10 = 2.303. The values are taken as
+stored, whatever unit a field declares. planetmodel's vocabulary does not
+name these fields, so a file written by planetmodel states each one's spec
+beside it: a scalar, dimensionless, and its meaning (C++
+`ModelFile::AddField(name, FieldSpec{SCALAR, units::DIMENSIONLESS,
+meaning}, layers)`, as examples/MakeSyntheticPerturbation.cpp writes
+`ln_viscosity`). Its fields are
+
+| Field | The change it holds |
+|---|---|
+| `ln_viscosity` | delta ln eta of every relaxing branch of a point alike: every relaxation time there multiplied by exp(delta ln eta), the branches' moduli held. For a Maxwell body, the change of ln of its viscosity |
+| `ln_viscosity_branch_<b>` | delta ln eta_b of branch b alone, the other branches held: eta_b = mu_b tau_b is the branch's viscosity, its modulus mu_b times its relaxation time tau_b, and with mu_b held delta ln eta_b = delta ln tau_b. The branches are numbered as `kernel` numbers its `K_branch_<b>` and `K_ln_eta_<b>` (kernel, below): a Maxwell body's one branch is 0; a Burgers body's slower term 0 and its faster 1; a prony deck's in the deck's order |
+
+and the fields of one file ADD: a branch's change is `ln_viscosity` plus
+its own `ln_viscosity_branch_<b>`. The member is taken on every rheology:
+a Maxwell deck (with or without `model.viscosity`), a prony deck, a
+burgers deck and the Burgers regions of `model.burgers`.
+
+The fields are the changes `kernel`'s viscosity kernels pair with. The
+radial kernels `K_branch_<b>` are per Pa s of the branch's viscosity, so
+with delta eta_b = eta_b delta ln eta_b the change of a measurement is the
+sum over the branches and the rows of W_m3 K_branch_<b> eta_b delta ln
+eta_b, eta_b = mu_b tau_b in Pa s at the row's radius (a Maxwell body's
+eta_0 is its viscosity; a prony deck's eta_b is its `relaxation_strength`
+times the unrelaxed shear modulus times its `relaxation_time`); the field
+kernels `K_ln_eta_<b>` are in ln eta_b and pair with delta ln eta_b
+directly, dJ = the sum over the branches of the integral of K_ln_eta_<b>
+delta ln eta_b dV. `ln_viscosity` equal to one everywhere is the change
+`uniform_log_viscosity_pairing` is the pairing with.
+
+Each field is the change as it stands, its radial part and its lateral
+part alike, so no `reference` is taken (the member is refused): a
+viscosity file of the run with every value multiplied by exp(epsilon
+delta ln eta) is the run with a `ln_viscosity` added; a burgers deck with
+its two viscosities multiplied by a factor, or a prony deck with every
+`relaxation_time` multiplied by it, is the run moved by a uniform
+`ln_viscosity` of the factor's logarithm; and a prony deck with one
+branch's `relaxation_time` multiplied is that branch's
+`ln_viscosity_branch_<b>`. A field stored as a function of the radius
+alone is a radial change, which a 1D run and a 3D run take; a field
+stored on an angular grid varies laterally and is a 3D run's alone (a 1D
+run refuses it: its change of a measurement is `kernel`'s lateral
+kernels, `kernels.lateral`, paired with it). A 1D run on the deck's own
+viscosity takes the member too, a radial model file being how a radial
+profile is given. In a 3D run the fields are read at the points the run
+samples its lateral structure at, the memory nodes of its coupling; a
+layer the file gives no field on is not changed, and a change where
+nothing relaxes (an elastic layer) changes nothing. Where the run carries
+no memory nodes, the change is not taken, as the run's own
+`model.viscosity` is not: under lateral moduli the element holding the
+centre is never carried, and where it is viscous a change of the deck's
+viscosity moves the run there and the member does not (a share of the
+response of about 1e-5 on a ball viscous to its centre; none where the
+core is elastic).
+
+Refused at the member's `file`, each named: a field `ln_viscosity_branch_<b>`
+of a branch the run's rheology does not have, and one that is not zero at
+a point that relaxes without that branch (a Maxwell layer beside Burgers
+bodies has branch 0 alone, where `kernel` writes its kernel in
+`K_branch_0`: `ln_viscosity_branch_1` must be zero there); a field
+`viscosity` (the change is of the logarithm: name the field
+`ln_viscosity`); a field named as a parameter a prony or burgers deck
+states (`relaxation_strength_<k>`, `relaxation_time_<k>`,
+`kelvin_viscosity`, `kelvin_modulus_fraction`, a steady viscosity): a
+direction in those parameters is not built, as `kernel`'s kernels in them
+are not (they are the branches' through the derivatives of the branches
+in those parameters, which no command forms); and any other field but
+`mu` and `kappa`, which are the moduli's and which one file may hold
+beside these for `perturbation.model.moduli`. The member is refused in
+the static problem, whose Earth is elastic.
+
+**The moduli.** `perturbation.model.moduli.file` is a planetmodel model
+file on the deck's body whose fields `kappa` and `mu` (either alone) hold
+delta kappa and delta mu in Pa: the changes of the moduli the run uses,
+as they stand (no `reference`).
+
+**A change of the moduli holds the relaxation times, not the
+viscosities.** The fields act as `model.moduli`'s perturbation does: the
+unrelaxed shear modulus and every branch's modulus scale alike, the
+branch fractions and the relaxation times tau_b held. Every branch's
+viscosity eta_b = mu_b tau_b therefore moves with its modulus: along
+delta mu a Maxwell layer's viscosity changes by eta delta mu / mu. A
+change of mu with the VISCOSITY held is the two members together: this
+one beside a `perturbation.model.viscosity` whose `ln_viscosity` is minus
+delta mu / mu. The fields are what `kernel`'s `K_kappa` and `K_mu` pair
+with, which hold the relaxation times likewise.
+
+The inputs they mirror are the moduli themselves: in a 1D run the deck's
+(a deck whose moduli are raised by the change, its viscosity with its
+shear modulus, is the run with the perturbation added); in a 3D run the
+moduli file's, which
+the run takes as RELATIVE lateral perturbations about a reference of the
+file's own and applies to the deck's radial moduli (The model block,
+above), so that a moduli file with delta mu added to its `mu` moves the
+run's shear modulus by delta mu where the file is built from the deck's
+radial moduli and the reference does not move with the change: a change
+of no lateral mean under `"reference": "lateral_mean"`, any change under
+`"file_radial"`. A radial field is a radial change (a 1D run's and a 3D
+run's); a lateral one a 3D run's alone. The fluid takes no shear, and a 3D
+run takes lateral moduli in neither the fluid nor the element holding the
+centre, a direction's no more than its own. A 3D run carries its lateral
+structure in its viscous elements and those its own lateral moduli
+perturb: a change of the moduli that is not zero in another element (an
+elastic lithosphere under a lateral viscosity alone) is refused at the
+member, naming the depth, and is not built.
+
+**The state's sea level.** `perturbation.ocean` holds one member, a file
+input (`file`, `format`, `variable`, `outside_span`) read at the state's
+instant as the state's own is: `sea_level`, the change of the sea level
+in metres, where the run's `ocean` block gives `sea_level`; `topography`,
+the change of the topography, where it gives `topography` (the sea
+level's change is then minus it, the state's ice held). The other of the
+two is refused, naming this one. What the change is of follows the run:
+
+- the state at the window's start, or the static problem: of the initial
+  sea level, which moves the run through the shorelines it places, and
+  nothing under frozen shorelines but the file's `initial_sea_level`;
+- a calibrated run (`"at": "end"`), the total derivative (the default):
+  of the sea level the run is calibrated to, the TARGET, what `kernel`'s
+  `target_sea_level_dual` pairs with;
+- a calibrated run, the partial derivative (`tangent.calibration`): of
+  the calibrated initial sea level itself, which the partial derivative
+  otherwise holds, what `initial_sea_level_dual` pairs with.
+
+`perturbation.ocean.ice` is refused: a direction of the state's ice is
+not built (a change of the ice at the run's nodes is a term of
+`perturbation.forcing.ice_change`). `perturbation.ocean.land` is refused:
+the land held is a mask, and has no direction.
+
+**Files and the run's grid.** A surface file is carried onto the run's
+grid as the run's own files are, and a model file is read at the radii
+and, in a 3D run, the angular points at which the run samples its
+structure, by the file's own interpolation rules. Where a model file of a
+lateral field is not on the run's sampling grid, a file of the run's
+viscosity times exp(epsilon delta ln eta) is the run with the
+perturbation added to the files' interpolation error, not to rounding
+(up to 4e-3 of the tangent-linear run's fields for files on the degree-8
+Gauss–Legendre grid, read between its points by the linear rule, in a
+run at `lmax` 8, measured); on that grid (the Gauss–Legendre grid the
+run's coupling samples on, of degree 1.5 `lmax`, or each depth's own
+under `solver.transform_degrees`) the two are one. A file outside the run's window
+or of another body is refused at the member, as the run's own would be.
+
+```json
+"perturbation": {
+  "forcing": {
+    "ice_change": [{"cap_fraction": {"latitude": 60, "longitude": 275,
+                                     "width_deg": 12, "fraction": 0.05},
+                    "history_kyr_bp": [[21, 0], [14, 1], [7, 0]]}],
+    "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0}]
+  },
+  "model": {"viscosity": {"file": "weak_zone.nc"}},
+  "ocean": {"topography": {"file": "sea_floor_change.nc"}}
+}
+```
 
 ## love-numbers
 
@@ -3490,3 +3744,281 @@ in the load and in the moduli.
 The moment and viscosity kernels of a GPS station's eastward
 displacement 20 years after a thrust, on a body without an ocean and on
 the run's own clock in years.
+
+## tangent
+
+The tangent-linear run of the problems `solve` solves: the first-order
+change of a run along a direction in its inputs. A tangent config is a
+`solve` config with a `perturbation` block, the direction (The
+perturbation block, above), and a `tangent` block, the files. The forward
+run it is about is `solve`'s run of the same blocks, built by the same
+pieces and recorded or read back as `kernel`'s is (in memory, or in the
+trajectory store of `trajectory.directory`: The trajectory block, above):
+the static problem (a run of one node on the elastic Earth) or the
+quasi-static one, with an ocean or without one, under any forcing, with
+frozen or migrating shorelines, its times dated or on its own clock, and
+1D or 3D as the `model` block makes it.
+
+By default (`tangent.method` `"discrete"`, as `kernels.method`'s default)
+the run is the derivative of the stepped run: of what `solve` computes,
+node for node and stage for stage under every `solver.scheme`, about the
+run's own states and, under migrating shorelines, its own shorelines
+(each stage of the two-stage step about its own). It is the forward mode
+of which `kernel`'s discrete adjoint is the transpose (docs/adjoints.md
+§8, §10): for any measurement, the kernels of `kernel` (by its default
+method, `"discrete"`) paired with the perturbation are the change the
+tangent-linear run gives it, to the solves' rounding. With `"continuous"`
+the run is the continuous one (The method, below), which differs from it
+along a direction in the viscosity alone. With the shorelines held, the run is exact
+while no cell's flotation flips between the run and the run moved along
+the direction; a direction in the forcing of a run under frozen
+shorelines is exact at any size, the problem being linear in it.
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| the shared blocks | | | as for `solve` (The blocks, above); `output`, `checkpoint` and `restart` checked as `solve` checks them and not used |
+| `perturbation` | object | required | the direction (The perturbation block, above) |
+| `tangent.output` | object | required | the files, a block of the members of `solve`'s `output` block that a tangent-linear run writes: `surface` (required), `fields` and `smoothing` (The output block, above) |
+| `tangent.method` | word | `"discrete"` | `"discrete"` or `"continuous"`, the words and the default of `kernels.method` (The method, below) |
+| `tangent.measurements` | list | absent | the measurements whose first-order changes are written, a list as `kernels.measurements` (kernel, Measurements); absent, the `kernels` block's where the config has one (The measurements, below) |
+| `tangent.calibration` | object | absent | a calibrated run's alone (`"at": "end"`; refused on any other run): which derivative the run is, and the iteration for the total one (Calibrated runs, below) |
+| `tangent.calibration.derivative` | word | `"total"` | `"total"`: the initial sea level calibrated again as the inputs move; `"partial"`: the calibrated initial sea level held |
+| `tangent.calibration.iterations` | integer >= 1 | 20 | the most passes of the linearised calibration, each a tangent-linear run; running out is an error; refused beside `"partial"` |
+| `tangent.calibration.rtol` | number > 0 | 1e-8 | its convergence: the largest change of the initial sea level's change between two passes below this times its largest value; refused beside `"partial"` |
+| `kernels` | object | absent | `kernel`'s block, read as `kernel` reads it (whole: its `parameters` and `output` required as there); its measurements are the run's where `tangent.measurements` is absent, and nothing else of it is used |
+
+`tangent.output.exchange`, `exchange_nodes` and `volume` are refused: the
+exchange tables and the response inside the body of a tangent-linear run
+are not built. A run
+without gravity (`"gravity": "none"`) is refused at `gravity`: its
+tangent-linear run is not built. What a direction cannot be is refused at
+the member of the `perturbation` block (above), the model files' when the
+config is read and the Earth built, the rest once the forward run is
+recorded.
+
+### The files
+
+`tangent.output.surface` is the surface file `solve` writes for the run
+(solve, The static problem, The run through time), on the same grid and
+time axis, with the same fields under the same names, units and layout,
+each holding the FIRST-ORDER CHANGE of `solve`'s field along the
+direction: a `solve` file of the run moved by epsilon times the
+perturbation is `solve`'s file plus epsilon times this one, to first
+order.
+
+| Field | What it holds |
+| --- | --- |
+| `relative_sea_level_change`, `displacement`, `tangential_potential`, `potential` | the changes of the response, at each node through time |
+| `toroidal_potential` | its change, where the run or the direction has one (seismic sources, a 3D run) |
+| `load`, `load_in_water_budget`, `load_outside_water_budget`, `solid_surface_change` | the direction's loads applied, where it has any |
+| `ice_change` | the static problem: the direction's ice change (zero without one) |
+| `initial_sea_level` | through time with an ocean: the change of the initial sea level the run starts from: the direction's (`perturbation.ocean`), zero without one; of a calibrated run's total derivative, the change of the calibrated initial sea level the linearised calibration found |
+| `displacement_east`, `displacement_north`, `<field>_smoothed` | with `fields` and `smoothing` of `tangent.output`: the changes of those fields, which are linear in the response |
+
+The ocean function is left out: a tangent-linear run holds the run's own.
+The radial reference model's fields of a 3D run are `solve`'s alone. The
+angular velocity's change is in the metadata, under `solve`'s names
+(`omega_x_rad_s`, ...), and the node's closure there is the
+tangent-linear step's own (`step_iterations`, `step_residual`). Each
+field's `long_name` begins "the first-order change along the perturbation
+of:", and the metadata of `solve`'s file (the config, the model, the
+state's inputs, the run's own forcing, the nodes, the scheme) say what
+run it is about. Beside them:
+
+- `tangent`: what the fields are, and `tangent_method`: `discrete` or
+  `continuous`;
+- `perturbation_<member>` for each member of the block
+  (`perturbation_ice_change`, `perturbation_load`, `perturbation_tide`,
+  `perturbation_seismic`, each term described as the run's own are and
+  joined by `; `; `perturbation_viscosity` and `perturbation_moduli`, the
+  files; `perturbation_sea_level` or `perturbation_topography`, the input
+  as read);
+- `ice_views`, where the direction moves the ice: `state_held` or
+  `run_start_moves` (The perturbation block, The ice at the first node);
+- of a calibrated run, `calibration_derivative` (`total` or `partial`)
+  and, for the total one, `calibration_tangent_runs` (the tangent-linear
+  runs it took) and `calibration_tangent_update` (the last pass's
+  relative change);
+- `initial_sea_level`, where the change of the initial sea level came
+  from.
+
+**The measurements.** A tangent-linear run needs of `kernel`'s block the
+measurement list alone, and takes it by either of two members:
+`tangent.measurements`, a list of the form of `kernels.measurements`
+(kernel, Measurements), for a config that asks no kernels; or, where the
+`tangent` block has none, the `kernels` block's own, so that a config
+written for `kernel` gives `tangent` the same measurements with nothing
+repeated. With both, `tangent.measurements` is the run's list (the
+`kernels` block is still read and held to the run, as every command does).
+With neither the run writes its surface file alone. Each measurement is
+read off the forward run and its first-order change along the direction
+formed: the measurement's duals paired with the tangent-linear run's
+fields at their nodes (for a `decay_time`, the fit's own linearisation).
+They are listed in the summary and written beside the surface file as
+`<surface's stem>_measurements.txt`: under a header of `#` lines (the
+program and version, the creation time, the config, `# method
+<discrete|continuous>`, of a calibrated run `# calibration
+<total|partial>`, a line `# perturbation <member> <description>` per
+member, and which list the measurements are), a row per measurement,
+
+```
+name type value_si change_si
+```
+
+the forward value and the change, in the measurement's SI unit. By the
+discrete method the change is what `kernel`'s kernels of that measurement
+(by its discrete method) give when paired with the perturbation, each as
+its file says it pairs (kernel, The kernels): the two commands on one
+config are a check of each other, and the tests hold them to rounding.
+
+### The method
+
+`tangent.method` takes the words of `kernels.method`, with its default.
+
+- `"discrete"` (the default): the derivative of the stepped run, under
+  every scheme and along every direction, the transpose of `kernel`'s
+  discrete kernels.
+- `"continuous"`: the linearised equations' run, the derivative in the
+  continuous sense. A change of a relaxation time drives it as it drives
+  the continuous equations, by the memory's relaxation rate over the step
+  ((d - m_b) delta itau_b / itau_b, stepped by the scheme), where the
+  discrete run differentiates the step's own weights in the relaxation
+  time. It converges to the discrete run, and both to the derivative of
+  the continuous problem, as the steps shorten against the relaxation
+  times, at the order of the step (second, under the exponential
+  trapezoid); at a finite step it is neither the derivative of the stepped
+  run nor the exact transpose of `kernel`'s continuous kernels.
+
+The two differ along a direction in the viscosity
+(`perturbation.model.viscosity`) alone. Along the forcing, the state's
+sea level and the moduli (whose change holds the relaxation times, and
+with them the step's weights) the two are one run, and `"continuous"`
+gives the discrete run's files to rounding. The continuous run along a
+direction in the viscosity is built for the one-stage scheme and is
+refused at `tangent.method` under `"sdirk2"`, the default scheme: state
+`"scheme": "exponential_trapezoid"` in the `solver` block, or take the
+discrete method.
+
+### Calibrated runs
+
+A calibrated run's initial sea level (`"at": "end"`) is not an input:
+`solve` finds it again for every run, so the derivative of what `solve`
+computes has its change in it (kernel, Calibrated runs).
+
+- `"derivative": "total"` (the default). The run is the derivative
+  between runs that each calibrate. The change of the calibrated initial
+  sea level along the direction is found by the LINEARISED CALIBRATION:
+  with xi(t_f) the run's sea level change at the window's end and A its
+  dependence on the initial sea level S0, (I + A) dS0 = dS_f - d xi(t_f),
+  the right side the target's change less the run's own change along the
+  direction (docs/adjoints.md §22). It is solved by tangent-linear runs:
+  one along the direction with the initial sea level held, then one along
+  each iterate of dS0 alone, iterated with Anderson mixing until its
+  change is below `tangent.calibration.rtol`, and last the run along the
+  direction and dS0 together, which is written. It is the transpose of
+  the iteration `kernel` finds its multiplier by, and takes about as many
+  passes (5 to 7 tangent-linear runs in all at the default tolerance on
+  the tests' runs, each about a forward run's cost). An iteration that
+  does not converge within `tangent.calibration.iterations` is refused at
+  the block, with its last change, and nothing is written. The file's
+  `initial_sea_level` is dS0, and `perturbation.ocean` moves the target.
+- `"derivative": "partial"`. The calibrated initial sea level is held, in
+  one run; `perturbation.ocean` is then a change of it, and the file's
+  `initial_sea_level` that change.
+
+Under frozen shorelines the run does not depend on its initial sea
+level: the total run is one tangent-linear run, the partial one's, and
+the two differ in `initial_sea_level` alone (dS0 = dS_f - d xi(t_f)
+against the direction's own). The total run is the calibrated run's as
+far as the calibration holds its target (`ocean.calibration.rtol`), as
+the total kernels are.
+
+### Over MPI ranks
+
+A 1D run is the first rank's alone. A 3D run is distributed over radial
+segments as its forward run is: every rank steps the tangent-linear run
+over its own segment, the direction in the viscosity and the moduli read
+by each rank at its own memory nodes, the linearised calibration's
+passes collective, and the first rank writes the files. The results are
+the one-process run's to the round-off of the substructured solves.
+
+### Summary
+
+`<what the config was taken to mean>; <the inputs as read>; wrote
+<surface> (the [continuous ]tangent-linear run along the perturbation's
+<members>)`,
+the members the block's by name (`ice_change`, `load`, `tide`, `seismic`,
+`viscosity`, `moduli`, `sea_level` or `topography`); before the closing
+parenthesis, of a calibrated run, `; total derivative, the initial sea
+level calibrated again[, its change in <n> tangent-linear run(s)]` (the
+runs given under migrating shorelines) or `; partial derivative, the
+calibrated initial sea level held`; then, with measurements, `; the
+measurements' first-order changes in <table>: <name> <change> <unit>,
+...`; then the trajectory store's account, as `kernel`'s.
+
+### Not built
+
+Named where they are refused: the tangent-linear run of a run without
+gravity; a direction of the state's ice (`perturbation.ocean.ice`); a
+direction in the parameters a prony or burgers deck or `model.burgers`
+states (the branches' viscosities are the directions built); the
+continuous run along a direction in the viscosity under the two-stage
+scheme; a lateral direction of the viscosity or the moduli about
+a radial run; a change of the moduli in an elastic element a 3D run
+carries no lateral structure in; a direction that jumps where the run's
+forcing does not; exchange tables and the response inside the body of a
+tangent-linear run. The second-order kernels (a kernel's change along a
+direction) are written by no command; the library has them
+(docs/adjoints.md §9, §11, §14).
+
+### Examples
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "earth.deck"},
+  "discretisation": {"lmax": 32},
+  "times": {"start_kyr_bp": 20.0, "nodes": 41},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
+  "perturbation": {
+    "model": {"viscosity": {"file": "weak_upper_mantle.nc"}}
+  },
+  "tangent": {
+    "output": {"surface": "out/weak_upper_mantle.nc"},
+    "measurements": [
+      {"type": "relative_sea_level_point", "name": "fremantle",
+       "latitude": -32.05, "longitude": 115.74}
+    ]
+  }
+}
+```
+
+The change of every field of a deglaciation on a radial Earth along a
+change of ln viscosity given as a radial model file (its field
+`ln_viscosity`), and of the sea level at Fremantle at the present. With
+the list in a `kernels` block instead (beside its `parameters`
+`["viscosity"]` and its `output`), `sl3d kernel` on the same config
+predicts that change by its viscosity kernel paired with the direction.
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "earth.deck"},
+  "discretisation": {"lmax": 32},
+  "times": {"start_kyr_bp": 20.0, "nodes": 41},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "end", "shorelines": "migrating",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
+  "perturbation": {
+    "forcing": {"ice_change": [{"thickness": {"file": "thicker_laurentide.nc"}}]}
+  },
+  "tangent": {"output": {"surface": "out/thicker_laurentide.nc"}}
+}
+```
+
+A calibrated run under migrating shorelines along a change of its ice
+history, a file of thickness on a time axis as the history's own is: the
+total derivative, the initial sea level calibrated again, the file's
+`initial_sea_level` its change.

@@ -11,8 +11,11 @@ add_library(sl3d_app STATIC
   RunHash.cpp
   Trajectory.cpp
   Outputs.cpp
+  Recorded.cpp
   SolveCommand.cpp
   KernelCommand.cpp
+  Perturbation.cpp
+  TangentCommand.cpp
   LoveNumbersCommand.cpp
   Ranks.cpp)
 target_include_directories(sl3d_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

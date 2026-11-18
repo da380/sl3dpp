@@ -179,9 +179,10 @@ class TangentLinearSolver {
     /// evolution under Sdirk2 the discrete run steps the tangent state by
     /// the scheme's two stages, each driven by the weights' derivatives at
     /// the stage's length about the forward stage's states; the continuous
-    /// drive of a direction in the relaxation times or the moduli is not
-    /// built there and is refused (a direction in the forcing alone is the
-    /// same run by either method).
+    /// drive of a direction in the relaxation times is not built there and
+    /// is refused (a direction in the forcing or the moduli is the same
+    /// run by either method: the moduli move with the relaxation times,
+    /// and so the step's weights, held).
     AdjointMethod method = AdjointMethod::Discrete;
     double rtol = 1e-9;
     int anderson_memory = 5;

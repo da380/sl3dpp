@@ -7,9 +7,9 @@
  * ocean or without one, under any mix of an ice change, surface loads, a
  * tide and seismic sources, radial or, as the `model` block makes it, 3-D
  * (a lateral viscosity, lateral moduli or both). Its snapshots are
- * recorded, in memory or into the trajectory store of the `trajectory`
- * block (Trajectory.hpp), from which a run of the same forward problem
- * sweeps again without running it, and one reverse sweep per measurement
+ * recorded (Recorded.hpp), in memory or into the trajectory store of the
+ * `trajectory` block (Trajectory.hpp), from which a run of the same forward
+ * problem sweeps again without running it, and one reverse sweep per measurement
  * of the library's derivative classes (AdjointSolver, AdjointSolver3D)
  * gives the kernels
  * the `kernels` block names: in the ice history, in a surface load, in
@@ -46,6 +46,7 @@
 #include "Input.hpp"
 #include "Outputs.hpp"
 #include "Ranks.hpp"
+#include "Recorded.hpp"
 #include "Trajectory.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Adjoint3D.hpp"
@@ -400,6 +401,78 @@ std::vector<KernelParameter> ReadParameters(const Json& block, const Run& run) {
 
 }  // namespace
 
+CalibratedDerivative ReadCalibratedDerivative(const Json& calibration,
+                                              const Run& run,
+                                              std::string_view pass,
+                                              std::string_view partial,
+                                              std::string_view iteration) {
+  if (!run.Calibrating()) {
+    Fail(calibration,
+         "chooses the derivatives of a calibrated run, the initial sea "
+         "level re-calibrated or held, and this run does not calibrate: "
+         "its state is not at the window's end (`ocean.at`: \"end\")");
+  }
+  Allow(calibration, {"derivative", "iterations", "rtol"});
+  auto out = CalibratedDerivative{};
+  if (Has(calibration, "derivative")) {
+    out.total = Choice<bool>(calibration.At("derivative"),
+                             {{"total", true}, {"partial", false}});
+  }
+  if (!out.total) {
+    for (const auto* name : {"iterations", "rtol"}) {
+      if (Has(calibration, name)) {
+        Fail(calibration.At(name),
+             std::format("is of the iteration for {}, which {}", iteration,
+                         partial));
+      }
+    }
+  }
+  out.iterations = Integer(calibration, "iterations", 20);
+  if (out.iterations < 1) {
+    Fail(calibration.At("iterations"),
+         std::format("is fewer than one {}", pass));
+  }
+  out.rtol = Number(calibration, "rtol", 1e-8);
+  if (!(out.rtol > 0.0)) {
+    Fail(calibration.At("rtol"), "is not a positive tolerance");
+  }
+  return out;
+}
+
+std::vector<MeasurementSpec> ReadMeasurements(const Json& measurements,
+                                              const Run& run) {
+  auto out = std::vector<MeasurementSpec>{};
+  const auto& items = measurements.AsArray();
+  if (items.empty()) Fail(measurements, "holds no measurements");
+  for (auto k = std::size_t{0}; k < items.size(); ++k) {
+    out.push_back(ReadSpec(items[k], k, run));
+  }
+  // A name is the stem of its output files in the output directory, so it
+  // must be a plain file name, and one only one measurement uses.
+  auto names = std::set<std::string>{};
+  for (auto k = std::size_t{0}; k < items.size(); ++k) {
+    const auto& name = out[k].name;
+    const auto& where = MemberOr(items[k], "name");
+    const auto plain = !name.empty() && name.front() != '.' &&
+                       std::ranges::all_of(name, [](char c) {
+                         return std::isalnum(static_cast<unsigned char>(c)) ||
+                                c == '_' || c == '-' || c == '.';
+                       });
+    if (!plain) {
+      Fail(where, std::format("\"{}\" is not a plain file name (letters, "
+                              "digits, '_', '-' and '.', not leading '.'): "
+                              "it names the measurement's output files",
+                              name));
+    }
+    if (!names.insert(name).second) {
+      Fail(where, std::format("\"{}\" names another measurement too; their "
+                              "output files would collide",
+                              name));
+    }
+  }
+  return out;
+}
+
 KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
                               const std::filesystem::path& directory) {
   if (!block.IsObject()) {
@@ -443,66 +516,16 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
            "\"moduli\"");
     }
   }
-  const auto& measurements = block.At("measurements");
-  const auto& items = measurements.AsArray();
-  if (items.empty()) Fail(measurements, "holds no measurements");
-  for (auto k = std::size_t{0}; k < items.size(); ++k) {
-    out.measurements.push_back(ReadSpec(items[k], k, run));
-  }
-  // A name is the stem of its output files in the output directory, so it
-  // must be a plain file name, and one only one measurement uses.
-  auto names = std::set<std::string>{};
-  for (auto k = std::size_t{0}; k < items.size(); ++k) {
-    const auto& name = out.measurements[k].name;
-    const auto& where = MemberOr(items[k], "name");
-    const auto plain = !name.empty() && name.front() != '.' &&
-                       std::ranges::all_of(name, [](char c) {
-                         return std::isalnum(static_cast<unsigned char>(c)) ||
-                                c == '_' || c == '-' || c == '.';
-                       });
-    if (!plain) {
-      Fail(where, std::format("\"{}\" is not a plain file name (letters, "
-                              "digits, '_', '-' and '.', not leading '.'): "
-                              "it names the measurement's output files",
-                              name));
-    }
-    if (!names.insert(name).second) {
-      Fail(where, std::format("\"{}\" names another measurement too; their "
-                              "output files would collide",
-                              name));
-    }
-  }
+  out.measurements = ReadMeasurements(block.At("measurements"), run);
   out.output = PathOf(block, "output", directory);
   if (Has(block, "calibration")) {
-    const auto& calibration = block.At("calibration");
-    if (!run.Calibrating()) {
-      Fail(calibration,
-           "chooses the derivatives of a calibrated run, the initial sea "
-           "level re-calibrated or held, and this run does not calibrate: "
-           "its state is not at the window's end (`ocean.at`: \"end\")");
-    }
-    Allow(calibration, {"derivative", "iterations", "rtol"});
-    if (Has(calibration, "derivative")) {
-      out.total = Choice<bool>(calibration.At("derivative"),
-                               {{"total", true}, {"partial", false}});
-    }
-    if (!out.total) {
-      for (const auto* name : {"iterations", "rtol"}) {
-        if (Has(calibration, name)) {
-          Fail(calibration.At(name),
-               "is of the iteration for the calibration's multiplier, which "
-               "the partial kernels (`derivative`: \"partial\") do not take");
-        }
-      }
-    }
-    out.calibration_iterations = Integer(calibration, "iterations", 20);
-    if (out.calibration_iterations < 1) {
-      Fail(calibration.At("iterations"), "is fewer than one sweep");
-    }
-    out.calibration_rtol = Number(calibration, "rtol", 1e-8);
-    if (!(out.calibration_rtol > 0.0)) {
-      Fail(calibration.At("rtol"), "is not a positive tolerance");
-    }
+    const auto read = ReadCalibratedDerivative(
+        block.At("calibration"), run, "sweep",
+        "the partial kernels (`derivative`: \"partial\") do not take",
+        "the calibration's multiplier");
+    out.total = read.total;
+    out.calibration_iterations = read.iterations;
+    out.calibration_rtol = read.rtol;
   }
   return out;
 }
@@ -557,8 +580,8 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
          "`exchange`, `volume`, `exchange_nodes`)");
   }
   auto allowed = RunMemberNames();
-  for (const auto name :
-       {"kernels", "output", "checkpoint", "restart", "trajectory"}) {
+  for (const auto name : {"kernels", "output", "checkpoint", "restart",
+                          "trajectory", "perturbation", "tangent"}) {
     allowed.push_back(name);
   }
   AllowTopLevel(top, allowed);
@@ -585,186 +608,12 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
     static_cast<void>(ReadSolveMembers(top, out.run, directory, false));
   }
   out.kernels = ReadKernelsBlock(top.At("kernels"), out.run, directory);
+  // tangent's blocks, checked and left unused
+  CheckOtherBlocks(top, out.run, directory, "kernel");
   return out;
 }
 
 namespace {
-
-// -- the measurements against a run ------------------------------------------
-
-/// What one measurement becomes against a run: the node-keyed duals, the
-/// forward value, the unit of J (J_SI = factor * J_nd) with its SI
-/// dimensions and its unit's name, and, for a decay time, the fit.
-struct Built {
-  std::map<std::size_t, Measurement> measurements;
-  double value_nd = 0.0;
-  double factor = 1.0;
-  Dimensions objective = {};
-  std::string unit;
-  std::optional<DecayTimeFit> fit;
-  /// The window's nodes the duals sit on; `measurements` is keyed by their
-  /// library nodes (StepGrid), the right limit at a repeat.
-  std::vector<std::size_t> nodes;
-};
-
-/// The surface pairing a^2 int dual field dOmega, nothing where either is
-/// absent (a toroidal potential a run does not have, say).
-double PairedOrNothing(const SurfaceGrid& grid, double a,
-                       std::span<const double> dual,
-                       std::span<const double> field) {
-  if (dual.empty() || field.empty()) return 0.0;
-  return PairedValue(grid, a, dual, field);
-}
-
-/// `snapshots` are the library's nodes (`steps`): a measurement dated at a
-/// repeated node reads its right limit, the co-seismic field.
-template <class Snapshot>
-Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
-                       const GRDSolver& solver,
-                       std::span<const Snapshot> snapshots,
-                       const StepGrid& steps) {
-  const auto& grid = solver.Grid();
-  const auto a = solver.Radius();
-  const auto& scales = solver.SolverScales();
-  const auto at = [&steps](std::size_t node) { return steps.library.at(node); };
-  auto out = Built{};
-  auto single = [&](FieldChannel channel, std::vector<double> dual,
-                    auto field_of) {
-    out.nodes = {spec.node};
-    out.value_nd =
-        PairedValue(grid, a, dual, field_of(snapshots[at(spec.node)]));
-    out.measurements.emplace(at(spec.node),
-                             FieldMeasurement(channel, std::move(dual)));
-  };
-  const auto sea = [](const Snapshot& s) -> std::span<const double> {
-    return s.relativeSeaLevelChange;
-  };
-  const auto displacement = [](const Snapshot& s) -> std::span<const double> {
-    return s.displacement;
-  };
-  const auto potential = [](const Snapshot& s) -> std::span<const double> {
-    return s.potential;
-  };
-  const auto length = [&] {
-    out.factor = scales.Length();
-    out.objective = Dimensions{.length = 1};
-    out.unit = "m";
-  };
-  const auto potentialUnit = [&] {
-    out.factor = scales.Factor(PotentialDimensions);
-    out.objective = PotentialDimensions;
-    out.unit = "m^2 s^-2";
-  };
-  switch (spec.type) {
-    case Type::RelativeSeaLevelCap:
-    case Type::RelativeSeaLevelPoint:
-      length();
-      single(FieldChannel::SeaLevel,
-             spec.type == Type::RelativeSeaLevelCap
-                 ? CapMeanDual(grid, a, spec.site, spec.width)
-                 : PointDual(grid, a, spec.site),
-             sea);
-      break;
-    case Type::DisplacementCap:
-    case Type::DisplacementPoint:
-      length();
-      single(FieldChannel::Displacement,
-             spec.type == Type::DisplacementCap
-                 ? CapMeanDual(grid, a, spec.site, spec.width)
-                 : PointDual(grid, a, spec.site),
-             displacement);
-      break;
-    case Type::DisplacementVectorCap:
-    case Type::DisplacementVectorPoint: {
-      // the radial displacement, and the potentials V and W of the
-      // tangential one (W's dual has no degree 1: the displacement in the
-      // frame of no net rotation of the surface)
-      length();
-      auto m = spec.type == Type::DisplacementVectorCap
-                   ? CapDisplacementMeasurement(grid, a, spec.site, spec.width,
-                                                spec.direction)
-                   : PointDisplacementMeasurement(grid, a, spec.site,
-                                                  spec.direction);
-      const auto& s = snapshots[at(spec.node)];
-      out.nodes = {spec.node};
-      out.value_nd =
-          PairedOrNothing(grid, a, m.displacementDual, s.displacement) +
-          PairedOrNothing(grid, a, m.tangentialPotentialDual,
-                          s.tangentialPotential) +
-          PairedOrNothing(grid, a, m.toroidalPotentialDual,
-                          s.toroidalPotential);
-      out.measurements.emplace(at(spec.node), std::move(m));
-      break;
-    }
-    case Type::PotentialCap:
-    case Type::PotentialPoint:
-      potentialUnit();
-      single(FieldChannel::Potential,
-             spec.type == Type::PotentialCap
-                 ? CapMeanDual(grid, a, spec.site, spec.width)
-                 : PointDual(grid, a, spec.site),
-             potential);
-      break;
-    case Type::StokesCoefficient:
-      potentialUnit();
-      single(FieldChannel::Potential,
-             CoefficientDual(grid, a, spec.degree, spec.order), potential);
-      break;
-    case Type::Rotation: {
-      out.nodes = {spec.node};
-      out.factor = 1.0 / scales.Time();
-      out.objective = Dimensions{.time = -1};
-      out.unit = "rad s^-1";
-      const auto component = static_cast<std::size_t>(spec.component);
-      out.value_nd = snapshots[at(spec.node)].angularVelocity[component];
-      out.measurements.emplace(at(spec.node),
-                               RotationMeasurement(spec.component));
-      break;
-    }
-    case Type::DecayTime: {
-      // the site series over the window, in SI metres against the run's
-      // unit (kyr in a dated run), the fit's weights becoming node-keyed
-      // duals: J in that unit, SI seconds through the factor
-      const auto dual = CapMeanDual(grid, a, spec.site, spec.width);
-      const auto metres = scales.Length();
-      const auto& window = *run.times;
-      const auto unit = window.Dated() ? KYR : window.unit.seconds;
-      const auto even = window.Dated() && !window.listed;
-      const auto step = (window.Start() - window.End()) /
-                        (static_cast<int>(window.Size()) - 1);
-      auto elapsed = std::vector<double>{};
-      auto series = std::vector<double>{};
-      auto library = std::vector<std::size_t>{};
-      for (auto node = spec.first; node <= spec.last; ++node) {
-        elapsed.push_back(even ? step * static_cast<double>(node - spec.first)
-                               : (window.Axis(node) - window.Axis(spec.first)) /
-                                     unit);
-        series.push_back(metres *
-                         PairedValue(grid, a, dual, sea(snapshots[at(node)])));
-        out.nodes.push_back(node);
-        library.push_back(at(node));
-      }
-      auto fit = DecayTimeFit{};
-      out.measurements = DecayTimeMeasurements(
-          library, elapsed, series, FieldChannel::SeaLevel, dual,
-          {.time_uncertainty = spec.time_uncertainty,
-           .value_uncertainty = spec.value_uncertainty_m},
-          &fit);
-      // the weights are per metre of series: scale the duals so the
-      // pairing's J is in the run's unit
-      for (auto& [node, measurement] : out.measurements) {
-        for (auto& v : measurement.relativeSeaLevelDual) v *= metres;
-      }
-      out.value_nd = fit.decay_time;
-      out.factor = unit;
-      out.objective = Dimensions{.time = 1};
-      out.unit = "s";
-      out.fit = fit;
-      break;
-    }
-  }
-  return out;
-}
 
 // -- the kernel files ---------------------------------------------------------
 
@@ -870,11 +719,6 @@ struct WindowKernels {
   Kernels kernels;
   LeftKernels before;
 };
-
-/// The method's word, as `kernels.method` names it.
-std::string_view MethodWord(AdjointMethod method) {
-  return method == AdjointMethod::Discrete ? "discrete" : "continuous";
-}
 
 /// The first lines of a kernel table: the program, the config, and the
 /// measurement with its type and unit.
@@ -2115,284 +1959,41 @@ void RefuseOnRanks3D(const Json& top, const KernelInput& input) {
   }
 }
 
-/// Where a kernel run's forward run comes from: the trajectory store of
-/// `trajectory.directory` that holds this run complete, read back; that
-/// store recorded by this run where the directory holds none (or an
-/// incomplete one of this run); or, without a directory, the run in memory.
-/// `run` is the run's description for the store.
-struct Forward {
-  std::optional<io::TrajectoryStore> store;  ///< none without a directory
-  bool read = false;  ///< swept from a complete store, not run
-
-  /// Surveys `trajectory.directory`, where given, for the run `run`
-  /// describes (called only then), and opens its store for reading or
-  /// for recording; the store's refusals named at the member.
-  Forward(const Json& top, const TrajectoryBlock& block,
-          const std::function<io::TrajectoryStore::Description()>& run) {
-    if (block.directory.empty()) return;
-    const auto described = run();
-    if (SurveyTrajectory(top, block, described) ==
-        io::TrajectoryStore::Standing::Complete) {
-      store = OpenTrajectory(top, block, described);
-      read = true;
-    } else {
-      store = RecordTrajectory(top, block, described);
-    }
-  }
-  /// Whether this run records into the store.
-  [[nodiscard]] bool Records() const { return store && !read; }
-
-  /// The summary's account of the store, after the sweeps' (empty
-  /// without one).
-  [[nodiscard]] std::string Note() const {
-    if (!store) return {};
-    const auto at = std::format("the trajectory store {} ({})",
-                                store->Directory().string(),
-                                SizeOf(store->Bytes()));
-    return read ? std::format("; the forward run read back from {}", at)
-                : std::format("; the forward run recorded to {}", at);
-  }
-};
-
-/// The kernels of the static problem on a radial Earth: the one-node run
-/// of the radial evolution on a branchless rheology, recorded, or read
-/// from the trajectory store of the run.
-std::string KernelStatic1D(const std::filesystem::path& config,
-                           const KernelInput& input, const Json& top,
-                           const BuiltEarth& earth, std::string_view meaning) {
-  const auto& run = input.run;
-  const auto rheology = ElasticRheologyOf(earth, top);
-  const ViscoelasticOperator op(rheology, run.lmax);
-  const GRDSolver solver(SurfaceGrid(run.lmax), op.ElasticLoveNumbers(),
-                         ParametersOf(run, earth.material));
-  auto world = LoadStaticWorld(run, top, solver);
-  const auto loads = StaticLoadsOf(run, top, solver.Grid());
-  const auto times = std::vector<double>{0.0};
-  const auto forward = Forward(top, input.trajectory, [&] {
-    return TrajectoryOf(run, 1, times, solver);
-  });
-  auto options = Evolution::Options{};
-  options.rotation = run.rotation;
-  options.rtol = run.solver.rtol;
-  options.record_stride = 1;
-  if (forward.read) world.background = forward.store->Start();
-  if (forward.Records()) {
-    forward.store->PutStart(world.background);
-    forward.store->Attach(options);
-  }
-  Evolution evolution(op, solver, world.background, options);
-  const auto snapshots = forward.read
-                             ? forward.store->Snapshots1D()
-                             : SolveStatic(run, solver, world, loads, evolution);
-  if (!snapshots.front().converged) {
-    throw std::runtime_error(
-        "the sea level equation did not converge; loosen solver.rtol");
-  }
-  if (forward.Records()) forward.store->Close();
-  const auto w = WritingOf(config, input, solver);
-  const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
-                               InputsOf(loads.get()));
-  return Sweep1D(input, top, w, evolution, snapshots, times, op, rheology, earth,
-                 world.iceRead, world.seaLevelRead, read) +
-         forward.Note();
-}
-
-/// The kernels of the static problem on lateral moduli: the one-node run
-/// of the 3-D evolution on the stepper of a branchless rheology carrying
-/// the moduli, distributed over radial segments on several ranks, recorded,
-/// or read from the trajectory store of the run.
-std::string KernelStatic3D(const std::filesystem::path& config,
-                           const KernelInput& input, const Json& top,
-                           const BuiltEarth& earth, std::string_view meaning) {
-  const auto& run = input.run;
-  RefuseOnRanks3D(top, input);
-  const auto elastic = ElasticRheologyOf(earth, top);
-  const Viscoelastic3D op(elastic, run.lmax,
-                          [](double, double, double) { return 0.0; },
-                          OperatorOptionsOf(run, earth, elastic));
-  // the sea level grid blocks its transforms for the operator's cache
-  const GRDSolver solver(
-      SurfaceGrid(run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
-      op.ElasticLove(), ParametersOf(run, earth.material));
-  auto world = LoadStaticWorld(run, top, solver);
-  const auto loads = StaticLoadsOf(run, top, solver.Grid());
-  const auto times = std::vector<double>{0.0};
-  const auto forward = Forward(top, input.trajectory, [&] {
-    return TrajectoryOf(run, 1, times, solver, op);
-  });
-  auto options = Evolution3D::Options{};
-  options.rotation = run.rotation;
-  options.rtol = run.solver.rtol;
-  options.coupled_rtol = run.solver.step_rtol;
-  options.max_coupled_iterations = run.solver.step_max_iterations;
-  options.record_stride = 1;
-  if (forward.read) world.background = forward.store->Start();
-  if (forward.Records()) {
-    forward.store->PutStart(world.background);
-    forward.store->Attach(options);
-  }
-  Evolution3D evolution(op, solver, world.background, options);
-  const auto snapshots = forward.read
-                             ? forward.store->Snapshots3D()
-                             : SolveStatic(run, solver, world, loads, evolution);
-  if (!snapshots.front().converged) {
-    throw std::runtime_error(
-        "the sea level equation or the 3-D closure did not converge; loosen "
-        "solver.rtol or solver.step_rtol, or raise "
-        "solver.step_max_iterations");
-  }
-  if (forward.Records()) forward.store->Close();
-  const auto trajectory =
-      forward.store ? forward.store->Trajectory3D(snapshots)
-                    : ForwardTrajectory3D::FromSnapshots(snapshots);
-  const auto w = WritingOf(config, input, solver);
-  const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
-                               InputsOf(loads.get()));
-  return Sweep3D(input, top, w, evolution, snapshots, trajectory, times, op, earth,
-                 world.iceRead, world.seaLevelRead, read) +
-         forward.Note();
-}
-
-/// The kernels of a radial run through time: the radial Maxwell rheology
-/// of the deck or of a radial viscosity file, its initial sea level
-/// calibrated first where asked, then the recorded run; or, from the
-/// complete trajectory store of the run, its calibrated start and its
-/// recording read back.
+/// The kernels over a recorded radial run (Recorded.hpp): the static
+/// problem's one node, or a run through time, with the continuous sweep's
+/// steps against the shortest relaxation time through time.
 std::string Kernel1D(const std::filesystem::path& config,
                      const KernelInput& input, const Json& top,
-                     const BuiltEarth& earth, std::string_view meaning) {
+                     const BuiltEarth& earth, const Recorded1D& recorded) {
   const auto& run = input.run;
-  const auto rheology = RheologyOf(earth, top);
-  const ViscoelasticOperator op(rheology, run.lmax);
-  const GRDSolver solver(SurfaceGrid(run.lmax), op.ElasticLoveNumbers(),
-                         ParametersOf(run, earth.material));
-  auto world = LoadWorld(run, top, solver);
-  // the library's grid, a node where the forcing jumps repeated
-  const auto times = StepGridOf(run, solver.SolverScales()).times;
-  const auto stride = input.trajectory.record_stride;
-  const auto forward = Forward(top, input.trajectory, [&] {
-    return TrajectoryOf(run, stride, times, solver);
-  });
-  auto options = Evolution::Options{};
-  options.scheme = run.solver.scheme;
-  options.rotation = run.rotation;
-  options.rtol = run.solver.rtol;
-  HoldLand(options, world);
-  if (forward.read) {
-    world.background = forward.store->Start();
-  } else if (run.Calibrating()) {
-    // calibrated by runs that record nothing; the recording run follows
-    Evolution calibrating(op, solver, world.background, options);
-    static_cast<void>(
-        CalibrateWorld(run, top, solver, world, calibrating, times));
+  auto w = WritingOf(config, input, *recorded.solver);
+  if (run.times && w.method == AdjointMethod::Continuous) {
+    w.relaxation = StepsAgainst(run, *recorded.solver, w.steps.times,
+                                recorded.op->ShortestRelaxation(), earth,
+                                recorded.rheology->BranchCount());
   }
-  options.record_stride = stride;
-  if (forward.Records()) {
-    forward.store->PutStart(world.background);
-    forward.store->Attach(options);
-  }
-  Evolution evolution(op, solver, world.background, options);
-  // the state calibrated under migrating shorelines, here or by the run
-  // the store holds: marked, so that a sweep that would hold the initial
-  // sea level where the library has no total derivative is refused
-  if (run.Calibrating() && run.Migrating()) evolution.MarkCalibrated();
-  const auto drive = DriveOf<Evolution::Forcing>(run, top, solver, world);
-  const auto snapshots =
-      forward.read ? forward.store->Snapshots1D()
-                   : RunDriven(evolution, times, drive, run.Migrating());
-  for (const auto& snapshot : snapshots) {
-    Check1D(snapshot, WhenOf(run, solver.SolverScales(), snapshot.t),
-            run.solver.rtol);
-  }
-  if (forward.Records()) forward.store->Close();
-  auto w = WritingOf(config, input, solver);
-  // the continuous kernels' steps against the shortest relaxation time
-  if (w.method == AdjointMethod::Continuous) {
-    w.relaxation = StepsAgainst(run, solver, w.steps.times,
-                                op.ShortestRelaxation(), earth,
-                                rheology.BranchCount());
-  }
-  const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
-                               InputsOf(drive.loads.get()));
-  return Sweep1D(input, top, w, evolution, snapshots, times, op, rheology, earth,
-                 world.iceRead, world.seaLevelRead, read) +
-         forward.Note();
+  return Sweep1D(input, top, w, *recorded.evolution, recorded.snapshots,
+                 recorded.steps.times, *recorded.op, *recorded.rheology, earth,
+                 recorded.IceRead(), recorded.SeaLevelRead(), recorded.read);
 }
 
-/// The kernels of a 3-D run through time (a lateral viscosity, lateral
-/// moduli or both), distributed over radial segments on several ranks:
-/// recorded in memory, or into the trajectory store of
-/// `trajectory.directory` (each rank's states in its own subdirectory) and
-/// fetched back one at a time by the sweeps, or swept from the complete
-/// store of the run there without the forward run.
+/// The kernels over a recorded 3-D run, as the radial one's; the steps
+/// against the shortest relaxation time are over the volume (collective:
+/// every rank asks).
 std::string Kernel3D(const std::filesystem::path& config,
                      const KernelInput& input, const Json& top,
-                     const BuiltEarth& earth, std::string_view meaning) {
+                     const BuiltEarth& earth, const Recorded3D& recorded) {
   const auto& run = input.run;
-  RefuseOnRanks3D(top, input);
-  const auto rheology = RheologyOf(earth, top);
-  const Viscoelastic3D op(rheology, run.lmax, DeltaOf(earth),
-                          OperatorOptionsOf(run, earth, rheology));
-  // the sea level grid blocks its transforms for the operator's cache
-  const GRDSolver solver(
-      SurfaceGrid(run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
-      op.ElasticLove(), ParametersOf(run, earth.material));
-  auto world = LoadWorld(run, top, solver);
-  // the library's grid, a node where the forcing jumps repeated
-  const auto times = StepGridOf(run, solver.SolverScales()).times;
-  const auto stride = input.trajectory.record_stride;
-  const auto forward = Forward(top, input.trajectory, [&] {
-    return TrajectoryOf(run, stride, times, solver, op);
-  });
-  auto options = Evolution3D::Options{};
-  options.scheme = run.solver.scheme;
-  options.rotation = run.rotation;
-  options.rtol = run.solver.rtol;
-  options.coupled_rtol = run.solver.step_rtol;
-  options.max_coupled_iterations = run.solver.step_max_iterations;
-  HoldLand(options, world);
-  if (forward.read) {
-    world.background = forward.store->Start();
-  } else if (run.Calibrating()) {
-    Evolution3D calibrating(op, solver, world.background, options);
-    static_cast<void>(
-        CalibrateWorld(run, top, solver, world, calibrating, times));
+  auto w = WritingOf(config, input, *recorded.solver);
+  if (run.times && w.method == AdjointMethod::Continuous) {
+    w.relaxation = StepsAgainst(run, *recorded.solver, w.steps.times,
+                                recorded.op->ShortestRelaxation(), earth,
+                                recorded.rheology->BranchCount());
   }
-  options.record_stride = stride;
-  // recording into the store, each kept state goes to disk as the run
-  // passes it, and the sweep fetches it back
-  if (forward.Records()) {
-    forward.store->PutStart(world.background);
-    forward.store->Attach(options);
-  }
-  Evolution3D evolution(op, solver, world.background, options);
-  // the calibrated state marked, as the radial run's
-  if (run.Calibrating() && run.Migrating()) evolution.MarkCalibrated();
-  const auto drive = DriveOf<Evolution3D::Forcing>(run, top, solver, world);
-  const auto snapshots =
-      forward.read ? forward.store->Snapshots3D()
-                   : RunDriven(evolution, times, drive, run.Migrating());
-  for (const auto& snapshot : snapshots) {
-    Check3D(snapshot, WhenOf(run, solver.SolverScales(), snapshot.t),
-            run.solver.step_rtol);
-  }
-  if (forward.Records()) forward.store->Close();
-  const auto trajectory =
-      forward.store ? forward.store->Trajectory3D(snapshots)
-                    : ForwardTrajectory3D::FromSnapshots(snapshots);
-  auto w = WritingOf(config, input, solver);
-  // the continuous kernels' steps against the shortest relaxation time
-  // over the volume (collective: every rank asks)
-  if (w.method == AdjointMethod::Continuous) {
-    w.relaxation = StepsAgainst(run, solver, w.steps.times,
-                                op.ShortestRelaxation(), earth,
-                                rheology.BranchCount());
-  }
-  const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
-                               InputsOf(drive.loads.get()));
-  return Sweep3D(input, top, w, evolution, snapshots, trajectory, times, op, earth,
-                 world.iceRead, world.seaLevelRead, read) +
-         forward.Note();
+  return Sweep3D(input, top, w, *recorded.evolution, recorded.snapshots,
+                 *recorded.trajectory, recorded.steps.times, *recorded.op,
+                 earth, recorded.IceRead(), recorded.SeaLevelRead(),
+                 recorded.read);
 }
 
 }  // namespace
@@ -2417,25 +2018,36 @@ std::string RunKernel(const std::filesystem::path& config) {
                      earth.Dimension()));
   }
   const auto lateral = input.kernels.lateral.value_or(false);
+  // the sweeps over the recorded forward run
+  const auto sweep1D = [&](const Recorded1D& recorded) {
+    return Kernel1D(config, input, top, earth, recorded);
+  };
+  const auto sweep3D = [&](const Recorded3D& recorded) {
+    return Kernel3D(config, input, top, earth, recorded);
+  };
   if (run.problem == Problem::Static) {
     // a viscosity file is refused in the static problem when the config is
     // read, so a lateral Earth here is one of lateral moduli
     if (earth.LateralModuli()) {
-      return KernelStatic3D(config, input, top, earth, meaning);
+      RefuseOnRanks3D(top, input);
+      return WithRecordedStatic3D(run, input.trajectory, top, earth, meaning,
+                                  sweep3D);
     }
     RefuseThreeDSolver(top, "the static problem on a radial Earth", lateral);
     // one process's run: on several ranks, the first rank's alone
     if (!ranks.First()) return "";
     const RanksOverride alone(Ranks{});
-    return KernelStatic1D(config, input, top, earth, meaning);
+    return WithRecordedStatic1D(run, input.trajectory, top, earth, meaning,
+                                sweep1D);
   }
   if (!earth.Lateral()) {
     RefuseThreeDSolver(top, "a 1-D run (a radial model)", lateral);
     if (!ranks.First()) return "";
     const RanksOverride alone(Ranks{});
-    return Kernel1D(config, input, top, earth, meaning);
+    return WithRecorded1D(run, input.trajectory, top, earth, meaning, sweep1D);
   }
-  return Kernel3D(config, input, top, earth, meaning);
+  RefuseOnRanks3D(top, input);
+  return WithRecorded3D(run, input.trajectory, top, earth, meaning, sweep3D);
 }
 
 }  // namespace sl3dpp::app

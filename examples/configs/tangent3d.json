@@ -1,0 +1,29 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../data/viscosity_log.nc"}},
+  "discretisation": {"lmax": 12},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 15},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
+  },
+  "ocean": {
+    "at": "start",
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
+  "perturbation": {
+    "model": {"viscosity": {"file": "../data/synthetic_weak_patch.nc"}}
+  },
+  "tangent": {
+    "output": {"surface": "out/tangent3d/tangent3d.nc",
+               "smoothing": {"kind": "gaussian", "width_deg": 15}},
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",
+       "latitude": 60, "longitude": 275, "width_deg": 15, "date_kyr_bp": 0}
+    ]
+  }
+}

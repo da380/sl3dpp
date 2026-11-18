@@ -15,7 +15,10 @@
 // of ranks refused), a recording run resumed from per-rank checkpoints
 // continuing its store to the uninterrupted one's, a 1-D run of solve,
 // which is the first rank's alone,
-// and what kernel refuses on several ranks. Rank 0 writes
+// what kernel refuses on several ranks, and tangent's 3-D runs (along the
+// ice, the viscosity and the moduli; the total derivative of a calibrated
+// run, its linearised calibration collective) over the ranks against one
+// process, a 1-D one being the first rank's alone. Rank 0 writes
 // the outputs and compares them; every rank's verdict is reduced to rank
 // 0, which alone prints.
 
@@ -28,6 +31,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -1441,6 +1445,318 @@ TEST_F(AppsOverRanks, KernelRefusesOnRanksWhatOneProcessForms) {
   refused(tide, "kernels.parameters[0]",
           "take the discrete sweep's, which are distributed (`kernels.method` "
           "\"discrete\", the default)");
+}
+
+/// A planetmodel model file over the prem8 deck's solid layers holding
+/// the fields given, each a function of (r, theta, phi) in SI metres and
+/// radians: a perturbation of the Earth's parameters, a field of a
+/// direction in the viscosity with its spec (test::LogViscositySpec).
+/// Written by rank 0.
+void WriteModelFields(
+    const fs::path& path,
+    const std::map<std::string, std::function<double(double, double, double)>>&
+        fields) {
+  if (Rank() == 0) {
+    const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+    const auto deck = Deck::Read(data + "/prem8.elastic.deck",
+                                 app::FormatOf(app::ModelFormat::Elastic));
+    ASSERT_TRUE(deck);
+    const auto model = EarthModel::FromDeck(*deck);
+    ASSERT_TRUE(model);
+    const auto& boundaries = model->Boundaries();
+    auto file = pm::ModelFile(pm::Skeleton(
+        std::vector<double>(boundaries.begin(), boundaries.end())));
+    file.SetName("sl3dpp tangent tests");
+    const auto& skeleton = file.GetSkeleton();
+    const auto layers = static_cast<int>(skeleton.NLayers());
+    file.AddPart(0, layers - 1,
+                 pm::ElementEdges(skeleton, 0, layers - 1, 500e3), 5,
+                 pm::GaussLegendre(8));
+    for (const auto& [name, field] : fields) {
+      auto sources = std::map<int, pm::LayerSource>{};
+      for (auto layer = 0; layer < layers; ++layer) {
+        if (model->IsFluid(static_cast<std::size_t>(layer))) continue;
+        sources.emplace(layer, pm::LayerSource::Lateral(field));
+      }
+      if (const auto spec = test::LogViscositySpec(name)) {
+        file.AddField(name, *spec, sources);
+      } else {
+        file.AddField(name, sources);
+      }
+    }
+    pm::WriteModelFile(path, file);
+  }
+  Barrier();
+}
+
+/// The largest relative departure of two tangent surface files' response
+/// fields, each over the largest magnitude of the reference's.
+double TangentDeparture(const fs::path& mine, const fs::path& theirs) {
+  const auto got = pm::ReadSurfaceFile(mine);
+  const auto want = pm::ReadSurfaceFile(theirs);
+  auto worst = 0.0;
+  for (const auto* name :
+       {"relative_sea_level_change", "displacement", "tangential_potential",
+        "toroidal_potential", "potential", "initial_sea_level"}) {
+    EXPECT_EQ(got.variables.contains(name), want.variables.contains(name))
+        << name;
+    if (!got.variables.contains(name) || !want.variables.contains(name)) {
+      continue;
+    }
+    worst = std::max(worst, Relative(got.variables.at(name).values,
+                                     want.variables.at(name).values));
+  }
+  return worst;
+}
+
+/// The measurements' first-order changes in a tangent run's table.
+std::vector<double> ChangesIn(const fs::path& table) {
+  auto in = std::ifstream(table);
+  EXPECT_TRUE(in) << table;
+  auto out = std::vector<double>{};
+  for (std::string line; std::getline(in, line);) {
+    if (line.empty() || line.starts_with("#")) continue;
+    auto words = std::istringstream(line);
+    auto name = std::string{}, type = std::string{};
+    auto value = 0.0, change = 0.0;
+    words >> name >> type >> value >> change;
+    out.push_back(change);
+  }
+  return out;
+}
+
+TEST_F(AppsOverRanks, TangentMatchesOneProcess) {
+  // tangent's 3-D run over the ranks: the tangent-linear run of a run
+  // under a lateral viscosity and lateral moduli, along a direction in the
+  // ice, a load, ln viscosity and the moduli at once, each rank holding
+  // the Earth's part of the direction over its own radial segment. Its
+  // file and its measurements' changes are the one-process run's to the
+  // substructured solves' round-off.
+  WriteToyModuli(dir_);
+  if (Rank() == 0) test::WriteToyChange(dir_ / "d_ice.nc", true, 0.02);
+  Barrier();
+  WriteModelFields(
+      dir_ / "d_earth.nc",
+      {{"ln_viscosity",
+        [](double r, double theta, double phi) {
+          return 0.5 + (r / 6368000.0) * std::sin(theta) * std::cos(phi);
+        }},
+       {"mu",
+        [](double, double theta, double phi) {
+          return 2e9 * std::sin(theta) * std::sin(phi);
+        }},
+       {"kappa",
+        [](double, double theta, double) { return 3e9 * std::cos(theta); }}});
+  auto body = Body();
+  const auto viscosity = std::string{"/viscosity_log.nc\"}"};
+  body.replace(body.find(viscosity), viscosity.size(),
+               viscosity + R"(, "moduli": {"file": "moduli.nc"})");
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", "{" + body + R"(,
+      "output": {"surface": "out/)" + name + R"(.nc"},
+      "kernels": {"parameters": ["ice"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+           "longitude": 10.0, "width_deg": 25.0},
+          {"type": "displacement_point", "name": "uplift", "latitude": 55.0,
+           "longitude": 10.0, "date_kyr_bp": 0.0}],
+        "output": "out/)" + name + R"(_kernels"},
+      "perturbation": {
+        "forcing": {"ice_change": [{"change": {"file": "d_ice.nc"}}],
+                    "load": [{"cap": {"latitude": 20, "longitude": 120,
+                                      "width_deg": 20, "amplitude_kg_m2": 3.0e4},
+                              "water_budget": true,
+                              "moves_solid_surface": false}]},
+        "model": {"viscosity": {"file": "d_earth.nc"},
+                  "moduli": {"file": "d_earth.nc"}}},
+      "tangent": {"output": {"surface": "out/)" + name + R"(_tangent.nc"}}})");
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunTangent(one)); });
+  const auto summary = app::RunTangent(over);
+  Barrier();
+  if (Rank() != 0) return;
+  EXPECT_TRUE(summary.starts_with(
+      "3-D (lateral viscosity, lateral moduli), viscoelastic"))
+      << summary;
+  EXPECT_NE(summary.find("(the tangent-linear run along the perturbation's "
+                         "ice_change, load, viscosity, moduli)"),
+            std::string::npos)
+      << summary;
+  const auto fields = TangentDeparture(dir_ / "out" / "over_tangent.nc",
+                                       dir_ / "out" / "one_tangent.nc");
+  const auto changes =
+      Relative(ChangesIn(dir_ / "out" / "over_tangent_measurements.txt"),
+               ChangesIn(dir_ / "out" / "one_tangent_measurements.txt"));
+  std::cout << std::format(
+      "[tangent, over the ranks] fields {:.1e}, measurements' changes "
+      "{:.1e} from the one-process run\n",
+      fields, changes);
+  EXPECT_LT(fields, kOverRanks);
+  EXPECT_LT(changes, kOverRanks);
+}
+
+TEST_F(AppsOverRanks, TangentUnderAnEarthquakeMatchesOneProcess) {
+  // A 3-D run through time under a point source whose onset falls between
+  // two nodes of its window, where the program steps a pair of its own: the
+  // tangent-linear run along a seismic source of that onset and the ice,
+  // over the ranks, is the one-process run's.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  if (Rank() == 0) test::WriteToyChange(dir_ / "d_ice.nc", true, 0.02);
+  Barrier();
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "quasi_static",
+      "model": {{"deck": "{0}/prem8.elastic.deck", "format": "elastic",
+                 "viscosity": {{"file": "{0}/viscosity_log.nc"}}}},
+      "discretisation": {{"lmax": 8}},
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}],
+        "seismic": [{{"point": {{"latitude": 30, "longitude": 40,
+                      "depth_km": 300, "strike_deg": 20, "dip_deg": 60,
+                      "rake_deg": 90, "moment_nm": 1e21}},
+                     "onset_kyr_bp": 1}}]}},
+      "ocean": {{"at": "start", "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "rotation": "full",
+      "perturbation": {{"forcing": {{
+        "ice_change": [{{"change": {{"file": "d_ice.nc"}}}}],
+        "seismic": [{{"point": {{"latitude": 28, "longitude": 43,
+                      "depth_km": 250, "moment_tensor_nm": {{"rr": 1e20,
+                        "tt": -2e20, "pp": 1e20, "rt": 3e20, "rp": -1e20,
+                        "tp": 2e20}}}},
+                     "onset_kyr_bp": 1}}]}}}},
+      "tangent": {{"output": {{"surface": "out/{1}_tangent.nc"}}}}}})",
+                                             data, name));
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunTangent(one)); });
+  const auto summary = app::RunTangent(over);
+  Barrier();
+  if (Rank() != 0) return;
+  EXPECT_NE(summary.find("(the tangent-linear run along the perturbation's "
+                         "ice_change, seismic)"),
+            std::string::npos)
+      << summary;
+  const auto fields = TangentDeparture(dir_ / "out" / "over_tangent.nc",
+                                       dir_ / "out" / "one_tangent.nc");
+  std::cout << std::format(
+      "[tangent, an earthquake between nodes, over the ranks] fields {:.1e} "
+      "from the one-process run\n",
+      fields);
+  EXPECT_LT(fields, kOverRanks);
+}
+
+TEST_F(AppsOverRanks, TotalTangentOfACalibratedRunMatchesOneProcess) {
+  // The tangent-linear run of a calibrated migrating 3-D run is by default
+  // the total derivative: the change of the calibrated initial sea level is
+  // found by tangent-linear runs of the linearised calibration, collective
+  // over the ranks, every rank deciding alike when they have converged.
+  // Along a thickness history, ln viscosity and the target, the file (its
+  // `initial_sea_level` the calibrated one's change) and the runs taken
+  // are the one process's.
+  if (Rank() == 0) {
+    test::WriteToyHistory(dir_ / "marine.nc", 0.0, true);
+    // a thickness history over the marine cap and a change of the target's
+    // topography: the toy fields themselves, scaled
+    test::WriteToyHistory(dir_ / "d_marine.nc", 0.0, true);
+  }
+  Barrier();
+  WriteModelFields(dir_ / "d_earth.nc",
+                   {{"ln_viscosity", [](double, double theta, double phi) {
+                       return 0.5 + std::sin(theta) * std::cos(phi);
+                     }}});
+  auto body =
+      Body(R"("shorelines": "migrating", "calibration": {"rtol": 1e-10})");
+  for (auto at = body.find("history.nc"); at != std::string::npos;
+       at = body.find("history.nc", at + 1)) {
+    body.replace(at, std::string_view{"history.nc"}.size(), "marine.nc");
+  }
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", "{" + body + R"(,
+      "solver": {"step_rtol": 1e-10, "step_max_iterations": 200},
+      "perturbation": {
+        "forcing": {"ice_change": [{"thickness": {"file": "d_marine.nc"}}]},
+        "model": {"viscosity": {"file": "d_earth.nc"}},
+        "ocean": {"topography": {"file": "d_marine.nc"}}},
+      "tangent": {"output": {"surface": "out/)" + name + R"(_tangent.nc"}}})");
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunTangent(one)); });
+  const auto summary = app::RunTangent(over);
+  Barrier();
+  if (Rank() != 0) return;
+  EXPECT_NE(summary.find("; total derivative, the initial sea level "
+                         "calibrated again, its change in "),
+            std::string::npos)
+      << summary;
+  const auto mine = pm::ReadSurfaceFile(dir_ / "out" / "over_tangent.nc");
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one_tangent.nc");
+  EXPECT_EQ(std::get<std::string>(mine.meta.at("calibration_derivative")),
+            "total");
+  EXPECT_EQ(
+      std::get<std::vector<double>>(mine.meta.at("calibration_tangent_runs")),
+      std::get<std::vector<double>>(
+          reference.meta.at("calibration_tangent_runs")));
+  const auto& moved = mine.variables.at("initial_sea_level").values;
+  EXPECT_TRUE(std::ranges::any_of(moved, [](double v) { return v != 0.0; }));
+  const auto fields = TangentDeparture(dir_ / "out" / "over_tangent.nc",
+                                       dir_ / "out" / "one_tangent.nc");
+  std::cout << std::format(
+      "[tangent, calibrated, total, over the ranks] the linearised "
+      "calibration in {} runs; fields {:.1e} from the one-process run\n",
+      std::get<std::vector<double>>(mine.meta.at("calibration_tangent_runs"))
+          .front(),
+      fields);
+  EXPECT_LT(fields, 1e-7);
+}
+
+TEST_F(AppsOverRanks, RadialTangentIsTheFirstRanksAlone) {
+  // A 1-D run of tangent is one process's, as solve's and kernel's: over
+  // the ranks the first runs it alone and the others return at once.
+  if (Rank() == 0) {
+    std::ofstream(dir_ / "ball.deck")
+        << "homogeneous test ball\n"
+           "gia deck for the sl3d tests\n"
+           "0 5500 10000 5500 10000 5500 1 1e21\n"
+           "6371000 5500 10000 5500 10000 5500 1 1e21\n";
+  }
+  Barrier();
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", std::string{R"({
+      "problem": "quasi_static",
+      "model": {"deck": "ball.deck"}, "discretisation": {"lmax": 8},
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5},
+      "forcing": {"ice_change": [{"thickness": {"file": "history.nc"}}]},
+      "ocean": {"at": "start", "topography": {"file": "history.nc"},
+                "ice": {"file": "history.nc"}},
+      "rotation": "full", "moments": "hydrostatic",
+      "perturbation": {"forcing": {"tide": [{"degree": 2, "order": 1,
+                                             "amplitude_m2_s2": 1.0}]}},
+      "tangent": {"output": {"surface": "out/)"} +
+                                     name + R"(_tangent.nc"}}})");
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunTangent(one)); });
+  const auto summary = app::RunTangent(over);
+  if (Rank() == 0) {
+    EXPECT_TRUE(summary.starts_with("1-D, viscoelastic")) << summary;
+  } else {
+    EXPECT_EQ(summary, "");
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  // both the first rank's, one process: bitwise
+  EXPECT_EQ(pm::ReadSurfaceFile(dir_ / "out" / "over_tangent.nc")
+                .variables.at("displacement")
+                .values,
+            pm::ReadSurfaceFile(dir_ / "out" / "one_tangent.nc")
+                .variables.at("displacement")
+                .values);
 }
 
 }  // namespace

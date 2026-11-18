@@ -54,6 +54,17 @@ Every input is in `build/examples/data/`.
   the upper mantle — a stiff craton under the Canadian shield, a soft
   ridge under the eastern Pacific — in the form planetmodel's conversion
   of a tomography model writes, for `ExampleStatic3D` and `no_ocean.json`.
+- **The synthetic perturbations of the viscosity**,
+  `synthetic_weak_zone.nc` and `synthetic_weak_patch.nc`, which the build
+  writes too (`MakeSyntheticPerturbation`): planetmodel model files on the
+  PREM-like deck's body whose field `ln_viscosity` holds a CHANGE of the
+  natural logarithm of the viscosity (a name planetmodel's vocabulary does
+  not hold, written with its spec: a dimensionless scalar and its
+  meaning) — a weak zone of the upper mantle, a factor of ten at its peak
+  at 250 km depth, under the whole Earth (a function of the radius alone)
+  and under a cap about Hudson Bay (varying laterally) — the form a
+  direction in the viscosity is given to `sl3d tangent` in, for
+  `tangent1d.json` and `tangent3d.json`.
 - **The synthetic Earth**, `synthetic_earth.nc`, which the build writes
   (`MakeSyntheticEarth`): a planetmodel surface file of `ice_thickness` and
   `topography` on a 1° grid over a toy glacial cycle — smooth continents on
@@ -265,7 +276,9 @@ build/examples/
                           and mapping they share; get_ice7g.py, the make_*.py
                           input scripts and timestep_study.py; the poetry file
   data/                   every input: the decks, viscosity_log.nc,
-                          synthetic_earth.nc, synthetic_moduli.nc, ice7g.nc
+                          synthetic_earth.nc, synthetic_moduli.nc,
+                          synthetic_weak_zone.nc, synthetic_weak_patch.nc,
+                          ice7g.nc
                           and what the make_*.py scripts write
   output/library/<example>/   a driver's outputs and its log
   figures/library/            a driver's figure, <example>.png

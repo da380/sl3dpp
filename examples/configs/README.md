@@ -7,17 +7,20 @@ level problems, with an ocean (but `sea_level_no_ocean.json`); the
 `no_ocean*` configs are problems of a body's response without an ocean;
 the `timestep_*` configs are the time-step study (below); the `kernel*`
 and `timestep_{discrete,continuous}_*` configs, which hold a `kernels`
-block, run as `sl3d kernel`. Every other one but `love_numbers.json` runs
-as `sl3d solve`, and `sea_level_1d_calibrated.json`, which holds a
-`kernels` block beside its `output`, as both. The build
+block, run as `sl3d kernel`; the `tangent*` configs, which hold a
+`perturbation` and a `tangent` block, run as `sl3d tangent`. Every other
+one but `love_numbers.json` runs as `sl3d solve`, and
+`sea_level_1d_calibrated.json`, which holds a `kernels` block beside its
+`output`, as both. The build
 copies this directory to `build/examples/configs`, and copies a file again
 when its source has changed and its copy has not been edited, so the
 copies there are yours to edit and experiment with (an edited copy is
 kept, and the configure step says so); delete one (or the directory) and
 reconfigure to restore the original. Run the configs from there, where
 their relative
-paths reach the examples' inputs in `../data/` (`synthetic_earth.nc` and
-`synthetic_moduli.nc`, written by the build, `prem8.elastic.deck`,
+paths reach the examples' inputs in `../data/` (`synthetic_earth.nc`,
+`synthetic_moduli.nc`, `synthetic_weak_zone.nc` and
+`synthetic_weak_patch.nc`, written by the build, `prem8.elastic.deck`,
 `prem8.gia.deck`, `prem8.postseismic.deck` and `viscosity_log.nc`) and
 each config's outputs land in
 `out/<config>/`, `<config>` being its file name without `.json`:
@@ -294,7 +297,8 @@ cap the band cuts off. The caps here: 8° at lmax 24 (`kernel1d`, at
 least 7.5°), 15° at lmax 12 (`kernel`, `kernel1d_lateral`, at least
 15°), 6° and 8° at lmax 32 (`kernel_static_moduli` and
 `sea_level_1d_calibrated`, at least 5.6°) and 12° at
-lmax 16 (the time-step study, at least 11.25°); the drivers'
+lmax 16 (the time-step study and `tangent1d`, at least 11.25°; 15° at
+lmax 12 in `tangent3d`); the drivers'
 (`ExampleViscosityKernels3D`, `ExampleModelViscosity`,
 `ExampleSeismic`) follow the same rule at their default degrees
 (examples/README.md).
@@ -357,6 +361,36 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   draws the moment kernels per patch, held from the onset, and their
   contraction with the fault's own mechanism, which gives back each
   measurement's value with the fault's moment.
+- **`tangent1d.json`** (`sl3d tangent`, and `sl3d kernel`) — the
+  tangent-linear run of that deglaciation on the radial Earth (at lmax 16
+  and 22 nodes) along a perturbation of two members: a twentieth of the
+  state's ice added under a 12° cap over Hudson Bay, growing from 21 to
+  14 ka and gone by 7 ka (a `cap_fraction` with a history, as the
+  forcing's own caps are written), and a weak zone in the upper mantle,
+  the viscosity lowered by up to a factor of ten about 250 km depth
+  (`../data/synthetic_weak_zone.nc`, a radial model file of the change of
+  ln viscosity, its field `ln_viscosity`, which the build writes). `sl3d
+  tangent` writes the first-order change of every field `sl3d solve`
+  would write for the run,
+  at every node (`out/tangent1d/tangent1d.nc`), and the first-order
+  changes of the measurements of its `kernels` block beside it
+  (`tangent1d_measurements.txt`): the present sea level over Hudson Bay
+  (the 12° cap), the far-field sea level at 10 ka, the length of day and
+  the decay time of the Hudson Bay series. `sl3d kernel` on the same
+  config writes those measurements' ice and viscosity kernels
+  (`out/tangent1d/kernels/`), which, paired with the perturbation as
+  their files say they pair, give the table's changes: the two commands
+  are the two modes of one derivative.
+- **`tangent3d.json`** (`sl3d tangent`) — the tangent-linear run of the
+  deglaciation under the lateral viscosity of `../data/viscosity_log.nc`
+  (at lmax 12 and 15 nodes) along a weak patch in the upper mantle under
+  Hudson Bay (`../data/synthetic_weak_patch.nc`, the weak zone under a
+  20° cap, a model file of a change of ln viscosity that varies
+  laterally, which a 3D run takes): the change of every field, with
+  each smoothed over a 15° cap beside it (`tangent.output.smoothing`),
+  and of the present sea level over Hudson Bay, the one measurement of
+  its `tangent.measurements` (a tangent config needs no `kernels` block):
+  `out/tangent3d/`.
 - **`no_ocean.json`** — the instantaneous elastic response of the
   synthetic 3D elastic Earth (`../data/synthetic_moduli.nc`, written by the
   build: the PREM-like moduli with a stiff craton and a soft ridge in the

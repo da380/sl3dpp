@@ -69,6 +69,13 @@ run kernel kernel1d.json
 run kernel kernel.json
 run kernel kernel1d_lateral.json
 run kernel kernel_static_moduli.json
+# the tangent-linear runs: along a change of the ice and a weak zone of
+# the upper mantle on the radial Earth, where the same config's kernels,
+# paired with that perturbation, give the changes of the measurements the
+# run's table lists; and along a weak patch under the lateral viscosity
+run kernel tangent1d.json
+run tangent tangent1d.json
+run tangent tangent3d.json
 # solve records the post-seismic run into its trajectory store (a store a
 # former run_all.sh left complete is the run's, and kept), and kernel sweeps
 # from the store without running it again

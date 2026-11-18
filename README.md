@@ -53,8 +53,11 @@ of mantle viscosity using deglacial sea level observations;
   the kernels of a run with a calibrated initial sea level as total
   derivatives, the calibration followed (with the kernel in the
   present-day sea level it is held to);
-  tangent-linear runs and second-order adjoints (Hessian-vector
-  products). None is taken in the density
+  tangent-linear runs along a direction in any input, given as the
+  inputs are (`sl3d tangent`), the forward mode whose transpose the
+  discrete kernels are, of a calibrated run the total derivative too;
+  and second-order adjoints (Hessian-vector products). None is taken in
+  the density
   ([docs/adjoints.md](docs/adjoints.md) §13l).
 - **At scale.** OpenMP threads; a trajectory store on disk, from which the
   reverse sweeps run without the forward problem; checkpoints; and,
@@ -97,12 +100,14 @@ poetry environment ([examples/README.md](examples/README.md)).
 sl3d love-numbers run.json     # the SI Love-number table of a radial model
 sl3d solve run.json            # the static or the quasi-static problem
 sl3d kernel run.json           # adjoint kernels of the config's measurements
+sl3d tangent run.json          # the run's first-order change along a perturbation
 ```
 
 A config is strict JSON (an unknown member is refused, naming the file,
 the member and the fault) made of blocks, `discretisation`, `model`,
 `times`, `forcing`, `ocean`, `solver`, `checkpoint`, `trajectory`,
-`output` and `kernels`, under a required `problem`. The elastic
+`output`, `kernels`, `perturbation` and `tangent`, under a required
+`problem`. The elastic
 fingerprint of a Greenland melt on ICE-7G's present day, for one:
 
 ```json
@@ -123,7 +128,8 @@ the window (`ocean.at`) and an ice history runs GIA through time; without
 file makes the run 3D; a planetmodel prony or burgers deck
 (`"format": "prony"`, `"burgers"`), or `model.burgers` on a Maxwell deck,
 gives generalised Maxwell and Burgers bodies; a `kernels` block serves
-`sl3d kernel`. Outputs,
+`sl3d kernel`, and a `perturbation` block, a direction in the inputs
+written as the inputs are, `sl3d tangent`. Outputs,
 planetmodel files and plain tables, record the program, its version and
 the config. Every member is in [docs/sl3d-configs.md](docs/sl3d-configs.md),
 and threads, memory, MPI and long runs in [docs/running.md](docs/running.md).

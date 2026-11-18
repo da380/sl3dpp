@@ -1153,11 +1153,18 @@ Beyond the fixtures:
   beside it.
 - **The program.** `apps/` holds the `sl3d` program: strict JSON configs
   read with planetmodel's reader, one subcommand per physical problem
-  (`love-numbers`, `solve`) and the kernels of the latter (`kernel`), each
-  config made of blocks read by one reader apiece (`apps/Blocks.hpp`), the
-  run's dimension and its elastic or viscoelastic kind read from the
-  blocks; outputs with provenance, disk checkpoints for the runs through
-  time, and the trajectory store from which `kernel` sweeps.
+  (`love-numbers`, `solve`) and the derivatives of the latter, its kernels
+  (`kernel`) and its tangent-linear run along a direction (`tangent`),
+  each config made of blocks read by one reader apiece
+  (`apps/Blocks.hpp`), the run's dimension and its elastic or viscoelastic
+  kind read from the blocks; outputs with provenance, disk checkpoints for
+  the runs through time, and the trajectory store from which `kernel`
+  sweeps and about which `tangent` runs. The forward run the two
+  derivative commands linearise about is built once for both
+  (`apps/Recorded.hpp`), and a direction is a `perturbation` block, whose
+  members are the inputs' own, read by the inputs' readers
+  (`apps/Perturbation.hpp`), so that a run with the block added to its
+  inputs is the run moved along it.
 
 ## 14. Known limitations
 

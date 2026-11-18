@@ -65,6 +65,19 @@
  * ComputeCalibratedKernels follows it with the one full sweep. The
  * relation is of the converged state: the kernels are the calibrated
  * run's as far as the calibration's own tolerance holds the condition.
+ *
+ * The same condition in the forward mode is the LINEARISED CALIBRATION: the
+ * tangent-linear run of a calibrated run along a direction dp (and a change
+ * dS_f of the target) has the change of the calibrated initial sea level in
+ * it, the solution of (I + A) dS0 = dS_f - (d xi(t_f) / dp) dp on P. The
+ * right side is the tangent-linear run along dp, the initial sea level
+ * held, read at the last node; A dS0 is the run along an initial sea level
+ * dS0 alone, read there. SolveCalibrationTangent iterates dS0 = P (dS_f -
+ * (d xi(t_f) / dp) dp - A dS0), the transpose of the multiplier's relation
+ * and the same iteration (one loop serves both), and
+ * ComputeCalibratedTangent follows it with the run along dp and dS0
+ * together: the derivative of the calibrated run, whose pairing with an
+ * objective's duals is the total kernels' with dp plus lambda's with dS_f.
  */
 
 #include <functional>
@@ -76,6 +89,8 @@
 #include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
+#include "sl3dpp/TangentLinear.hpp"
+#include "sl3dpp/TangentLinear3D.hpp"
 
 namespace sl3dpp {
 
@@ -382,6 +397,121 @@ struct CalibratedKernels3D {
     std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
     const CalibrationMultiplierOptions& options = {},
     const AdjointSolver3D::Options& adjoint = {});
+
+/// The change of a calibrated run's initial sea level along a direction:
+/// the linearised calibration's solution.
+struct CalibrationTangent {
+  /// dS0, solver units on the grid: where the weights are positive, the
+  /// solution of (I + A) dS0 = dS_f - (d xi(t_f) / dp) dp; elsewhere, where
+  /// the calibration holds the initial sea level, the direction's own.
+  std::vector<double> initialSeaLevel;
+  /// The relative change of dS0 at each pass of the iteration.
+  std::vector<double> updates;
+  /// The tangent-linear runs made: the one along the direction, and one
+  /// for each pass of the iteration after the first.
+  int runs = 0;
+  bool converged = false;
+};
+
+/**
+ * @brief The change of the calibrated initial sea level of the run about
+ * `evolution`'s background state along `direction` and a change
+ * `finalSeaLevel` of the sea level the run is calibrated to (solver units
+ * on the grid; empty, the target held).
+ *
+ * The transpose of SolveCalibrationMultiplier, and its iteration: `options`
+ * are the multiplier's (the weights that choose the calibrated points, the
+ * most passes, the tolerance on the largest change of dS0 over its largest
+ * value, the mixing's depth; `on_iteration` is called after each pass).
+ * The first run is the tangent-linear run along `direction` by `tangent`,
+ * with `trajectory` where the direction needs it; each pass after the first
+ * is a run along an initial sea level alone, which needs none. About a
+ * frozen run (empty ocean functions) the run does not depend on its initial
+ * sea level, A vanishes and dS0 is the right side itself, with no
+ * iteration. A direction's own `initialSeaLevel` is the change of the
+ * initial sea level where the calibration holds it (the weights zero), and
+ * is refused (std::invalid_argument) where it is not zero on the points
+ * the calibration sets. An empty direction is a change of the target alone.
+ * `converged` is false when the passes ran out first, the last iterate
+ * returned.
+ */
+[[nodiscard]] CalibrationTangent SolveCalibrationTangent(
+    const Evolution& evolution, std::span<const double> times,
+    const TangentPerturbation& direction,
+    std::span<const double> finalSeaLevel,
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    TangentLinearSolver::Options tangent = {});
+
+/// The linearised calibration about a 3D run, as the 1D one; collective
+/// over the evolution's ranks as the 3D tangent-linear runs are, every
+/// rank's result alike.
+[[nodiscard]] CalibrationTangent SolveCalibrationTangent(
+    const Evolution3D& evolution, std::span<const double> times,
+    const TangentPerturbation3D& direction,
+    std::span<const double> finalSeaLevel,
+    const ForwardTrajectory3D* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    TangentLinearSolver3D::Options tangent = {});
+
+/// The tangent-linear run of a calibrated run: the derivative of its
+/// responses along a direction, the initial sea level re-calibrated.
+struct CalibratedTangent {
+  /// The run along the direction and the change of the initial sea level
+  /// together, as TangentLinearSolver::Run returns it.
+  std::vector<Evolution::Snapshot> snapshots;
+  std::vector<double> initialSeaLevel;  ///< CalibrationTangent's
+  std::vector<double> updates;          ///< CalibrationTangent::updates
+  /// The tangent-linear runs made: the linearised calibration's and, about
+  /// a migrating run, the one that formed the snapshots.
+  int runs = 0;
+  bool converged = false;
+};
+
+/**
+ * @brief The total tangent-linear run about a calibrated run:
+ * SolveCalibrationTangent, then TangentLinearSolver::Run along `direction`
+ * with the initial sea level it found (the forward mode of
+ * ComputeCalibratedKernels: an objective's duals paired with these
+ * snapshots are its total kernels paired with the direction, plus its
+ * multiplier paired with `finalSeaLevel`). About a frozen run the initial
+ * sea level moves nothing, and the snapshots are the run along the
+ * direction itself.
+ */
+[[nodiscard]] CalibratedTangent ComputeCalibratedTangent(
+    const Evolution& evolution, std::span<const double> times,
+    const TangentPerturbation& direction,
+    std::span<const double> finalSeaLevel,
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    TangentLinearSolver::Options tangent = {});
+
+/// The 3D total tangent-linear run, as the 1D one.
+struct CalibratedTangent3D {
+  std::vector<Evolution3D::Snapshot> snapshots;
+  std::vector<double> initialSeaLevel;
+  std::vector<double> updates;
+  int runs = 0;
+  bool converged = false;
+};
+
+/// The total tangent-linear run about a calibrated 3D run, as the 1D one;
+/// collective as the 3D tangent-linear runs are.
+[[nodiscard]] CalibratedTangent3D ComputeCalibratedTangent(
+    const Evolution3D& evolution, std::span<const double> times,
+    const TangentPerturbation3D& direction,
+    std::span<const double> finalSeaLevel,
+    const ForwardTrajectory3D* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    TangentLinearSolver3D::Options tangent = {});
 
 /**
  * @brief The second-order kernels of a calibrated migrating run, the

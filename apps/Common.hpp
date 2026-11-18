@@ -3,7 +3,8 @@
 /**
  * @file Common.hpp
  * @brief The run scaffold the commands of the sea level equation share
- * (`solve` and `kernel`): their shared config members and the one reader
+ * (`solve`, `kernel` and `tangent`): their shared config members and the
+ * one reader
  * of them, the Earth built from the `model` block (1-D or 3-D as its
  * files make it), the state (the sea level and the ice at one instant,
  * where the run has an ocean) and the ice change read from their file
@@ -145,6 +146,21 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 /// StaticLoadsOf).
 [[nodiscard]] Run ReadRun(const Json& top,
                           const std::filesystem::path& directory);
+
+/// The terms' clock of a run (TermClock): dates from the window's start in
+/// a dated run, the run's own clock in its unit in one counting forwards;
+/// none in the static problem. What ReadForcing reads a run's terms on,
+/// and a perturbation's.
+[[nodiscard]] std::optional<TermClock> TermClockOf(const Run& run);
+
+/// Holds a forcing read for a run (the run's own, or a perturbation's, read
+/// by ReadForcing against the run's clock and ocean) to the run's state:
+/// `block` is its `forcing` block. In the static problem a `thickness` term
+/// of the ice change without the state's date is refused; with the state
+/// at the window's end, a `change` term or a cap, and any forcing beside
+/// the ice, which a calibrated initial sea level does not take.
+void HoldForcingToState(const Run& run, const Forcing& forcing,
+                        const Json& block);
 
 /// Refuses the `solver` members that set the 3-D step (`step`,
 /// `step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb`)
@@ -305,8 +321,22 @@ class RunIce {
   RunIce(const Run& run, const Json& top, InputFiles& files,
          double stateTime);
 
+  /// A DIRECTION of a run's ice change: the terms `terms` (read from the
+  /// list `list`, a `forcing.ice_change` of a `perturbation` block) about
+  /// the state of the run's ice `of`, read as a run's own terms are, each
+  /// linear in what it gives: a `thickness` term its file's value less its
+  /// value at the state's instant, a `change` term its file's value, a
+  /// `cap_fraction` its fraction of the state's ice, a `cap_thickness` its
+  /// Gaussian as it stands (a direction takes no ice, so nothing of it is
+  /// held to what the state holds, and CheckHeld is not for it). ChangeAt
+  /// and ChangeSince give the direction; `list` must outlive it.
+  RunIce(const RunIce& of, std::span<const IceChangeTerm> terms,
+         const Json& list, InputFiles& files);
+
   /// The state's ice thickness, SI.
   [[nodiscard]] const std::vector<double>& State() const { return state_; }
+  /// The state's instant on its files' axes, SI seconds.
+  [[nodiscard]] double StateTime() const { return stateTime_; }
   /// Whether there is a change at all (any term).
   [[nodiscard]] bool Changes() const { return !terms_.empty(); }
   /// The ice change at SI time `time`: the terms' sum, the first taken as
@@ -356,8 +386,15 @@ class RunIce {
   [[nodiscard]] std::vector<double> TermAt(const Term& term, double time,
                                            bool before = false) const;
 
+  /// Reads the terms of `list` at the state's instant: a run's own, or,
+  /// with `direction`, a direction's (a cap of thickness not held to the
+  /// state's ice).
+  void ReadTerms(std::span<const IceChangeTerm> terms, const Json& list,
+                 InputFiles& files, bool direction);
+
   const SurfaceGrid* grid_;
   const Json* block_ = nullptr;  ///< `forcing.ice_change`, where given
+  double stateTime_ = 0.0;
   std::vector<double> state_;
   std::vector<Term> terms_;
 };
@@ -688,14 +725,18 @@ CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
 /// load's; the others' from their terms, TimedLoads::At, TideAt,
 /// SeismicSourcesAt), and under migrating shorelines the ice thickness's
 /// (`thicknessBefore`). `loads` are the run's surface loads (null without
-/// any), held by the forcing.
+/// any), held by the forcing. `leftLimits` says whether the left limits
+/// are given, in place of the rule: a perturbation's forcing is read at
+/// the nodes its run steps, the left limits of that run's jumps among
+/// them.
 template <class EvolutionForcing>
 [[nodiscard]] EvolutionForcing ForcingOf(
     const Run& run, const GRDSolver& solver,
     const std::function<std::vector<double>(double)>& iceLoad,
     std::shared_ptr<const SurfaceLoads> loads,
     const std::function<std::vector<double>(double)>& iceLoadBefore = {},
-    const std::function<std::vector<double>(double)>& thicknessBefore = {});
+    const std::function<std::vector<double>(double)>& thicknessBefore = {},
+    std::optional<bool> leftLimits = {});
 
 /// What drives a run through time on its world: the ice's grounded load
 /// under frozen shorelines (IceLoadOf; none without an ocean), its
@@ -759,11 +800,13 @@ void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when,
 /// with a time axis read at `ocean.date_kyr_bp` within its field's time
 /// span unless its input holds the span's ends, and `ocean.land`), the
 /// background state built from it in the solver's units, its ocean
-/// function flotation's, the ice change at the date (RunIce, held to what
-/// the state holds), SI, and the state's inputs as read. Without an ocean
+/// function flotation's, the run's ice and its change at the date (RunIce,
+/// held to what the state holds), SI, and the state's inputs as read. Without an ocean
 /// the background is GRDSolver::NoOceanState and the rest is empty.
 struct StaticWorld {
   GRDSolver::State background;
+  /// The run's ice (RunIce), null without an ocean.
+  std::shared_ptr<const RunIce> ice;
   std::vector<double> change;
   std::string iceRead;
   std::string seaLevelRead;

@@ -299,22 +299,80 @@ InitialSeaLevelCalibration3D CalibrateInitialSeaLevel(
 
 namespace {
 
-/// The iteration both evolutions share; `initialSeaLevelKernel(m)` is the
-/// initial sea level kernel of the measurements m by a sweep that forms
-/// nothing else it need not.
-template <typename KernelFn>
-CalibrationMultiplier MultiplierOf(
-    std::size_t fieldSize, std::size_t last,
-    const std::map<std::size_t, Measurement>& measurements, bool migrating,
-    const CalibrationMultiplierOptions& options,
-    KernelFn&& initialSeaLevelKernel) {
+/// A fixed point on the calibrated points, as far as it went.
+struct CalibratedPoints {
+  std::vector<double> field;
+  std::vector<double> updates;
+  int passes = 0;
+  bool converged = false;
+};
+
+/// The iteration's weights as a field, its options held to what it takes.
+std::vector<double> IterationWeights(const CalibrationMultiplierOptions& options,
+                                     std::size_t fieldSize) {
   if (options.iterations < 1) {
     throw std::invalid_argument("iterations must be at least one");
   }
   if (!(options.rtol > 0.0)) {
     throw std::invalid_argument("rtol must be positive");
   }
-  const auto w = WeightsOf(options.weights, fieldSize);
+  return WeightsOf(options.weights, fieldSize);
+}
+
+/// The linear fixed point x = P image(x) on the points P where the weights
+/// `w` are positive, which the derivatives of a calibrated run share: the
+/// multiplier's, image the initial sea level kernel of the measurements
+/// less x at the last node (A^T), and the linearised calibration's, image
+/// the right side less the final sea level change of a run along the
+/// initial sea level x (A). From zero, Anderson-mixed, until the largest
+/// change of x is below the tolerance times its largest value.
+template <typename ImageFn>
+CalibratedPoints SolveOnCalibratedPoints(
+    std::span<const double> w, const CalibrationMultiplierOptions& options,
+    ImageFn&& imageOf) {
+  const auto fieldSize = w.size();
+  CalibratedPoints out;
+  out.field.assign(fieldSize, 0.0);
+  auto mixer = detail::AndersonMixer(options.anderson_memory);
+  auto& x = out.field;
+  for (auto n = 0; n < options.iterations; ++n) {
+    std::vector<double> image = imageOf(x);
+    if (image.size() != fieldSize) {
+      throw std::logic_error(
+          "the iteration's image is not a field on the grid");
+    }
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      if (!(w[i] > 0.0)) image[i] = 0.0;
+    }
+    auto change = 0.0;
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      change = std::max(change, std::abs(image[i] - x[i]));
+    }
+    const auto scale = MaxAbs(image);
+    const auto update = scale > 0.0 ? change / scale : 0.0;
+    out.updates.push_back(update);
+    ++out.passes;
+    if (options.on_iteration) options.on_iteration(n + 1, update);
+    if (update <= options.rtol) {
+      x = std::move(image);
+      out.converged = true;
+      break;
+    }
+    x = mixer.Update(x, image);
+  }
+  return out;
+}
+
+/// The multiplier's iteration both evolutions share;
+/// `initialSeaLevelKernel(m)` is the initial sea level kernel of the
+/// measurements m by a sweep that forms nothing else it need not.
+template <typename KernelFn>
+CalibrationMultiplier MultiplierOf(
+    std::size_t fieldSize, std::size_t last,
+    const std::map<std::size_t, Measurement>& measurements, bool migrating,
+    const CalibrationMultiplierOptions& options,
+    KernelFn&& initialSeaLevelKernel) {
+  const auto w = IterationWeights(options, fieldSize);
   CalibrationMultiplier out;
   out.multiplier.assign(fieldSize, 0.0);
   out.measurements = measurements;
@@ -335,33 +393,20 @@ CalibrationMultiplier MultiplierOf(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) dual[i] -= lambda[i];
     return forced;
   };
-  auto mixer = detail::AndersonMixer(options.anderson_memory);
-  auto& lambda = out.multiplier;
-  for (auto n = 0; n < options.iterations; ++n) {
-    auto image = initialSeaLevelKernel(forcing(lambda));
-    if (image.size() != fieldSize) {
-      throw std::logic_error("the sweep formed no initial sea level kernel");
-    }
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      if (!(w[i] > 0.0)) image[i] = 0.0;
-    }
-    auto change = 0.0;
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      change = std::max(change, std::abs(image[i] - lambda[i]));
-    }
-    const auto scale = MaxAbs(image);
-    const auto update = scale > 0.0 ? change / scale : 0.0;
-    out.updates.push_back(update);
-    ++out.sweeps;
-    if (options.on_iteration) options.on_iteration(n + 1, update);
-    if (update <= options.rtol) {
-      lambda = std::move(image);
-      out.converged = true;
-      break;
-    }
-    lambda = mixer.Update(lambda, image);
-  }
-  out.measurements = forcing(lambda);
+  auto solved = SolveOnCalibratedPoints(
+      w, options, [&](std::span<const double> lambda) {
+        auto image = initialSeaLevelKernel(forcing(lambda));
+        if (image.size() != fieldSize) {
+          throw std::logic_error(
+              "the sweep formed no initial sea level kernel");
+        }
+        return image;
+      });
+  out.multiplier = std::move(solved.field);
+  out.updates = std::move(solved.updates);
+  out.sweeps = solved.passes;
+  out.converged = solved.converged;
+  out.measurements = forcing(out.multiplier);
   return out;
 }
 
@@ -470,6 +515,177 @@ CalibratedKernels3D ComputeCalibratedKernels(
                                         stageOceanFunctions);
   return WithMultiplier<CalibratedKernels3D>(std::move(kernels),
                                              std::move(multiplier));
+}
+
+namespace {
+
+/// The linearised calibration both evolutions share, and the run it ends
+/// with. `Solver` is the tangent-linear solver, `Direction` its
+/// perturbation; with `finish`, the snapshots of the run along the
+/// direction and the change of the initial sea level together.
+template <typename Result, typename Solver, typename Direction,
+          typename Trajectory>
+Result CalibratedTangentOf(
+    const Solver& solver, std::size_t fieldSize,
+    std::span<const double> times, const Direction& direction,
+    std::span<const double> finalSeaLevel, const Trajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const CalibrationMultiplierOptions& options, bool finish) {
+  RequireNodes(times);
+  const auto w = IterationWeights(options, fieldSize);
+  if (!finalSeaLevel.empty() && finalSeaLevel.size() != fieldSize) {
+    throw std::invalid_argument(
+        "the change of the final sea level must be a field on the solver's "
+        "grid");
+  }
+  const auto& held = direction.initialSeaLevel;
+  if (!held.empty() && held.size() != fieldSize) {
+    throw std::invalid_argument(
+        "initialSeaLevel must be a field on the solver's grid");
+  }
+  for (auto i = std::size_t{0}; i < held.size(); ++i) {
+    if (w[i] > 0.0 && held[i] != 0.0) {
+      throw std::invalid_argument(
+          "the direction's initial sea level is not zero where the "
+          "calibration sets it: a calibrated run's initial sea level is a "
+          "parameter only where the weights vanish");
+    }
+  }
+  const auto last = times.size() - 1;
+  const auto migrating = !oceanFunctions.empty();
+  Result out;
+  // the run along the direction, the calibrated points' initial sea level
+  // held, and the right side it leaves at the last node
+  auto along = decltype(out.snapshots){};
+  if (!direction.Empty()) {
+    along = solver.Run(times, direction, trajectory, oceanFunctions,
+                       stageOceanFunctions);
+    ++out.runs;
+  }
+  auto rhs = std::vector<double>(fieldSize, 0.0);
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    if (!(w[i] > 0.0)) continue;
+    if (!finalSeaLevel.empty()) rhs[i] = finalSeaLevel[i];
+    if (!along.empty()) rhs[i] -= along[last].relativeSeaLevelChange[i];
+  }
+  // the run along an initial sea level alone
+  const auto alongSeaLevel = [&](std::span<const double> seaLevel) {
+    auto alone = Direction{};
+    alone.initialSeaLevel.assign(seaLevel.begin(), seaLevel.end());
+    ++out.runs;
+    return solver.Run(times, alone, nullptr, oceanFunctions,
+                      stageOceanFunctions);
+  };
+  auto total = [&](std::span<const double> onPoints) {
+    auto sum = std::vector<double>(onPoints.begin(), onPoints.end());
+    for (auto i = std::size_t{0}; i < held.size(); ++i) sum[i] += held[i];
+    return sum;
+  };
+  if (!migrating) {
+    // the run does not depend on its initial sea level: A vanishes
+    out.initialSeaLevel = total(rhs);
+    out.converged = true;
+    if (finish) {
+      out.snapshots = along.empty() ? alongSeaLevel(out.initialSeaLevel)
+                                    : std::move(along);
+    }
+    return out;
+  }
+  auto solved = SolveOnCalibratedPoints(
+      w, options, [&](std::span<const double> seaLevel) {
+        auto image = rhs;
+        // from zero the run along it is zero
+        if (std::ranges::all_of(seaLevel, [](double v) { return v == 0.0; })) {
+          return image;
+        }
+        const auto run = alongSeaLevel(seaLevel);
+        const auto& moved = run[last].relativeSeaLevelChange;
+        for (auto i = std::size_t{0}; i < fieldSize; ++i) image[i] -= moved[i];
+        return image;
+      });
+  out.initialSeaLevel = total(solved.field);
+  out.updates = std::move(solved.updates);
+  out.converged = solved.converged;
+  if (finish) {
+    auto whole = direction;
+    whole.initialSeaLevel = out.initialSeaLevel;
+    out.snapshots = solver.Run(times, whole, trajectory, oceanFunctions,
+                               stageOceanFunctions);
+    ++out.runs;
+  }
+  return out;
+}
+
+/// The linearised calibration alone, of a result that holds the run too.
+template <typename Whole>
+CalibrationTangent WithoutTheRun(Whole&& whole) {
+  CalibrationTangent out;
+  out.initialSeaLevel = std::move(whole.initialSeaLevel);
+  out.updates = std::move(whole.updates);
+  out.runs = whole.runs;
+  out.converged = whole.converged;
+  return out;
+}
+
+}  // namespace
+
+CalibrationTangent SolveCalibrationTangent(
+    const Evolution& evolution, std::span<const double> times,
+    const TangentPerturbation& direction,
+    std::span<const double> finalSeaLevel, const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const CalibrationMultiplierOptions& options,
+    TangentLinearSolver::Options tangent) {
+  return WithoutTheRun(CalibratedTangentOf<CalibratedTangent>(
+      TangentLinearSolver(evolution, std::move(tangent)),
+      evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
+      trajectory, oceanFunctions, stageOceanFunctions, options, false));
+}
+
+CalibrationTangent SolveCalibrationTangent(
+    const Evolution3D& evolution, std::span<const double> times,
+    const TangentPerturbation3D& direction,
+    std::span<const double> finalSeaLevel,
+    const ForwardTrajectory3D* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const CalibrationMultiplierOptions& options,
+    TangentLinearSolver3D::Options tangent) {
+  return WithoutTheRun(CalibratedTangentOf<CalibratedTangent3D>(
+      TangentLinearSolver3D(evolution, std::move(tangent)),
+      evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
+      trajectory, oceanFunctions, stageOceanFunctions, options, false));
+}
+
+CalibratedTangent ComputeCalibratedTangent(
+    const Evolution& evolution, std::span<const double> times,
+    const TangentPerturbation& direction,
+    std::span<const double> finalSeaLevel, const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const CalibrationMultiplierOptions& options,
+    TangentLinearSolver::Options tangent) {
+  return CalibratedTangentOf<CalibratedTangent>(
+      TangentLinearSolver(evolution, std::move(tangent)),
+      evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
+      trajectory, oceanFunctions, stageOceanFunctions, options, true);
+}
+
+CalibratedTangent3D ComputeCalibratedTangent(
+    const Evolution3D& evolution, std::span<const double> times,
+    const TangentPerturbation3D& direction,
+    std::span<const double> finalSeaLevel,
+    const ForwardTrajectory3D* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const CalibrationMultiplierOptions& options,
+    TangentLinearSolver3D::Options tangent) {
+  return CalibratedTangentOf<CalibratedTangent3D>(
+      TangentLinearSolver3D(evolution, std::move(tangent)),
+      evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
+      trajectory, oceanFunctions, stageOceanFunctions, options, true);
 }
 
 void RefuseCalibratedSecondOrderKernels() {

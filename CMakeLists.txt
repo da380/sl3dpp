@@ -77,7 +77,7 @@ set(SL3DPP_GAUSSQUAD_PIN "bd4f51c2330dfd4901b141e61f8a136f70e96d2a")
 set(SL3DPP_INTERPOLATION_PIN "0935579fbfc69fea3ddf9850abb691d56a5514b9")
 set(SL3DPP_FFTWPP_PIN "aca248ba98cd3e4e73cb3713c6da5882678003b5")
 set(SL3DPP_GSHTRANS_PIN "c71313c52cd22a53b48b25302ab4afc20e158e32")
-set(SL3DPP_PLANETMODEL_PIN "90fbadc622fb927a08af0be625b86e1109eb2502")
+set(SL3DPP_PLANETMODEL_PIN "9888f082e99dc10138460ff014deabd2b47c2b90")
 
 # The revision each library is fetched at: the override when one is set,
 # else the pin.
@@ -184,6 +184,7 @@ add_library(sl3dpp STATIC
   src/io/FieldHistory.cpp
   src/io/ModelViscosity.cpp
   src/io/ModelModuli.cpp
+  src/io/ModelField.cpp
   src/io/TrajectoryStore.cpp
   src/LoveNumbers.cpp
   src/Material.cpp

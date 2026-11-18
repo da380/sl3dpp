@@ -98,19 +98,10 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
          "`model.viscosity` file");
   }
   out.lmax = ReadDiscretisationBlock(top, 1).lmax;
+  if (timed) out.times = ReadWindow(top.At("times"));
   // the terms' times are given as the window's are: dates in a dated run,
   // times on the run's own clock in its unit in one counting forwards
-  auto clock = std::optional<TermClock>{};
-  if (timed) {
-    out.times = ReadWindow(top.At("times"));
-    clock = out.times->Dated()
-                ? TermClock{.form = TermClock::Form::Dated,
-                            .start_kyr_bp = out.times->Start(),
-                            .unit = {}}
-                : TermClock{.form = TermClock::Form::Forwards,
-                            .start_kyr_bp = std::nullopt,
-                            .unit = out.times->unit};
-  }
+  const auto clock = TermClockOf(out);
   // the state is optional: without an `ocean` block the body has none
   const auto ocean = Has(top, "ocean");
   // without gravity there is no sea level, and so no state
@@ -135,41 +126,9 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
          "is a tide, an external potential, which a run without gravity "
          "(`gravity`: \"none\") does not take");
   }
-  // the calibration's runs are under the ice alone
-  if (out.Calibrating() && out.forcing.BesideTheIce()) {
-    const auto& forcing = top.At("forcing");
-    Fail(forcing.At(!out.forcing.load.empty()
-                        ? "load"
-                        : (!out.forcing.tide.empty() ? "tide" : "seismic")),
-         "is a forcing beside the ice, which a calibrated initial sea "
-         "level does not take: the calibration's runs are under the ice "
-         "alone. Give the state at the window's start (`ocean.at`: "
-         "\"start\")");
-  }
-  // the terms of the ice change held to the state's instant (an ice
-  // change has an ocean)
-  for (auto k = std::size_t{0}; k < out.forcing.ice_change.size(); ++k) {
-    const auto& term = out.forcing.ice_change[k];
-    const auto& member = IceChangeMember(top).At(k).At(term.Member());
-    if (!timed && term.kind == IceChangeTerm::Kind::Thickness &&
-        !out.ocean->date_kyr_bp) {
-      Fail(member,
-           "measures its change from the state's date, `ocean.date_kyr_bp`, "
-           "which the `ocean` block does not give (a state of files without "
-           "a time axis has none): give the change itself, a `change` term");
-    }
-    if (timed && term.kind != IceChangeTerm::Kind::Thickness &&
-        out.ocean->at == WindowEnd::End) {
-      Fail(member,
-           std::format("is {}, which the state at the window's end "
-                       "(`ocean.at`: \"end\") does not take: the ice changes "
-                       "are then thickness histories, `thickness` terms, each "
-                       "read back from the end",
-                       term.kind == IceChangeTerm::Kind::Change
-                           ? "a change taken as it stands"
-                           : "a cap of ice change"));
-    }
-  }
+  // the forcing held to the state: the ice change's terms to its instant,
+  // a calibrated run's to the ice alone
+  HoldForcingToState(out, out.forcing, top.At("forcing"));
   // without gravity the rotational feedback is none, and only none: the
   // inertia's change is read from the degree-2 potential, which a run
   // without gravity has not
@@ -225,6 +184,56 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
     out.solver = ReadSolverBlock(solver, out.lmax);
   }
   return out;
+}
+
+std::optional<TermClock> TermClockOf(const Run& run) {
+  if (!run.times) return std::nullopt;
+  return run.times->Dated()
+             ? TermClock{.form = TermClock::Form::Dated,
+                         .start_kyr_bp = run.times->Start(),
+                         .unit = {}}
+             : TermClock{.form = TermClock::Form::Forwards,
+                         .start_kyr_bp = std::nullopt,
+                         .unit = run.times->unit};
+}
+
+void HoldForcingToState(const Run& run, const Forcing& forcing,
+                        const Json& block) {
+  const auto timed = run.times.has_value();
+  // the calibration's runs are under the ice alone
+  if (run.Calibrating() && forcing.BesideTheIce()) {
+    Fail(block.At(!forcing.load.empty()
+                      ? "load"
+                      : (!forcing.tide.empty() ? "tide" : "seismic")),
+         "is a forcing beside the ice, which a calibrated initial sea "
+         "level does not take: the calibration's runs are under the ice "
+         "alone. Give the state at the window's start (`ocean.at`: "
+         "\"start\")");
+  }
+  // the terms of the ice change held to the state's instant (an ice
+  // change has an ocean)
+  for (auto k = std::size_t{0}; k < forcing.ice_change.size(); ++k) {
+    const auto& term = forcing.ice_change[k];
+    const auto& member = block.At("ice_change").At(k).At(term.Member());
+    if (!timed && term.kind == IceChangeTerm::Kind::Thickness &&
+        !run.ocean->date_kyr_bp) {
+      Fail(member,
+           "measures its change from the state's date, `ocean.date_kyr_bp`, "
+           "which the `ocean` block does not give (a state of files without "
+           "a time axis has none): give the change itself, a `change` term");
+    }
+    if (timed && term.kind != IceChangeTerm::Kind::Thickness &&
+        run.ocean->at == WindowEnd::End) {
+      Fail(member,
+           std::format("is {}, which the state at the window's end "
+                       "(`ocean.at`: \"end\") does not take: the ice changes "
+                       "are then thickness histories, `thickness` terms, each "
+                       "read back from the end",
+                       term.kind == IceChangeTerm::Kind::Change
+                           ? "a change taken as it stands"
+                           : "a cap of ice change"));
+    }
+  }
 }
 
 bool LateralKernelsAsked(const Json& top) {
@@ -534,16 +543,28 @@ std::string_view TermReadOf(const IceChangeTerm& term) {
 
 RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
                double stateTime)
-    : grid_(&files.Grid()) {
+    : grid_(&files.Grid()), stateTime_(stateTime) {
   const auto& member = IceMember(top);
   const auto state = files.Open(run.ocean->ice, member);
   state_ = IceThicknessAt(run.ocean->ice, *state, member, stateTime,
                           StateReadOf(run));
   if (run.forcing.ice_change.empty()) return;
-  block_ = &IceChangeMember(top);
-  for (auto k = std::size_t{0}; k < run.forcing.ice_change.size(); ++k) {
+  ReadTerms(run.forcing.ice_change, IceChangeMember(top), files, false);
+}
+
+RunIce::RunIce(const RunIce& of, std::span<const IceChangeTerm> terms,
+               const Json& list, InputFiles& files)
+    : grid_(of.grid_), stateTime_(of.stateTime_), state_(of.state_) {
+  ReadTerms(terms, list, files, true);
+}
+
+void RunIce::ReadTerms(std::span<const IceChangeTerm> terms, const Json& list,
+                       InputFiles& files, bool direction) {
+  const auto stateTime = stateTime_;
+  block_ = &list;
+  for (auto k = std::size_t{0}; k < terms.size(); ++k) {
     auto held = Term{};
-    held.term = run.forcing.ice_change[k];
+    held.term = terms[k];
     const auto& term = held.term;
     held.member = &block_->At(k).At(term.Member());
     const auto& item = *held.member;
@@ -596,8 +617,9 @@ RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
         for (auto i = std::size_t{0}; i < mask.size(); ++i) {
           held.fixed[i] = term.amount * mask[i] * (fraction ? state_[i] : 1.0);
           // a cap of thickness has no edge: where it melts, it takes no
-          // more than the ice the state holds there
-          if (!fraction) {
+          // more than the ice the state holds there (a direction's takes
+          // none, and is its Gaussian)
+          if (!fraction && !direction) {
             held.fixed[i] = std::max(held.fixed[i], -std::max(state_[i], 0.0));
           }
         }
@@ -1466,14 +1488,16 @@ EvolutionForcing ForcingOf(
     const std::function<std::vector<double>(double)>& iceLoad,
     std::shared_ptr<const SurfaceLoads> loads,
     const std::function<std::vector<double>(double)>& iceLoadBefore,
-    const std::function<std::vector<double>(double)>& thicknessBefore) {
+    const std::function<std::vector<double>(double)>& thicknessBefore,
+    std::optional<bool> leftLimits) {
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto clock = SolverClockOf(run, scales);
   const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
   const auto ice = static_cast<bool>(iceLoad);
   // where the forcing jumps, every channel's left limit beside it
-  const auto jumps = run.times && StepGridOf(run, scales).Repeats();
+  const auto jumps = leftLimits ? *leftLimits
+                                : run.times && StepGridOf(run, scales).Repeats();
   auto forcing = EvolutionForcing{};
   if (jumps && thicknessBefore) forcing.iceThicknessBefore = thicknessBefore;
   if (loads) {
@@ -1607,13 +1631,13 @@ template Evolution::Forcing ForcingOf<Evolution::Forcing>(
     const std::function<std::vector<double>(double)>&,
     std::shared_ptr<const SurfaceLoads>,
     const std::function<std::vector<double>(double)>&,
-    const std::function<std::vector<double>(double)>&);
+    const std::function<std::vector<double>(double)>&, std::optional<bool>);
 template Evolution3D::Forcing ForcingOf<Evolution3D::Forcing>(
     const Run&, const GRDSolver&,
     const std::function<std::vector<double>(double)>&,
     std::shared_ptr<const SurfaceLoads>,
     const std::function<std::vector<double>(double)>&,
-    const std::function<std::vector<double>(double)>&);
+    const std::function<std::vector<double>(double)>&, std::optional<bool>);
 
 template <class EvolutionForcing>
 Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
@@ -1764,7 +1788,8 @@ StaticWorld LoadStaticWorld(const Run& run, const Json& top,
   // lists it
   static_cast<void>(CoveredTime(source.input, *sea, SeaLevelMember(run, top),
                                 time, StateReadOf(run)));
-  const RunIce ice(run, top, files, time);
+  const auto held = std::make_shared<const RunIce>(run, top, files, time);
+  const auto& ice = *held;
   ice.CheckHeld(std::span(&time, 1), nullptr);
   // the state's ice, and its sea level: given, or by the flotation
   // construction with the solver's own densities from the topography and
@@ -1779,6 +1804,7 @@ StaticWorld LoadStaticWorld(const Run& run, const Json& top,
   auto out = StaticWorld{};
   out.background =
       solver.MakeState(std::move(iceNd), std::move(seaNd), land.held);
+  out.ice = held;
   out.change = ice.ChangeAt(time);
   const auto slice = [&date](const io::FieldHistory& file) {
     return file.Span() ? std::format("{:g} kyr BP", date.value_or(0.0))

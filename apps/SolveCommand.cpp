@@ -60,6 +60,7 @@
 #include "Ranks.hpp"
 #include "RunHash.hpp"
 #include "Serialize.hpp"
+#include "SolveFiles.hpp"
 #include "Trajectory.hpp"
 #include "sl3dpp/ElasticPerturbation3D.hpp"
 #include "sl3dpp/Evolution.hpp"
@@ -78,28 +79,8 @@ namespace sl3dpp::app {
 
 namespace {
 
-/// One node of the accumulated history, SI, kept across restarts: the
-/// node as the config gives it (Window::nodes: its date, kyr BP, in a
-/// dated run, its time on the run's clock in its unit in one counting
-/// forwards), the response, the potentials of the tangential
-/// displacement (the toroidal one in the frame of no net rotation of the
-/// surface, empty where the node has none), under migrating shorelines
-/// the ocean function, and, in a 3-D run, the node's closure: the passes
-/// of its combined fixed point, their conjugate-gradient iterations (under
-/// that step solver) and its last residual (zero in 1-D).
-struct Node {
-  double node = 0.0;
-  std::vector<double> relativeSeaLevelChange;
-  std::vector<double> displacement;
-  std::vector<double> potential;
-  std::vector<double> tangentialPotential;
-  std::vector<double> toroidalPotential;
-  std::array<double, 3> angularVelocity{};
-  std::vector<double> oceanFunction;  ///< migrating runs alone
-  long long stepIterations = 0;
-  long long solveIterations = 0;
-  double stepResidual = 0.0;
-};
+/// One node of the accumulated history, kept across restarts.
+using Node = HistoryNode;
 
 /// The outputs' `ocean` metadata of a run without an ocean, and their
 /// `gravity` metadata of a run without gravity.
@@ -513,9 +494,8 @@ std::optional<io::TrajectoryStore> StoreToRecord(
   return ContinueTrajectory(top, block, *run, *resumed);
 }
 
-/// The closure of a run's steps as the outputs name it: `direct` in 1-D
-/// (each step one solve per degree), the 3-D step solver's word
-/// otherwise.
+}  // namespace
+
 std::string_view StepSolverName(const Run& run, bool threeD) {
   if (!threeD) return "direct";
   return run.solver.step ==
@@ -523,6 +503,8 @@ std::string_view StepSolverName(const Run& run, bool threeD) {
              ? "conjugate_gradients"
              : "fixed_point";
 }
+
+namespace {
 
 /// The radial operator of a run on a rheology: with gravity, or without
 /// it (`gravity`: "none").
@@ -565,9 +547,8 @@ std::string_view SchemeName(Scheme scheme) {
   return "exponential_trapezoid";
 }
 
-/// The surface loads a run through time applied at each node, SI: its
-/// loads on the terms' clock at the nodes' solver times, as the run took
-/// them (ForcingOf); empty without any.
+}  // namespace
+
 std::vector<SurfaceLoads::Node> LoadsAtNodes(const Run& run,
                                              const GRDSolver& solver,
                                              const SurfaceLoads* loads) {
@@ -581,32 +562,15 @@ std::vector<SurfaceLoads::Node> LoadsAtNodes(const Run& run,
   return out;
 }
 
-/// The histories as one surface file: SI node fields on a time axis in
-/// seconds, relative to the present (negative past) in a dated run, the
-/// nodes' dates listed in `dates_kyr_bp`, and on the run's own clock in
-/// one counting forwards, its nodes listed in its unit in `times` beside
-/// the unit's name, `time_unit`. Beside the response: the surface loads
-/// applied at each node (`loads`, LoadsAtNodes: every term summed as
-/// given, and by their properties), the forcing's counts and single
-/// terms (AddForcingCounts), each node's closure (`step_iterations`,
-/// `solve_iterations`, `step_residual`, zero in 1-D) and, in a 3-D run,
-/// the radial reference model's history under the same forcing
-/// (`reference`; null otherwise); the ocean function, under migrating
-/// shorelines each node's, under frozen ones the state's, a static field;
-/// and the fields `output` asks for (AddAskedFields). Without an ocean the
-/// fields and metadata of the state (the initial sea level, the ocean
-/// function, the state's inputs, the shorelines) are left out, and `ocean`
-/// says there is none.
-void WriteHistoryFile(const SolveInput& input,
-                      const std::filesystem::path& config,
-                      const SurfaceGrid& grid, const Reached& reached,
-                      const Loaded& world, const BuiltEarth& earth,
-                      const std::vector<SurfaceLoads::Node>& loads,
-                      const std::vector<Node>* reference,
-                      const StepsAgainstRelaxation& steps) {
+planetmodel::SurfaceFile HistoryFile(
+    const Run& run, const std::filesystem::path& config,
+    const SurfaceGrid& grid, std::span<const HistoryNode> history,
+    const std::vector<double>& initialSeaLevel, std::string_view origin,
+    const Loaded& world, const BuiltEarth& earth,
+    const std::vector<SurfaceLoads::Node>& loads,
+    const std::vector<HistoryNode>* reference,
+    const StepsAgainstRelaxation& steps) {
   namespace pm = planetmodel;
-  const auto& run = input.run;
-  const auto& history = reached.history;
   auto file = pm::SurfaceFile{};
   file.grid = AngularGridOf(grid);
   file.source = std::format("sl3d solve (sl3dpp {})", Version());
@@ -673,7 +637,7 @@ void WriteHistoryFile(const SolveInput& input,
   if (run.ocean) {
     file.meta.emplace("shorelines",
                       std::string{NameOf(run.ocean->shorelines)});
-    file.meta.emplace("initial_sea_level", reached.origin);
+    file.meta.emplace("initial_sea_level", std::string{origin});
   }
   file.meta.emplace("rotation", std::string{NameOf(run.rotation)});
   if (!run.forcing.load.empty()) {
@@ -706,7 +670,7 @@ void WriteHistoryFile(const SolveInput& input,
   const auto fieldSize = grid.FieldSize();
   const auto potential = pm::Dimensions{.length = 2, .time = -2};
   const auto load = pm::Dimensions{.mass = 1, .length = -2};
-  auto gather = [&](const std::vector<Node>& from, auto member) {
+  auto gather = [&](std::span<const HistoryNode> from, auto member) {
     auto values = std::vector<double>{};
     values.reserve(from.size() * fieldSize);
     for (const auto& kept : from) {
@@ -754,18 +718,18 @@ void WriteHistoryFile(const SolveInput& input,
   // without gravity there is no equipotential and no potential
   if (run.gravitating) {
     put("relative_sea_level_change",
-        gather(history, &Node::relativeSeaLevelChange), pm::units::LENGTH,
+        gather(history, &HistoryNode::relativeSeaLevelChange), pm::units::LENGTH,
         "sea-level change from the window's start");
   }
-  put("displacement", gather(history, &Node::displacement), pm::units::LENGTH,
+  put("displacement", gather(history, &HistoryNode::displacement), pm::units::LENGTH,
       "radial surface displacement");
-  put("tangential_potential", gather(history, &Node::tangentialPotential),
+  put("tangential_potential", gather(history, &HistoryNode::tangentialPotential),
       pm::units::LENGTH,
       "the tangential displacement's potential V (the displacement its "
       "surface gradient)");
   // the toroidal potential where the run has one (seismic sources, a 3-D
   // run), zero at a node without (a 3-D run's radial start)
-  if (std::ranges::any_of(history, [](const Node& kept) {
+  if (std::ranges::any_of(history, [](const HistoryNode& kept) {
         return !kept.toroidalPotential.empty();
       })) {
     auto values = std::vector<double>{};
@@ -784,7 +748,7 @@ void WriteHistoryFile(const SolveInput& input,
         "of no net rotation of the surface");
   }
   if (run.gravitating) {
-    put("potential", gather(history, &Node::potential), potential,
+    put("potential", gather(history, &HistoryNode::potential), potential,
         "gravitational potential perturbation at the surface");
   }
   if (run.ocean) {
@@ -796,11 +760,10 @@ void WriteHistoryFile(const SolveInput& input,
         "is this plus relative_sea_level_change there";
     file.variables.emplace(
         "initial_sea_level",
-        pm::SurfaceField("initial_sea_level", reached.initialSeaLevel,
-                         options));
+        pm::SurfaceField("initial_sea_level", initialSeaLevel, options));
   }
   if (run.Migrating()) {
-    put("ocean_function", gather(history, &Node::oceanFunction), std::nullopt,
+    put("ocean_function", gather(history, &HistoryNode::oceanFunction), std::nullopt,
         "the ocean function at each node, following flotation");
   } else if (run.ocean) {
     // frozen shorelines: the state's, which the run holds at every node
@@ -828,32 +791,41 @@ void WriteHistoryFile(const SolveInput& input,
     file.meta.emplace("omega_y_radial_model_rad_s", radialOmega[1]);
     file.meta.emplace("omega_z_radial_model_rad_s", radialOmega[2]);
     put("relative_sea_level_change_radial_model",
-        gather(*reference, &Node::relativeSeaLevelChange), pm::units::LENGTH,
+        gather(*reference, &HistoryNode::relativeSeaLevelChange), pm::units::LENGTH,
         "sea-level change from the window's start of the radial reference "
         "model (the deck's moduli, the radial reference viscosity) under the "
         "same forcing");
-    put("displacement_radial_model", gather(*reference, &Node::displacement),
+    put("displacement_radial_model", gather(*reference, &HistoryNode::displacement),
         pm::units::LENGTH,
         "radial surface displacement of the radial reference model under the "
         "same forcing");
-    put("potential_radial_model", gather(*reference, &Node::potential),
+    put("potential_radial_model", gather(*reference, &HistoryNode::potential),
         potential,
         "the radial reference model's potential perturbation at the surface "
         "under the same forcing");
   }
-  AddAskedFields(file, input.output, grid);
-  CreateParent(input.output.surface);
-  pm::WriteSurfaceFile(input.output.surface, file);
+  return file;
 }
 
-/// A node's closure into the history: a 3-D snapshot's passes, their
-/// conjugate-gradient iterations and its residual; a 1-D one has none.
-void KeepClosure(Node&, const Evolution::Snapshot&) {}
-void KeepClosure(Node& kept, const Evolution3D::Snapshot& snapshot) {
-  kept.stepIterations = snapshot.coupledIterations;
-  kept.solveIterations = snapshot.solveIterations;
-  kept.stepResidual = snapshot.coupledResidual;
+namespace {
+
+/// Writes a run through time's surface file (HistoryFile), with the
+/// fields `output` asks for added (AddAskedFields).
+void WriteHistoryFile(const SolveInput& input,
+                      const std::filesystem::path& config,
+                      const SurfaceGrid& grid, const Reached& reached,
+                      const Loaded& world, const BuiltEarth& earth,
+                      const std::vector<SurfaceLoads::Node>& loads,
+                      const std::vector<Node>* reference,
+                      const StepsAgainstRelaxation& steps) {
+  auto file = HistoryFile(input.run, config, grid, reached.history,
+                          reached.initialSeaLevel, reached.origin, world,
+                          earth, loads, reference, steps);
+  AddAskedFields(file, input.output, grid);
+  CreateParent(input.output.surface);
+  planetmodel::WriteSurfaceFile(input.output.surface, file);
 }
+
 
 /// A run through time over either evolution, as far as it goes. `make`
 /// builds the evolution from its options; `check` inspects each snapshot
@@ -875,7 +847,6 @@ Reached RunThrough(
   const auto started = std::chrono::steady_clock::now();
   const auto& run = input.run;
   const auto& window = *run.times;
-  const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   // the library's grid, a node where the forcing jumps repeated and a pair
@@ -891,8 +862,6 @@ Reached RunThrough(
       DriveOf<typename Evolution::Forcing>(run, top, solver, world);
   out.loads = drive.loads;
 
-  const auto toPotential = scales.Factor(PotentialDimensions);
-  const auto toOmega = 1.0 / scales.Time();
   const auto& ranks = TheRanks();
   // The history: on the first rank, which writes the outputs, every node's
   // fields and closure; on the others each node's closure alone (the
@@ -907,25 +876,7 @@ Reached RunThrough(
       history.push_back(std::move(kept));
       return;
     }
-    kept.relativeSeaLevelChange = snapshot.relativeSeaLevelChange;
-    kept.displacement = snapshot.displacement;
-    kept.potential = snapshot.potential;
-    kept.tangentialPotential = snapshot.tangentialPotential;
-    if (!snapshot.toroidalPotential.empty()) {
-      // in the frame of no net rotation of the surface: the rigid rotation
-      // in the solver's W is its gauge
-      kept.toroidalPotential =
-          WithoutNetRotation(grid, snapshot.toroidalPotential);
-    }
-    for (auto& v : kept.relativeSeaLevelChange) v *= length;
-    for (auto& v : kept.displacement) v *= length;
-    for (auto& v : kept.potential) v *= toPotential;
-    for (auto& v : kept.tangentialPotential) v *= length;
-    for (auto& v : kept.toroidalPotential) v *= length;
-    for (auto k = 0; k < 3; ++k) {
-      kept.angularVelocity[k] = snapshot.angularVelocity[k] * toOmega;
-    }
-    kept.oceanFunction = snapshot.oceanFunction;
+    KeepFields(kept, snapshot, solver);
     history.push_back(std::move(kept));
   };
 
@@ -1267,61 +1218,6 @@ std::string WriteThrough(const std::filesystem::path& config,
       steps.text);
 }
 
-/// A static problem's answer, SI: the sea level change, the radial
-/// displacement and the potential perturbation at the surface, the
-/// potentials of the tangential displacement (the toroidal one in the
-/// frame of no net rotation of the surface, empty where the run has none),
-/// the angular velocity perturbation and, under migrating shorelines, the
-/// ocean function the solve reaches (empty otherwise); and, of a solve
-/// that recorded them, the coefficients of the total load the body
-/// answered (the forcing's loads and the ocean's, kg m^-2) and of the
-/// potential (the tide's and the rotation's centrifugal change, m^2
-/// s^-2), empty otherwise.
-struct StaticAnswer {
-  std::vector<double> relativeSeaLevelChange;
-  std::vector<double> displacement;
-  std::vector<double> potential;
-  std::vector<double> tangentialPotential;
-  std::vector<double> toroidalPotential;
-  std::array<double, 3> angularVelocity{};
-  std::vector<double> oceanFunction;
-  std::vector<std::complex<double>> loadCoefficients;
-  std::vector<std::complex<double>> potentialCoefficients;
-};
-
-template <class Snapshot>
-StaticAnswer AnswerOf(const GRDSolver& solver, Snapshot snapshot) {
-  const auto& scales = solver.SolverScales();
-  const auto length = scales.Length();
-  const auto toPotential = scales.Factor(PotentialDimensions);
-  const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  auto out = StaticAnswer{
-      .relativeSeaLevelChange = std::move(snapshot.relativeSeaLevelChange),
-      .displacement = std::move(snapshot.displacement),
-      .potential = std::move(snapshot.potential),
-      .tangentialPotential = std::move(snapshot.tangentialPotential),
-      .toroidalPotential = {},
-      .angularVelocity = snapshot.angularVelocity,
-      .oceanFunction = std::move(snapshot.oceanFunction),
-      .loadCoefficients = std::move(snapshot.loadCoefficients),
-      .potentialCoefficients = std::move(snapshot.tideCoefficients)};
-  for (auto& v : out.relativeSeaLevelChange) v *= length;
-  for (auto& v : out.displacement) v *= length;
-  for (auto& v : out.potential) v *= toPotential;
-  for (auto& v : out.tangentialPotential) v *= length;
-  if (!snapshot.toroidalPotential.empty()) {
-    // in the frame of no net rotation of the surface: the rigid rotation
-    // in the solver's W is its gauge
-    out.toroidalPotential =
-        WithoutNetRotation(solver.Grid(), snapshot.toroidalPotential);
-    for (auto& v : out.toroidalPotential) v *= length;
-  }
-  for (auto& v : out.angularVelocity) v /= scales.Time();
-  for (auto& c : out.loadCoefficients) c *= toLoad;
-  for (auto& c : out.potentialCoefficients) c *= toPotential;
-  return out;
-}
-
 /// The static problem on the radial model: the one-node run of the radial
 /// evolution (Evolution) on a branchless rheology of the deck's elastic
 /// structure, its sea level solves to solver.rtol, recording the total
@@ -1444,19 +1340,8 @@ void PutStatic(planetmodel::SurfaceFile& file, std::string name,
                                       {.dimensions = dims, .meaning = meaning}));
 }
 
-/// A static problem's answer as a surface file of static SI fields on the
-/// run's grid: the ice change applied, the surface loads applied where
-/// there are any (every term summed as given, and by their properties),
-/// the response (the sea level change, the displacement, the potentials of
-/// the tangential displacement and the potential; the angular velocity in
-/// the metadata), the state's ocean function and, under migrating
-/// shorelines, the one the solve reaches; with the config, model, moduli,
-/// the state's ice and sea level as read, the forcing's terms, its counts
-/// and single terms (AddForcingCounts), the shorelines and the rotation in
-/// the metadata. Without an ocean the state's fields and metadata (the
-/// ice change, the ocean function, the ice, the sea level, the
-/// shorelines) are left out, and `ocean` says there is none. The runner
-/// adds its own.
+}  // namespace
+
 planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
                                     const Run& run,
                                     const StaticWorld& world,
@@ -1562,6 +1447,8 @@ planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
   }
   return file;
 }
+
+namespace {
 
 /// Writes a static problem's surface file, with the fields `output` asks
 /// for added (AddAskedFields), and the members of `output` beside it, the
@@ -1960,19 +1847,18 @@ SolveInput ReadSolveMembers(const Json& top, Run run,
 SolveInput ReadSolveInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   auto allowed = RunMemberNames();
-  for (const auto name :
-       {"checkpoint", "restart", "output", "kernels", "trajectory"}) {
+  for (const auto name : {"checkpoint", "restart", "output", "kernels",
+                          "trajectory", "perturbation", "tangent"}) {
     allowed.push_back(name);
   }
   AllowTopLevel(top, allowed);
   const auto directory = config.parent_path();
   auto out = ReadSolveMembers(top, ReadRun(top, directory), directory, true);
   out.trajectory = ReadTrajectoryBlock(top, out.run, directory);
-  // the kernels block of a config that serves `kernel` too, checked here
-  // so that a fault in it is found before the run; solve does not use it
-  if (Has(top, "kernels")) {
-    static_cast<void>(ReadKernelsBlock(top.At("kernels"), out.run, directory));
-  }
+  // the blocks of a config that serves `kernel` and `tangent` too, checked
+  // here so that a fault in one is found before the run; solve does not
+  // use them
+  CheckOtherBlocks(top, out.run, directory, "solve");
   return out;
 }
 

@@ -79,6 +79,24 @@ add_custom_command(
 add_custom_target(sl3dpp_synthetic_moduli ALL
   DEPENDS ${SL3DPP_EXAMPLE_DATA}/synthetic_moduli.nc)
 
+# The synthetic perturbations of the viscosity (planetmodel model files of
+# a change of ln viscosity on the PREM-like deck's body: a weak zone of the
+# upper mantle, radial, and a weak patch of it, lateral), likewise written
+# into data/ by the build, for the sl3d tangent configs.
+sl3dpp_add_example(MakeSyntheticPerturbation)
+add_custom_command(
+  OUTPUT ${SL3DPP_EXAMPLE_DATA}/synthetic_weak_zone.nc
+         ${SL3DPP_EXAMPLE_DATA}/synthetic_weak_patch.nc
+  COMMAND MakeSyntheticPerturbation data
+  COMMAND ${CMAKE_COMMAND} -E touch_nocreate data/synthetic_weak_zone.nc
+          data/synthetic_weak_patch.nc
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS MakeSyntheticPerturbation ${SL3DPP_EXAMPLE_DATA}/prem8.elastic.deck
+  COMMENT "Writing the examples' synthetic perturbations of the viscosity")
+add_custom_target(sl3dpp_synthetic_perturbation ALL
+  DEPENDS ${SL3DPP_EXAMPLE_DATA}/synthetic_weak_zone.nc
+          ${SL3DPP_EXAMPLE_DATA}/synthetic_weak_patch.nc)
+
 # The examples' outputs, generated in the build: every driver run at the
 # small degree CI uses (seconds each) by the target sl3dpp_example_outputs —
 # part of ALL with SL3DPP_RUN_EXAMPLES=ON — each writing into its own

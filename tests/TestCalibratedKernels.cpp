@@ -9,8 +9,12 @@
 // converges to the discrete's with the step; under frozen shorelines no
 // sweep runs for the multiplier and the kernels are the partial ones; an
 // iteration that runs out says so, and the second-order sweeps about a
-// calibrated migrating state are refused by name. 1D and, under lateral
-// viscosity, 3D.
+// calibrated migrating state are refused by name. The linearised calibration
+// (ComputeCalibratedTangent) is the same derivative in the forward mode: the
+// change of the calibrated initial sea level against calibrations afresh,
+// and its run's pairing with an objective's duals the total kernels' with
+// the direction plus the multiplier's with the target's change. 1D and,
+// under lateral viscosity, 3D.
 
 #include <gtest/gtest.h>
 
@@ -704,6 +708,241 @@ TEST(CalibratedKernels, TheContinuousSweepConvergesToTheDiscrete) {
   EXPECT_GT(fine[2] / finer[2], 3.0);
 }
 
+TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
+  // The total tangent-linear run of the calibrated migrating run of the
+  // marine cap, under Sdirk2 and the exponential trapezoid, the discrete
+  // runs, along a direction in the thickness at every node, the relaxation
+  // times and the moduli together with a change of the target:
+  //  - its objective is the total kernels paired with the direction plus
+  //    the multiplier paired with the target's change, the two modes of one
+  //    derivative;
+  //  - the change of the calibrated initial sea level it carries is the
+  //    difference of the initial sea levels of calibrations afresh, along
+  //    the thickness and along the target (linear in each while no cell
+  //    flips);
+  //  - the plain iteration reaches the same change in more runs;
+  //  - a direction's own initial sea level is refused where the calibration
+  //    sets it.
+  for (const auto scheme : {Scheme::Sdirk2, Scheme::ExponentialTrapezoid}) {
+    const auto label =
+        std::string{scheme == Scheme::Sdirk2 ? "sdirk2" : "trapezoid"};
+    const auto scene = Marine1D(1e21, 6, scheme);
+    const auto& setup = scene.setup;
+    const auto& times = scene.cap.times;
+    const auto nodes = times.size();
+    std::mt19937 rng(251);
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[1].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
+    measurements[3].displacementDual = setup.Smooth(rng, 0.7);
+    measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+    auto deltaIce = Fields{};
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      deltaIce.push_back(setup.Smooth(rng, 0.1 * setup.Metre()));
+    }
+    const auto deltaTarget = setup.Smooth(rng, 0.1 * setup.Metre());
+    auto direction = TangentPerturbation{};
+    direction.iceThickness = deltaIce;
+    direction.itau = setup.DeltaItau(0.1);
+    direction.material = PointDirection(scene.op, setup.material);
+    const auto none = Fields{};
+
+    Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
+    const auto base = scene.Calibrate(evolution, none, 0.0, scene.target,
+                                      Shorelines::Migrating);
+    const auto oceans = OceanFunctionsOf(base.snapshots);
+    const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
+    ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+    const auto trajectory = ForwardTrajectory::FromSnapshots(base.snapshots);
+
+    const auto adjoint =
+        AdjointSolver::Options{.method = AdjointMethod::Discrete,
+                               .rtol = 1e-12,
+                               .material_kernels = true};
+    const auto total = ComputeCalibratedKernels(
+        evolution, times, measurements, &trajectory, oceans, stageOceans,
+        {.rtol = 1e-12}, adjoint);
+    ASSERT_TRUE(total.converged);
+    const auto& mesh = setup.material.Mesh();
+    const auto predicted =
+        NodePairing(setup, total.kernels.thickness, deltaIce) +
+        VolumePairing(mesh, total.kernels.itauKernel[0], direction.itau[0]) +
+        VolumePairing(scene.op.Points(), mesh, total.kernels.kappaKernel,
+                      direction.material.kappa) +
+        VolumePairing(scene.op.Points(), mesh, total.kernels.muKernel,
+                      direction.material.mu) +
+        setup.Surface(total.multiplier, deltaTarget);
+
+    const auto runs = TangentLinearSolver::Options{
+        .method = AdjointMethod::Discrete, .rtol = 1e-12};
+    const auto tangent = ComputeCalibratedTangent(
+        evolution, times, direction, deltaTarget, &trajectory, oceans,
+        stageOceans, {.rtol = 1e-12}, runs);
+    EXPECT_TRUE(tangent.converged);
+    // the run along the direction, one per pass after the first, and the
+    // run that formed the snapshots
+    EXPECT_EQ(tangent.runs, static_cast<int>(tangent.updates.size()) + 1);
+    const auto along = Objective(setup, tangent.snapshots, measurements);
+    // the partial run, the initial sea level held, is another number
+    const auto held = Objective(
+        setup,
+        TangentLinearSolver(evolution, runs)
+            .Run(times, direction, &trajectory, oceans, stageOceans),
+        measurements);
+
+    // the change of the calibrated initial sea level, against calibrations
+    // afresh
+    auto calibrated = [&](const Fields& d, double eps,
+                          std::span<const double> towards) {
+      Evolution trial(scene.op, setup.solver, setup.state, scene.options);
+      const auto found =
+          scene.Calibrate(trial, d, eps, towards, Shorelines::Migrating);
+      EXPECT_EQ(found.state.oceanFunction, base.state.oceanFunction)
+          << "the start flipped";
+      for (auto n = std::size_t{0}; n < nodes; ++n) {
+        EXPECT_EQ(found.snapshots[n].oceanFunction, oceans[n])
+            << "a cell flipped at node " << n;
+      }
+      return found.state.seaLevel;
+    };
+    const auto half = [](std::vector<double> up,
+                         const std::vector<double>& down) {
+      for (auto i = std::size_t{0}; i < up.size(); ++i) {
+        up[i] = 0.5 * (up[i] - down[i]);
+      }
+      return up;
+    };
+    auto iceAlone = TangentPerturbation{};
+    iceAlone.iceThickness = deltaIce;
+    const auto byIce = SolveCalibrationTangent(
+        evolution, times, iceAlone, {}, nullptr, oceans, stageOceans,
+        {.rtol = 1e-12}, runs);
+    EXPECT_TRUE(byIce.converged);
+    const auto fdIce = half(calibrated(deltaIce, 1.0, scene.target),
+                            calibrated(deltaIce, -1.0, scene.target));
+    const auto byTarget = SolveCalibrationTangent(
+        evolution, times, {}, deltaTarget, nullptr, oceans, stageOceans,
+        {.rtol = 1e-12}, runs);
+    EXPECT_TRUE(byTarget.converged);
+    const auto fdTarget =
+        half(calibrated(none, 0.0, Moved(scene.target, deltaTarget, 1.0)),
+             calibrated(none, 0.0, Moved(scene.target, deltaTarget, -1.0)));
+    std::cout << std::format(
+        "[calibrated tangent, 1D, {}] the linearised calibration in {} runs, "
+        "updates{}\n"
+        "  its objective {:.2e} from the total kernels' pairing (the partial "
+        "run {:.2e})\n"
+        "  the initial sea level's change from calibrations afresh: ice "
+        "{:.2e}, target {:.2e}\n",
+        label, tangent.runs, Listed(tangent.updates), Gap(along, predicted),
+        Gap(held, predicted), MaxDiff(byIce.initialSeaLevel, fdIce) / MaxAbs(fdIce),
+        MaxDiff(byTarget.initialSeaLevel, fdTarget) / MaxAbs(fdTarget));
+    EXPECT_NEAR(along, predicted, 1e-8 * std::abs(predicted)) << label;
+    EXPECT_GT(Gap(held, predicted), 1e-2) << label;
+    EXPECT_LT(MaxDiff(byIce.initialSeaLevel, fdIce), 1e-7 * MaxAbs(fdIce))
+        << label;
+    EXPECT_LT(MaxDiff(byTarget.initialSeaLevel, fdTarget),
+              1e-7 * MaxAbs(fdTarget))
+        << label;
+
+    // the plain iteration: the same change in more runs
+    const auto plain = SolveCalibrationTangent(
+        evolution, times, iceAlone, {}, nullptr, oceans, stageOceans,
+        {.iterations = 60, .rtol = 1e-12, .anderson_memory = 0}, runs);
+    EXPECT_TRUE(plain.converged);
+    EXPECT_GT(plain.runs, byIce.runs + 5) << label;
+    EXPECT_LT(MaxDiff(plain.initialSeaLevel, byIce.initialSeaLevel),
+              1e-10 * MaxAbs(byIce.initialSeaLevel))
+        << label;
+    // an iteration that runs out says so
+    const auto short_ = SolveCalibrationTangent(
+        evolution, times, iceAlone, {}, nullptr, oceans, stageOceans,
+        {.iterations = 2, .rtol = 1e-12}, runs);
+    EXPECT_FALSE(short_.converged);
+    EXPECT_EQ(short_.updates.size(), 2u);
+    // every point is calibrated here: an initial sea level of the
+    // direction's own has no place
+    auto withSeaLevel = iceAlone;
+    withSeaLevel.initialSeaLevel = deltaTarget;
+    EXPECT_THROW(static_cast<void>(SolveCalibrationTangent(
+                     evolution, times, withSeaLevel, {}, nullptr, oceans,
+                     stageOceans, {}, runs)),
+                 std::invalid_argument);
+  }
+}
+
+TEST(CalibratedKernels, TheLinearisedCalibrationUnderFrozenShorelines) {
+  // Under frozen shorelines the run does not depend on its initial sea
+  // level: the linearised calibration is one run, the initial sea level's
+  // change the target's less the run's at the last node, as calibrations
+  // afresh give it, and the run's objective the kernels' pairing with the
+  // direction, whatever the target does.
+  const auto scene = Marine1D(1e21, 6, Scheme::Sdirk2);
+  const auto& setup = scene.setup;
+  const auto& times = scene.cap.times;
+  const auto nodes = times.size();
+  std::mt19937 rng(257);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[3].displacementDual = setup.Smooth(rng, 0.7);
+  measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  auto direction = TangentPerturbation{};
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    direction.iceThickness.push_back(setup.Smooth(rng, 0.1 * setup.Metre()));
+  }
+  const auto deltaTarget = setup.Smooth(rng, 0.1 * setup.Metre());
+  Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
+  const auto base =
+      scene.Calibrate(evolution, {}, 0.0, scene.target, Shorelines::Frozen);
+  const auto runs = TangentLinearSolver::Options{.rtol = 1e-12};
+  auto calls = 0;
+  const auto tangent = ComputeCalibratedTangent(
+      evolution, times, direction, deltaTarget, nullptr, {}, {},
+      {.on_iteration = [&](int, double) { ++calls; }}, runs);
+  EXPECT_TRUE(tangent.converged);
+  EXPECT_EQ(tangent.runs, 1);
+  EXPECT_EQ(calls, 0);
+  EXPECT_TRUE(tangent.updates.empty());
+  const auto& last = tangent.snapshots.back().relativeSeaLevelChange;
+  auto expected = deltaTarget;
+  for (auto i = std::size_t{0}; i < expected.size(); ++i) expected[i] -= last[i];
+  EXPECT_LE(MaxDiff(tangent.initialSeaLevel, expected),
+            1e-14 * MaxAbs(expected));
+  auto calibrated = [&](double eps) {
+    Evolution trial(scene.op, setup.solver, setup.state, scene.options);
+    const auto found =
+        scene.Calibrate(trial, direction.iceThickness, eps,
+                        Moved(scene.target, deltaTarget, eps),
+                        Shorelines::Frozen);
+    EXPECT_EQ(found.state.oceanFunction, base.state.oceanFunction);
+    return found.state.seaLevel;
+  };
+  auto fd = calibrated(1.0);
+  {
+    const auto down = calibrated(-1.0);
+    for (auto i = std::size_t{0}; i < fd.size(); ++i) {
+      fd[i] = 0.5 * (fd[i] - down[i]);
+    }
+  }
+  const auto kernels = AdjointSolver(evolution, {.rtol = 1e-12})
+                           .FirstOrderKernels(times, measurements);
+  const auto predicted =
+      NodePairing(setup, kernels.thickness, direction.iceThickness);
+  const auto along = Objective(setup, tangent.snapshots, measurements);
+  std::cout << std::format(
+      "[calibrated tangent, 1D, frozen] the initial sea level's change {:.2e} "
+      "from calibrations afresh; its objective {:.2e} from the kernels' "
+      "pairing\n",
+      MaxDiff(tangent.initialSeaLevel, fd) / MaxAbs(fd), Gap(along, predicted));
+  EXPECT_LT(MaxDiff(tangent.initialSeaLevel, fd), 1e-8 * MaxAbs(fd));
+  EXPECT_NEAR(along, predicted, 1e-9 * std::abs(predicted));
+  // a change of the target alone moves the initial sea level by itself
+  // and nothing of the run
+  const auto alone = ComputeCalibratedTangent(evolution, times, {}, deltaTarget,
+                                              nullptr, {}, {}, {}, runs);
+  EXPECT_EQ(alone.initialSeaLevel, deltaTarget);
+  ASSERT_EQ(alone.snapshots.size(), nodes);
+  EXPECT_EQ(MaxAbs(alone.snapshots.back().relativeSeaLevelChange), 0.0);
+}
+
 // -- 3D ---------------------------------------------------------------------
 
 namespace {
@@ -988,4 +1227,67 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns3D) {
               std::string::npos)
         << error.what();
   }
+}
+
+TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose3D) {
+  // The 1D gate under lateral viscosity, Sdirk2, the discrete runs: the
+  // total tangent-linear run along a thickness direction at every node and
+  // a lateral direction of the log viscosity together with a change of the
+  // target pairs with the objective's duals as the total kernels do with
+  // the direction and the multiplier with the target's change; the partial
+  // run does not.
+  auto scene = Marine3D::Make();
+  const Viscoelastic3D op(scene.rheology, kLmax3, LateralDelta);
+  scene.Set(op, 4);
+  const auto& times = scene.times;
+  const auto nodes = times.size();
+  std::mt19937 rng(263);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[1].displacementDual = scene.Smooth(rng, 0.7);
+  measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  auto direction = TangentPerturbation3D{};
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    direction.iceThickness.push_back(scene.Smooth(rng, 0.1 * scene.Metre()));
+  }
+  direction.logViscosity = OnCoupling(op.Coupling(), Pattern);
+  const auto deltaTarget = scene.Smooth(rng, 0.1 * scene.Metre());
+  const auto state = scene.solver.MakeState(scene.ice[0], scene.target);
+
+  Evolution3D evolution(op, scene.solver, state, scene.options);
+  const auto base = scene.Calibrate(evolution, {}, 0.0);
+  const auto oceans = OceanFunctionsOf(base.snapshots);
+  const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
+  ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(base.snapshots);
+
+  const auto total = ComputeCalibratedKernels(
+      evolution, times, measurements, &trajectory, oceans, stageOceans,
+      {.rtol = 1e-11},
+      AdjointSolver3D::Options{.rtol = 1e-12, .coupled_rtol = 1e-12});
+  ASSERT_TRUE(total.converged);
+  const auto predicted =
+      scene.Pairing(total.kernels.ice.thickness, direction.iceThickness) +
+      VolumePairing(op.Coupling(), total.kernels.logViscosityKernel3D[0],
+                    direction.logViscosity) +
+      scene.Surface(total.multiplier, deltaTarget);
+
+  const auto runs =
+      TangentLinearSolver3D::Options{.rtol = 1e-12, .coupled_rtol = 1e-12};
+  const auto tangent = ComputeCalibratedTangent(
+      evolution, times, direction, deltaTarget, &trajectory, oceans,
+      stageOceans, {.rtol = 1e-11}, runs);
+  EXPECT_TRUE(tangent.converged);
+  const auto along = scene.Objective(tangent.snapshots, measurements);
+  const auto held = scene.Objective(
+      TangentLinearSolver3D(evolution, runs)
+          .Run(times, direction, &trajectory, oceans, stageOceans),
+      measurements);
+  std::cout << std::format(
+      "[calibrated tangent, 3D] the linearised calibration in {} runs, "
+      "updates{}; its objective {:.2e} from the total kernels' pairing (the "
+      "partial run {:.2e})\n",
+      tangent.runs, Listed(tangent.updates), Gap(along, predicted),
+      Gap(held, predicted));
+  EXPECT_NEAR(along, predicted, 1e-7 * std::abs(predicted));
+  EXPECT_GT(Gap(held, predicted), 1e-2);
 }

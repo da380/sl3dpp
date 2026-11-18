@@ -5,10 +5,14 @@
 
 #include <cmath>
 #include <filesystem>
+#include <format>
+#include <optional>
 #include <planetmodel/grid.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
+#include <planetmodel/vocabulary.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace sl3dpp::test {
@@ -187,6 +191,30 @@ inline void WriteToyLand(const std::filesystem::path& path,
   file.source = "sl3dpp tests";
   file.variables.emplace(name, pm::SurfaceField(name, held, {}));
   pm::WriteSurfaceFile(path, file);
+}
+
+/// The spec a model file states for a field of a direction in the
+/// viscosity, `ln_viscosity` or `ln_viscosity_branch_<b>`, which
+/// planetmodel's vocabulary does not name: a change of the natural
+/// logarithm of a viscosity, a dimensionless scalar. Nothing for another
+/// name, whose spec is the vocabulary's.
+inline std::optional<planetmodel::FieldSpec> LogViscositySpec(
+    const std::string& name) {
+  namespace pm = planetmodel;
+  constexpr auto kBranch = std::string_view{"ln_viscosity_branch_"};
+  if (name == "ln_viscosity") {
+    return pm::FieldSpec{pm::SCALAR, pm::units::DIMENSIONLESS,
+                         "change of the natural logarithm of the viscosity "
+                         "of every relaxing branch alike"};
+  }
+  if (name.starts_with(kBranch)) {
+    return pm::FieldSpec{
+        pm::SCALAR, pm::units::DIMENSIONLESS,
+        std::format("change of the natural logarithm of the viscosity of "
+                    "relaxing branch {} alone",
+                    name.substr(kBranch.size()))};
+  }
+  return std::nullopt;
 }
 
 }  // namespace sl3dpp::test

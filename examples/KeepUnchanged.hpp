@@ -3,7 +3,8 @@
 /**
  * @file examples/KeepUnchanged.hpp
  * @brief A generated input replaced only when its content changes. The
- * build's generators (MakeSyntheticEarth, MakeSyntheticModuli) write their
+ * build's generators (MakeSyntheticEarth, MakeSyntheticModuli,
+ * MakeSyntheticPerturbation) write their
  * netCDF file beside its target and then keep the target as it is — its
  * bytes, and so the hash a run takes of its input files — where the two
  * hold the same dimensions, variables, values and attributes, the root

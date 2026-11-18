@@ -3,7 +3,7 @@
 /**
  * @file Blocks.hpp
  * @brief The config blocks of the commands made of blocks (`solve`,
- * `kernel`), each read by one reader here:
+ * `kernel`, `tangent`), each read by one reader here:
  * `problem` (static, or quasi-static through time), `discretisation`
  * (the truncation degree, which `love-numbers` reads too), `model` (the deck,
  * its format, the lateral moduli and the 3D viscosity), `times` (the time
@@ -13,7 +13,9 @@
  * solves' tolerances, budget and transforms, and the time step),
  * `checkpoint` (a run's checkpoints) and `output` (the files written),
  * and the words of `rotation` and `moments`. The `forcing` blocks have
- * their own file, Forcing.hpp, and the file inputs theirs, Files.hpp.
+ * their own file, Forcing.hpp, the file inputs theirs, Files.hpp, and the
+ * `perturbation` block, a direction in the inputs, its own,
+ * Perturbation.hpp.
  *
  * Each reader refuses members it does not know, as every config reader
  * does (Input.hpp), and resolves relative paths against the config's

@@ -20,15 +20,20 @@
  * loads, the tide and the sources with the rotational feedback as asked.
  * `kernel` gives the adjoint sensitivity kernels of measurements of the
  * same problems, read from the same config, its `kernels` block naming
- * the measurements and the kernels written. Both read a config of blocks
- * (Blocks.hpp, Forcing.hpp, Files.hpp) under a top-level `problem`, 1-D
- * or 3-D as its `model` block makes it, and one file serves both: `solve`
- * checks a `kernels` block and does not use it, and `kernel` checks the
- * `output`, `checkpoint` and `restart` members of `solve` and does not
- * use them. The `trajectory` block is both commands' (Trajectory.hpp):
- * `solve` records its forward run into the trajectory store it names, and
- * `kernel` sweeps from that store without running the forward problem, or
- * records into it when it holds no complete recording of the run.
+ * the measurements and the kernels written. `tangent` gives the
+ * tangent-linear run of the same problems along a direction in their
+ * inputs, the config's `perturbation` block (Perturbation.hpp), written as
+ * `solve`'s files, their fields first-order changes, where its `tangent`
+ * block says. All three read a config of blocks (Blocks.hpp, Forcing.hpp,
+ * Files.hpp) under a top-level `problem`, 1-D or 3-D as its `model` block
+ * makes it, and one file serves them all: each checks the others' blocks
+ * and does not use them (CheckOtherBlocks), `kernel` and `tangent` the
+ * `output`, `checkpoint` and `restart` members of `solve` too. The
+ * `trajectory` block is every command's (Trajectory.hpp): `solve` records
+ * its forward run into the trajectory store it names, and `kernel` sweeps
+ * from that store, and `tangent` runs about it, without running the
+ * forward problem, or record into it when it holds no complete recording
+ * of the run (Recorded.hpp).
  *
  * The readers are separate from the runners so the configs can be
  * checked without running anything; both throw `planetmodel::Error`
@@ -45,6 +50,7 @@
 #include "Blocks.hpp"
 #include "Common.hpp"
 #include "Forcing.hpp"
+#include "Perturbation.hpp"
 #include "Trajectory.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Deck.hpp"
@@ -211,18 +217,48 @@ struct KernelsBlock {
   [[nodiscard]] bool Writes(KernelParameter parameter) const;
 };
 
+/// Which derivatives of a calibrated run a derivative command forms
+/// (`kernels.calibration`, `tangent.calibration`): the total ones, the
+/// initial sea level re-calibrated as the parameters change, by an
+/// iteration of at most `iterations` passes to `rtol` (InitialSeaLevel.hpp:
+/// the multiplier's sweeps, the linearised calibration's runs), or the
+/// partial ones, the calibrated initial sea level held.
+struct CalibratedDerivative {
+  bool total = true;
+  int iterations = 20;
+  double rtol = 1e-8;
+};
+
+/// Reads a `calibration` member of a derivative command's block: an object
+/// of `derivative` ("total", the default, or "partial"), `iterations` (at
+/// least 1, default 20) and `rtol` (positive, default 1e-8), refused on a
+/// run that does not calibrate, and its iteration's members beside
+/// "partial". `pass` names a pass of the iteration ("sweep", "run"), and
+/// `partial` and `iteration` the partial derivatives and the iteration as
+/// a refusal states them.
+[[nodiscard]] CalibratedDerivative ReadCalibratedDerivative(
+    const Json& calibration, const Run& run, std::string_view pass,
+    std::string_view partial, std::string_view iteration);
+
+/// Reads a list of measurements (`kernels.measurements`,
+/// `tangent.measurements`) of a run: at least one, each read against the
+/// run, their names plain file names no two share.
+[[nodiscard]] std::vector<MeasurementSpec> ReadMeasurements(
+    const Json& measurements, const Run& run);
+
 /// Reads a `kernels` block of a run, relative paths against `directory`,
 /// and holds it to the run: `method` (a word, default "discrete"),
 /// `parameters` (required, distinct words, each one the run gives; its
 /// absence refused, listing them), `lateral` (true or false; true refused
-/// unless the parameters name the viscosity or the moduli), `measurements` (required, at least
-/// one, each located on the run's nodes and held to its band and its
-/// ocean), `output` (required, the directory) and `calibration` (an object
-/// of `derivative`, `iterations` and `rtol`, refused on a run that does not
-/// calibrate, and its iteration's members beside "partial"). The
-/// recording's members, `record_stride` and `trajectory`, are refused,
-/// naming the top-level `trajectory` block's. The block is refused without
-/// gravity, which has no kernels.
+/// unless the parameters name the viscosity or the moduli), `measurements`
+/// (required, ReadMeasurements: at least one, each located on the run's
+/// nodes and held to its band and its ocean), `output` (required, the
+/// directory) and `calibration` (an object of `derivative`, `iterations`
+/// and `rtol`, refused on a run that does not calibrate, and its
+/// iteration's members beside "partial"). The recording's members,
+/// `record_stride` and `trajectory`, are refused, naming the top-level
+/// `trajectory` block's. The block is refused without gravity, which has
+/// no kernels.
 [[nodiscard]] KernelsBlock ReadKernelsBlock(
     const Json& block, const Run& run, const std::filesystem::path& directory);
 
@@ -248,5 +284,85 @@ struct KernelInput {
 
 /// Runs a kernel config and returns the summary line.
 [[nodiscard]] std::string RunKernel(const std::filesystem::path& config);
+
+/// The `tangent` block: what `tangent` does with a config's `perturbation`
+/// block. `output` is where its files go, a block of `solve`'s `output`
+/// block's members that a tangent-linear run writes (`surface`, required,
+/// `fields` and `smoothing`): the surface file `solve` writes, its fields
+/// their first-order changes along the direction. `calibration` is a
+/// calibrated run's alone (CalibratedDerivative): the total derivative,
+/// the linearised calibration's change of the initial sea level in it, or
+/// the partial one. `method` is `kernels.method`'s, with its words and
+/// its default: "discrete", the derivative of the stepped run, the
+/// transpose of the discrete adjoint, under every scheme; or "continuous",
+/// the run of the linearised equations stepped by the scheme, whose drive
+/// along a change of the relaxation times is the continuous equations'
+/// (TangentLinearSolver::Options::method). The two differ along a
+/// direction in the viscosity alone; along the forcing, the state's sea
+/// level and the moduli they are one run. `measurements` is a list as
+/// `kernels.measurements`, the measurements whose first-order changes the
+/// run tabulates: the config's `kernels.measurements` where the block
+/// gives none (TangentInput::measurements).
+struct TangentBlock {
+  AdjointMethod method = AdjointMethod::Discrete;
+  OutputBlock output;
+  CalibratedDerivative calibration;
+  std::optional<std::vector<MeasurementSpec>> measurements;
+};
+
+/// Reads a `tangent` block of a run, relative paths against `directory`,
+/// and holds it to the run: `output` (required; its `exchange`,
+/// `exchange_nodes` and `volume` refused, a tangent-linear run's tables
+/// and response inside the body not being built) and `calibration`
+/// (ReadCalibratedDerivative), `method` and `measurements`
+/// (ReadMeasurements).
+[[nodiscard]] TangentBlock ReadTangentBlock(
+    const Json& block, const Run& run, const std::filesystem::path& directory);
+
+/// The config of `sl3d tangent`: a run, read as `solve` reads it, the
+/// `perturbation` block (the direction, Perturbation.hpp), the `tangent`
+/// block, the `trajectory` block (the forward run recorded or read back as
+/// `kernel`'s is) and the measurements whose first-order changes are
+/// formed: `tangent.measurements`, or where the block has none the
+/// `kernels` block's (`measuredBy` says which, "tangent" or "kernels");
+/// empty where the config gives neither, and the run writes its file
+/// alone.
+struct TangentInput {
+  Run run;
+  PerturbationBlock perturbation;
+  TangentBlock tangent;
+  TrajectoryBlock trajectory;
+  std::vector<MeasurementSpec> measurements;
+  std::string measuredBy;
+};
+
+/// Reads a tangent config, relative paths against its directory: the run,
+/// the `perturbation`, `tangent` and `trajectory` blocks, a `kernels`
+/// block where given (ReadKernelsBlock, the whole block held to the run as
+/// `kernel` holds it), and `output`, `checkpoint` and `restart` checked
+/// where given (ReadSolveMembers) and left unused. A run without gravity
+/// is refused, and so is the continuous method along a direction in the
+/// viscosity under a multi-stage scheme (CheckTangentMethod).
+[[nodiscard]] TangentInput ReadTangentInput(
+    const std::filesystem::path& config);
+
+/// Refuses, at `tangent.method`, the one tangent-linear run the library
+/// has not built: the continuous method along a direction in the viscosity
+/// under a multi-stage scheme (Sdirk2), naming the two cures (the
+/// exponential trapezoid in `solver.scheme`, or the discrete method).
+void CheckTangentMethod(const Json& tangent, const TangentBlock& block,
+                        const PerturbationBlock& perturbation, const Run& run);
+
+/// Runs a tangent config and returns the summary line.
+[[nodiscard]] std::string RunTangent(const std::filesystem::path& config);
+
+/// Checks the blocks of the derivative commands a config holds beside
+/// those `command` reads itself (`kernels`, `perturbation`, `tangent`), so
+/// that one config serves every command and a fault in a block is found
+/// whichever runs: each is read by its own reader against the run and
+/// left unused.
+void CheckOtherBlocks(const Json& top, const Run& run,
+                      const std::filesystem::path& directory,
+                      std::string_view command);
 
 }  // namespace sl3dpp::app

@@ -661,6 +661,18 @@ central differences of migrating runs at 1e-7, both methods, and the
 kernels' thickness and initial-sea-level views pairing to the same
 number; the initial sea level inert under frozen shorelines.
 
+**The program.** `sl3d tangent` makes these runs (and the 3D ones, §10)
+by the discrete method, or by the continuous one where its config asks
+(`tangent.method`), along a direction a config's `perturbation` block
+gives as the inputs are given, about `solve`'s run of the same config;
+a direction in the viscosity is one in the branches' relaxation times,
+every branch's alike or one branch's, on every rheology. The gates of its
+files against pairs of `sl3d solve` runs, of its measurements' changes
+against `sl3d kernel`'s kernels paired with the perturbation, and of the
+continuous run against the discrete one as the steps shorten, are
+`TestAppsTangent`'s ([sl3d-configs.md](sl3d-configs.md),
+tangent).
+
 **The second-order run** (`RunSecondOrder`; pyslfp's
 `second_order_tangent_linear_ice_history` under the sharp flotation
 rule): F''(x)[u, v] as the forward problem with no direct load, the
@@ -2733,6 +2745,60 @@ last iterate with `converged` false, and `sl3d kernel` refuses it.
 - *Flotation.* As every kernel about a migrating run, these are
   derivatives while no cell's flotation flips, the calibrated start's
   included.
+
+**The linearised calibration.** The same derivative in the forward mode
+is the tangent-linear run of a calibrated run: the change of its
+responses along a direction δp of its parameters and a change δS_f of its
+target, with the change of the calibrated initial sea level in it. That
+change is the solution of (22.2),
+
+    𝒫 (I + A) 𝒫 δS0 = 𝒫 (δS_f − (∂ξ(t_f)/∂p) δp),
+
+and each term is a tangent-linear run (§8, §10) read at the last node:
+(∂ξ(t_f)/∂p) δp the run along δp with the initial sea level held, and
+A δS0 the run along an initial sea level δS0 alone, which needs no
+recorded trajectory. The equation is the transpose of the multiplier's
+(22.3) (I + A against I + Aᵀ, on the same points), and is solved by the
+same iteration: δS0 = 𝒫 (b − A δS0) with b the right side, from zero
+(whose image is b itself, at no run), stopped when the largest change of
+δS0 is below a tolerance times its largest value, Anderson-mixed as the
+multiplier's is; one loop serves both (`SolveCalibrationTangent`, its
+options the multiplier's, `CalibrationMultiplierOptions`). The run along
+δp and the converged δS0 together is then the total tangent-linear run
+(`ComputeCalibratedTangent`), and for any objective
+
+    ⟨g, δ(responses)⟩ = (total kernels) · δp + ⟨λ, δS_f⟩,
+
+its duals g paired with that run on the left, the kernels of
+`ComputeCalibratedKernels` paired with the direction and the multiplier
+with the target's change on the right: the two modes of one derivative,
+each the other's check. Where the weights vanish the calibration holds
+the initial sea level, and a direction's own initial sea level is its
+change there (and is refused where the calibration sets it). Under frozen
+shorelines A vanishes: δS0 is the right side, no pass runs, and the run
+along δp is the total run. By the discrete tangent-linear runs it is the
+derivative of the calibrated run as the program computes it, under every
+scheme, each stage of Sdirk2 about its own shorelines.
+
+Gates (`TestCalibratedKernels`): 1D, the marine cap, Sdirk2 and the
+exponential trapezoid, a direction in the thickness at every node, the
+relaxation times and the moduli with a change of the target: the total
+tangent-linear run's objective against the total kernels' pairing 1e-12
+and 3e-12 (the partial run misses it by 6% and 5%), in 7 runs (the run
+along the direction, 5 along an initial sea level, the final one); the
+change of the calibrated initial sea level against the difference of
+calibrations afresh 6e-11 along the thickness and 4e-13 along the
+target; the plain iteration reaches it in more runs. Frozen shorelines:
+one run, δS0 against calibrations afresh 3e-13. 3D under lateral
+viscosity, Sdirk2, a thickness direction and a lateral direction of the
+log viscosity with the target moved: 5e-14 against the total kernels'
+pairing, the partial run 24% from it. Through the program
+(`TestAppsTangent`): `sl3d tangent`'s total run against pairs of `sl3d
+solve` runs, each calibrating again, 8e-13 along a thickness history,
+6e-9 along the target and 4e-7 along ln η (the differences' own error),
+and against `sl3d kernel`'s total kernels paired with the perturbation,
+2e-10; over radial segments (`TestAppsDistributed`) the one process's to
+5e-12.
 
 **Second order.** The second-order kernels of a calibrated migrating
 run would be the derivative along a direction of the total kernels,

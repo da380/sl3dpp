@@ -2,7 +2,8 @@
 
 /**
  * @file Trajectory.hpp
- * @brief The top-level `trajectory` block `solve` and `kernel` share, and
+ * @brief The top-level `trajectory` block `solve`, `kernel` and `tangent`
+ * share, and
  * their use of the library's trajectory store (io::TrajectoryStore,
  * docs/trajectory-store.md): a run's description for the store (its hash,
  * TrajectoryHashOf, its nodes, its stride, its kind and its processes'

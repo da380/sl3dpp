@@ -10,8 +10,8 @@
  * relative paths against the config's directory), runs, writes its
  * outputs with provenance, and prints a one-line summary to stderr.
  *
- * Built with SL3DPP_WITH_MPI, the commands with a 3D run (solve, kernel)
- * run under mpiexec over several ranks, one radial segment each
+ * Built with SL3DPP_WITH_MPI, the commands with a 3D run (solve, kernel,
+ * tangent) run under mpiexec over several ranks, one radial segment each
  * (Ranks.hpp), a 1D run the first rank's alone; rank 0 writes and prints,
  * and a failure on any rank ends the job.
  */
@@ -55,6 +55,12 @@ constexpr auto kUsage =
     "                 same problems, read from a solve config with a\n"
     "                 `kernels` block: in the ice, surface loads, a tide,\n"
     "                 seismic moments, the viscosity and the moduli\n"
+    "  tangent        the tangent-linear run of the same problems along a\n"
+    "                 direction in their inputs, read from a solve config\n"
+    "                 with a `perturbation` block (terms of the forcing,\n"
+    "                 the viscosity, the moduli, the state's sea level)\n"
+    "                 and a `tangent` block: solve's files, their fields\n"
+    "                 first-order changes, and each measurement's change\n"
     "\n"
     "sl3d --version prints the library versions. Every command's config\n"
     "is documented in docs/sl3d-configs.md, also at\n"
@@ -70,6 +76,7 @@ constexpr auto kCommands = std::array{
     Command{"love-numbers", sl3dpp::app::RunLoveNumbers, false},
     Command{"solve", sl3dpp::app::RunSolve, true},
     Command{"kernel", sl3dpp::app::RunKernel, true},
+    Command{"tangent", sl3dpp::app::RunTangent, true},
 };
 
 /// A word that is not a command but names what one runs: refused, as an
@@ -155,8 +162,8 @@ int Run(int argc, char** argv) {
     if (command.name != name) continue;
     if (ranks.Distributed() && !command.distributes) {
       err << std::format(
-          "sl3d {}: runs on one process; only solve and kernel run over "
-          "several ranks (this run has {})\n",
+          "sl3d {}: runs on one process; only solve, kernel and tangent run "
+          "over several ranks (this run has {})\n",
           name, ranks.size);
       return 2;
     }

@@ -5,8 +5,9 @@ adjoint sweeps take from the run, written node by node as the run
 produces it, so that the sweeps of any number of measurements run later,
 in other processes, without running the forward problem again. The
 library's `sl3dpp::io::TrajectoryStore` (`include/sl3dpp/io/TrajectoryStore.hpp`)
-writes and reads it; `sl3d solve` records into it and `sl3d kernel`
-sweeps from it (sl3d-configs.md, "The `trajectory` block"). This document
+writes and reads it; `sl3d solve` records into it, `sl3d kernel` sweeps
+from it and `sl3d tangent` makes its tangent-linear runs about it
+(sl3d-configs.md, "The `trajectory` block"). This document
 is the store's specification: its directory layout, its files byte by
 byte, what the run hash must cover, and what a reader must check. Two
 versions are described: version 1, the store of a run under a one-stage
