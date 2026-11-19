@@ -34,7 +34,7 @@ from pyslfp.core import EarthModel, EarthState
 from pyslfp.ice import BaseIceModel
 from pyslfp.love_numbers.material import Material
 from pyslfp.love_numbers.table import LoveNumbers
-from pyslfp.viscoelastic import Rheology, Evolution, ViscoelasticOperator
+from pyslfp.viscoelastic import Rheology, SeaLevelEvolution, ViscoelasticOperator
 
 from fixture_tools import data_dir, provenance
 
@@ -103,7 +103,7 @@ def main() -> None:
     ice_model = MeltingCap(length_scale=earth.parameters.length_scale)
     dates = np.linspace(START, 0.0, NODES)
     truth = EarthState(ice0, sea0, earth)
-    evolution = Evolution(op, truth)
+    evolution = SeaLevelEvolution(op, truth)
     snapshots, _ = evolution.run_ice_history(
         dates, ice_model, shorelines="migrating", rtol=RTOL)
     flipped = int(np.sum(snapshots[-1].ocean_function.data
@@ -121,7 +121,7 @@ def main() -> None:
     histories = {}
     for method in ("fixed_point", "gradient"):
         guess = EarthState(ice0, final, earth)
-        calibration = Evolution(op, guess).calibrate_initial_sea_level(
+        calibration = SeaLevelEvolution(op, guess).calibrate_initial_sea_level(
             dates, ice_model, final, shorelines="migrating", method=method,
             iterations=12, rtol=1e-9, solver_rtol=RTOL)
         error = np.max(np.abs(calibration.state.sea_level.data - sea0.data))

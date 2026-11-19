@@ -809,7 +809,7 @@ TEST(DecayTime, MatchesPyslfpOnTheFixture) {
   // held to the Python's numbers to 1e-6.
   auto in = std::ifstream(std::string(SL3DPP_TEST_DATA_DIR) +
                           "/decay_time.txt");
-  ASSERT_TRUE(in) << "run scripts/make_decay_fixtures.py from pyslfp";
+  ASSERT_TRUE(in) << "missing: run scripts/make_decay_fixtures.py";
   auto line = std::string{};
   auto t = std::vector<double>{}, y = std::vector<double>{};
   auto options = DecayTimeOptions{};
