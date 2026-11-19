@@ -188,6 +188,14 @@ class DegreeOperator {
   /// gauge and gives zero.
   [[nodiscard]] std::vector<double> Tide(int power = -1) const;
 
+  /// The potential's own share of the density it moves in the fluid
+  /// layers: with x the response to psi = (r/a)^power under Tide's force,
+  /// the density change paired with psi is Tide . x less this number
+  /// times psi's amplitude (a stratified fluid's density responds to the
+  /// total potential, psi included; a solid's to the displacement alone).
+  /// Zero without a stratified fluid layer, and at l = 0.
+  [[nodiscard]] double TideSelf(int power = -1) const;
+
   // -- solving
   // ------------------------------------------------------------------
 

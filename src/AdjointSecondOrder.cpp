@@ -1359,10 +1359,11 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     const auto lamCols = loadsOf(dlamCoefficients);
     // the closed channels of the derivative: the ocean's load and, under
     // the rotational feedback, the centrifugal potential of its rotation
-    const auto psiCols =
-        tidesOf(rotation != RotationalFeedback::None
-                    ? solver.CentrifugalCoefficients(resp.angularVelocity)
-                    : grid.ZeroCoefficients());
+    auto dpsiCoefficients =
+        rotation != RotationalFeedback::None
+            ? solver.CentrifugalCoefficients(resp.angularVelocity)
+            : grid.ZeroCoefficients();
+    const auto psiCols = tidesOf(dpsiCoefficients);
     for (auto& [l, x] : response) {
       const auto& deg = op.Deg(l);
       const int ncols = 2 * (l + 1);
@@ -1378,7 +1379,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       }
     }
     return std::tuple(std::move(response), resp.relativeSeaLevelChange,
-                      std::move(dlamCoefficients), resp.uniformShift);
+                      std::move(dlamCoefficients), resp.uniformShift,
+                      std::move(dpsiCoefficients));
   };
   // m += factor(x) d-tilde, with the factor itau (the adjoint state) or
   // v's delta itau (its derivative), at the memory points.
@@ -1594,16 +1596,20 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // The tide kernels and their derivatives (Options::tide_kernels), as
   // the first-order sweep forms them: an adjoint displacement paired
   // with the tide's force on each degree, and its closed load, on which
-  // the tide's own potential acts through the sea level. The tide's
-  // force does not depend on the moduli or the relaxation times, so the
-  // derivative is the same pairing of the derivative displacement and
-  // load.
+  // the tide's own potential acts through the sea level; `psi` is the
+  // potential the displacement was solved under (the adjoint centrifugal
+  // one), whose own share of a fluid layer's density
+  // (DegreeOperator::TideSelf) the pairing lacks. The tide's force does
+  // not depend on the moduli or the relaxation times, so the derivative
+  // is the same pairing of the derivative displacement, load and
+  // potential.
   const bool tidal = options_.tide_kernels;
   auto tideKernels = std::vector<std::vector<Complex>>(
       tidal ? times.size() : 0, grid.ZeroCoefficients());
   auto dTideKernels = tideKernels;
   auto addTide = [&](const Fields& lambda, const std::vector<Complex>& load,
-                     std::size_t node, double weight,
+                     const std::vector<Complex>& psi, std::size_t node,
+                     double weight,
                      std::vector<std::vector<Complex>>& kernels) {
     auto& to = kernels[node];
     for (const auto& [l, x] : lambda) {
@@ -1617,8 +1623,12 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
                 x[static_cast<std::size_t>(l + 1 + m) * deg.ndof + d];
         }
         const auto i = SurfaceGrid::Index(l, m);
-        to[i] += weight * (pairing * ev.toMatPotential_ * Complex(re, im) -
-                           r2 / g * load[i]);
+        // the potential lambda was solved under moves a fluid layer's
+        // density itself
+        const auto paired =
+            Complex(re, im) - deg.tideSelf * ev.toMatPotential_ * psi[i];
+        to[i] += weight *
+                 (pairing * ev.toMatPotential_ * paired - r2 / g * load[i]);
       }
     }
   };
@@ -1823,8 +1833,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       tools->AddUnrelaxedResponse(dlambda, lambda, &vs.state.m);
     }
     if (tidal) {
-      addTide(lambda, vs.sigma, node, weight, tideKernels);
-      addTide(dlambda, ds.sigma, node, weight, dTideKernels);
+      addTide(lambda, vs.sigma, vs.psi, node, weight, tideKernels);
+      addTide(dlambda, ds.sigma, ds.psi, node, weight, dTideKernels);
     }
     if (material) pairBoth(lambda, dlambda, node, pairing * weight);
     if (twisting) {
@@ -1849,14 +1859,14 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     applyJump(vs.state, strains, false);
     applyJump(ds.state, strains, true);
     auto dxJ = Fields{};
-    if (tidal) addTide(xJ, j.lam, node, 1.0, tideKernels);
+    if (tidal) addTide(xJ, j.lam, j.psiA, node, 1.0, tideKernels);
     if (materialV) {
-      auto [dx, dxi, dlam, dshift] = jumpDerivative(xJ, node);
+      auto [dx, dxi, dlam, dshift, dpsi] = jumpDerivative(xJ, node);
       applyJump(ds.state, strainsOf(dx), false);
       dOutside.lumps.emplace(node, lessShift(dxi, dshift));
       dLayer.lumps.emplace(node, minusLoad(dlam));
       dlumps.emplace(node, std::move(dxi));
-      if (tidal) addTide(dx, dlam, node, 1.0, dTideKernels);
+      if (tidal) addTide(dx, dlam, dpsi, node, 1.0, dTideKernels);
       dxJ = std::move(dx);
     } else if (material) {
       dxJ = xJ;

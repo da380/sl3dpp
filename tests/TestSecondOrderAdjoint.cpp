@@ -7,7 +7,10 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <complex>
+#include <format>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <random>
@@ -472,6 +475,117 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
 }
 TEST(SecondOrderAdjoint, ContinuousConvergesToDiscreteUnderTheTrapezoid) {
   ContinuousConvergesToDiscrete(Scheme::ExponentialTrapezoid);
+}
+
+TEST(SecondOrderAdjoint, AtOneNodeTheContinuousTideKernelsAreTheDiscreteUnderRotation) {
+  // One time node is the elastic problem, with no error of the time
+  // stepping: under the rotational feedback the continuous sweep's tide
+  // kernels, first order and along a direction in the moduli, are the
+  // discrete sweep's coefficient by coefficient, and the first-order ones
+  // pair with the tangent-linear run along a tide. The adjoint solution is
+  // solved under the adjoint centrifugal potential, which moves the fluid
+  // core's density itself: without that share of the pairing
+  // (DegreeOperator::TideSelf) the kernel at degree 2, order 1 is 0.2 %
+  // out, and at order 0 by 1e-5.
+  auto setup = Scene::Make(1e22);
+  const auto& grid = setup.solver.Grid();
+  using Complex = std::complex<double>;
+  std::mt19937 rng(131);
+  const auto& mesh = setup.material.Mesh();
+  const auto kappaMu = setup.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
+  MaterialDirection nodal;
+  nodal.kappa.assign(k0.size(), 0.0);
+  nodal.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (setup.material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      nodal.kappa[i] = 0.05 * (0.4 + 0.6 * r) * k0[i];
+      nodal.mu[i] = 0.1 * (1.0 - 0.5 * r) * m0[i];
+    }
+  }
+  const auto potential =
+      1.0 / setup.solver.SolverScales().Factor(PotentialDimensions);
+  auto tide = grid.Expand(setup.Smooth(rng, potential));
+  ZeroBelowTideDegrees(tide);
+  const auto times = std::vector<double>{0.0};
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[0].displacementDual = setup.Smooth(rng, 0.7);
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+  // the largest departure of a over the largest entry of b, and the
+  // departure at one coefficient over that coefficient
+  auto departure = [](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    auto scale = 0.0, diff = 0.0;
+    for (auto i = std::size_t{0}; i < b.size(); ++i) {
+      scale = std::max(scale, std::abs(b[i]));
+      diff = std::max(diff, std::abs(a[i] - b[i]));
+    }
+    return diff / scale;
+  };
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto thickness = setup.Smooth(rng, 100.0 * setup.Metre());
+  Evolution evolution(op, setup.solver, setup.state,
+                      {.rotation = RotationalFeedback::Full,
+                       .rtol = 1e-13,
+                       .record_stride = 1});
+  const auto trajectory = ForwardTrajectory::FromSnapshots(
+      evolution.Run(times, FrozenLoad(setup, times, {thickness})));
+  TangentPerturbation u, alongTide;
+  u.material = AtMemoryPoints(op.Points(), nodal);
+  u.itau = setup.DeltaItau(0.1);
+  alongTide.tide = {tide};
+  auto first = std::map<AdjointMethod, Kernels>{};
+  auto second = std::map<AdjointMethod, KernelDerivatives>{};
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    TangentLinearSolver tangent(evolution,
+                                {.method = method, .rtol = 1e-13, .record = true});
+    const auto runU = tangent.Run(times, u, &trajectory);
+    auto [kernels, derivatives] =
+        AdjointSolver(evolution, {.method = method,
+                                  .rtol = 1e-13,
+                                  .material_kernels = true,
+                                  .tide_kernels = true})
+            .SecondOrderKernels(times, measurements, runU, u.itau, trajectory, {},
+                                u.material);
+    ASSERT_EQ(kernels.tideKernels.size(), 1u);
+    ASSERT_EQ(derivatives.tideKernels.size(), 1u);
+    const auto along =
+        Objective(setup, tangent.Run(times, alongTide, &trajectory), measurements);
+    ASSERT_NE(along, 0.0);
+    EXPECT_NEAR(pair(kernels.tideKernels[0], tide), along, 1e-9 * std::abs(along))
+        << static_cast<int>(method);
+    first[method] = std::move(kernels);
+    second[method] = std::move(derivatives);
+  }
+  const auto& d1 = first[AdjointMethod::Discrete].tideKernels[0];
+  const auto& c1 = first[AdjointMethod::Continuous].tideKernels[0];
+  const auto& d2 = second[AdjointMethod::Discrete].tideKernels[0];
+  const auto& c2 = second[AdjointMethod::Continuous].tideKernels[0];
+  // the coefficients a centrifugal potential has are in play
+  for (const auto m : {0, 1}) {
+    const auto i = SurfaceGrid::Index(2, m);
+    EXPECT_GT(std::abs(d1[i]), 1e-3 * std::abs(d1[SurfaceGrid::Index(2, 2)])) << m;
+    EXPECT_GT(std::abs(d2[i]), 1e-3 * std::abs(d2[SurfaceGrid::Index(2, 2)])) << m;
+    std::cout << std::format(
+        "[tide kernels, one node, 1-D] (2,{}): first order {:.2e}, along the "
+        "moduli {:.2e} from the discrete\n",
+        m, std::abs(c1[i] - d1[i]) / std::abs(d1[i]),
+        std::abs(c2[i] - d2[i]) / std::abs(d2[i]));
+    EXPECT_LT(std::abs(c1[i] - d1[i]), 1e-9 * std::abs(d1[i])) << m;
+    EXPECT_LT(std::abs(c2[i] - d2[i]), 1e-9 * std::abs(d2[i])) << m;
+  }
+  EXPECT_LT(departure(c1, d1), 1e-9);
+  EXPECT_LT(departure(c2, d2), 1e-9);
 }
 
 TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {

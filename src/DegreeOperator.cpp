@@ -1037,6 +1037,30 @@ std::vector<double> DegreeOperator::Tide(int power) const {
   return b;
 }
 
+double DegreeOperator::TideSelf(int power) const {
+  const auto p = power < 0 ? l_ : power;
+  if (p == 0 || l_ == 0) return 0.0;
+  const auto& mesh = material_->Mesh();
+  const auto n = mesh.NGll();
+  const auto a = material_->Radius();
+  const auto drho = material_->DRho();
+  const auto g = material_->Gravity();
+  const auto w = mesh.Weights();
+  auto sum = 0.0;
+  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
+    if (!material_->IsFluid(e)) continue;
+    const auto base = static_cast<std::size_t>(e) * n;
+    const auto jac = mesh.Jacobian(e);
+    for (auto q = 0; q < n; ++q) {
+      const auto rq = mesh.Radius(e, q);
+      const auto psi = std::pow(rq / a, p);
+      sum += w[q] * jac * Stratification(rq, drho[base + q], g[base + q]) * psi *
+             psi;
+    }
+  }
+  return sum;
+}
+
 // -- views
 // --------------------------------------------------------------------------
 

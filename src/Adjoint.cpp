@@ -1621,9 +1621,13 @@ Kernels AdjointSolver::ContinuousSweep(
   };
   // The tide kernels' part: the adjoint displacement paired with the
   // tide's force on each degree, and the adjoint load, on which the
-  // tide's own potential acts through the sea level.
+  // tide's own potential acts through the sea level; `psi` is the
+  // potential the adjoint displacement was solved under (the adjoint
+  // centrifugal one), whose own share of a fluid layer's density
+  // (DegreeOperator::TideSelf) the pairing lacks.
   auto addTide = [&](const std::map<int, std::vector<double>>& lambda,
-                     const std::vector<Complex>& load, std::size_t node,
+                     const std::vector<Complex>& load,
+                     const std::vector<Complex>& psi, std::size_t node,
                      double weight) {
     auto& to = tideKernels[node];
     for (const auto& [l, x] : lambda) {
@@ -1637,8 +1641,12 @@ Kernels AdjointSolver::ContinuousSweep(
                 x[static_cast<std::size_t>(l + 1 + m) * deg.ndof + d];
         }
         const auto i = SurfaceGrid::Index(l, m);
-        to[i] += weight * (pairing * ev.toMatPotential_ * Complex(re, im) -
-                           r2 / g * load[i]);
+        // the potential lambda was solved under moves a fluid layer's
+        // density itself
+        const auto paired =
+            Complex(re, im) - deg.tideSelf * ev.toMatPotential_ * psi[i];
+        to[i] += weight *
+                 (pairing * ev.toMatPotential_ * paired - r2 / g * load[i]);
       }
     }
   };
@@ -1668,7 +1676,7 @@ Kernels AdjointSolver::ContinuousSweep(
     }
     if (moments) addMoments(lambda, twist, node, pairing * weight);
     if (material && sourcedBase) pairToroidalMaterial(twist, node, pairing * weight);
-    if (tidal) addTide(lambda, sigmaC, node, weight);
+    if (tidal) addTide(lambda, sigmaC, psiC, node, weight);
   };
 
   auto accumulateItau = [&](std::size_t node, double weight) {
@@ -1829,7 +1837,7 @@ Kernels AdjointSolver::ContinuousSweep(
       // the lumped adjoint displacement, no time weight
       lateralMaterial(lumpSolutions, twisting ? &lumpTwist : nullptr, node, pairing);
     }
-    if (tidal) addTide(lumpSolutions, j.lam, node, 1.0);
+    if (tidal) addTide(lumpSolutions, j.lam, j.psiA, node, 1.0);
     lumpShift.emplace(node, j.shift);
     lumpLoad.emplace(node, grid.Synthesise(j.lam));
     auto early = smoothEquilibrium(node);

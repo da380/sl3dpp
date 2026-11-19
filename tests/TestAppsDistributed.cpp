@@ -1956,6 +1956,85 @@ TEST_F(AppsOverRanks, SecondOrderKernelsMatchOneProcess) {
   }
 }
 
+TEST_F(AppsOverRanks, SecondOrderKernelsOfAMigratingRunMatchOneProcess) {
+  // The second-order kernels about a run under migrating shorelines (the
+  // marine history, whose melting ice floods its cells; the state at the
+  // window's start, so no calibration), over the ranks: along a direction
+  // in the ice and ln viscosity at once, the tangent-linear run and the
+  // second-order sweep reading the run's shorelines on every rank. The
+  // second-order files and the first-order files beside them are the
+  // one-process run's to the substructured solves' round-off, by either
+  // `kernels.method`.
+  if (Rank() == 0) {
+    test::WriteToyHistory(dir_ / "marine.nc", 0.0, true);
+    test::WriteToyChange(dir_ / "d_ice.nc", true, 0.02);
+  }
+  Barrier();
+  WriteModelFields(
+      dir_ / "d_earth.nc",
+      {{"ln_viscosity", [](double r, double theta, double phi) {
+          return 0.5 + (r / 6368000.0) * std::sin(theta) * std::cos(phi);
+        }}});
+  auto body = Body();
+  for (auto at = body.find("history.nc"); at != std::string::npos;
+       at = body.find("history.nc", at + 1)) {
+    body.replace(at, std::string_view{"history.nc"}.size(), "marine.nc");
+  }
+  body.replace(body.find(R"("at": "start")"),
+               std::string_view{R"("at": "start")"}.size(),
+               R"("shorelines": "migrating", "at": "start")");
+  const auto config = [&](const std::string& name, const std::string& method) {
+    return Write(name + ".json", "{" + body + R"(,
+      "solver": {"step_rtol": 1e-10, "step_max_iterations": 200},
+      "kernels": {"parameters": ["ice", "viscosity"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+           "longitude": 10.0, "width_deg": 25.0},
+          {"type": "displacement_point", "name": "uplift", "latitude": 55.0,
+           "longitude": 10.0, "date_kyr_bp": 0.0}],
+        "output": "out/)" + name + R"(_kernels", "second_order": true,
+        "method": ")" + method + R"("},
+      "perturbation": {
+        "forcing": {"ice_change": [{"change": {"file": "d_ice.nc"}}]},
+        "model": {"viscosity": {"file": "d_earth.nc"}}}})");
+  };
+  for (const std::string method : {"discrete", "continuous"}) {
+    const auto one = config("one_" + method, method);
+    const auto over = config("over_" + method, method);
+    OneProcess([&] { static_cast<void>(app::RunKernel(one)); });
+    const auto summary = app::RunKernel(over);
+    Barrier();
+    if (Rank() != 0) continue;
+    EXPECT_NE(summary.find("shorelines migrating"), std::string::npos) << summary;
+    EXPECT_NE(summary.find("; and their second-order kernels along the "
+                           "perturbation's ice_change, viscosity)"),
+              std::string::npos)
+        << summary;
+    const auto mine = dir_ / "out" / ("over_" + method + "_kernels");
+    const auto theirs = dir_ / "out" / ("one_" + method + "_kernels");
+    auto second = 0.0, first = 0.0;
+    for (const auto* m : {"site", "uplift"}) {
+      const auto name = std::string{m};
+      for (const auto* suffix : {"", "_second_order"}) {
+        const auto ice = name + "_ice_kernels" + suffix + ".nc";
+        const auto eta = name + "_viscosity_kernels" + suffix + ".nc";
+        auto& worst = std::string_view{suffix}.empty() ? first : second;
+        worst = std::max({worst, SurfaceKernelDeparture(mine / ice, theirs / ice),
+                          KernelFileDeparture(mine / eta, theirs / eta)});
+      }
+    }
+    std::cout << std::format(
+        "[second-order kernels, migrating, over the ranks, {}] second order "
+        "{:.1e}, first order {:.1e} from the one-process run\n",
+        method, second, first);
+    // measured on two and three ranks, discrete: 2.6e-11 and 2.0e-11
+    // (second order), 5.9e-11 and 7.8e-11 (first order); continuous:
+    // 3.0e-11 and 2.2e-11, 1.1e-10 and 2.4e-11
+    EXPECT_LT(second, kOverRanks) << method;
+    EXPECT_LT(first, kOverRanks) << method;
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

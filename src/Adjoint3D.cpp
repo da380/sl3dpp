@@ -295,6 +295,12 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                     grid.ZeroCoefficients()};
   auto& vstate = vs.state;
 
+  // The centrifugal potential of a closed solve's rotation.
+  auto centrifugalOf = [&](const GRDSolver::Response& response) {
+    return rotation != RotationalFeedback::None
+               ? solver.CentrifugalCoefficients(response.angularVelocity)
+               : grid.ZeroCoefficients();
+  };
   auto psiStar = [&](const std::vector<double>& potentialDual) {
     auto d = solver.CentrifugalDual(grid.Expand(potentialDual));
     for (auto& v : d) v *= r2;
@@ -420,7 +426,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   }
   // The tide kernels, as the radial continuous sweep forms them: the
   // adjoint displacement paired with the tide's force on each degree,
-  // less r^2 / g times the adjoint load.
+  // less r^2 / g times the adjoint load, and less the fluid layers'
+  // density moved by the potential the adjoint displacement was solved
+  // under (the adjoint centrifugal one; DegreeOperator::TideSelf).
   const bool tidal = options_.tide_kernels;
   if (tidal && op.GetOptions().collectives.Distributed()) {
     throw std::invalid_argument("the tide kernels are formed on one process");
@@ -433,6 +441,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   auto dTideKernels = std::vector<std::vector<Complex>>(
       tidal && second ? times.size() : 0, grid.ZeroCoefficients());
   auto lumpLoad = std::vector<Complex>{};  // the jump's adjoint load
+  auto lumpPsi = std::vector<Complex>{};   // and its centrifugal potential
   const bool keepLump = material || hasMaterialV || moments || tidal;
   auto momentKernels = std::vector<std::vector<SphericalTensor>>(
       moments ? times.size() : 0,
@@ -470,21 +479,23 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   };
   Viscoelastic3D::Solutions lumpSolutions;  // the jump's, when material
   auto addTide = [&](const Viscoelastic3D::Solutions& lambda,
-                     const std::vector<Complex>& load, std::size_t node,
+                     const std::vector<Complex>& load,
+                     const std::vector<Complex>& psi, std::size_t node,
                      double weight, double scale, bool derivative = false) {
     auto& to = (derivative ? dTideKernels : tideKernels)[node];
     for (const auto& [l, x] : lambda.spheroidal) {
       if (l == 0) continue;
-      const auto& tideVec = locked([&]() -> const std::vector<double>& {
-        return reference.Deg(l).tideVec;
-      });
+      const auto& deg = locked([&]() -> const auto& { return reference.Deg(l); });
+      const auto& tideVec = deg.tideVec;
       const auto ndof = tideVec.size();
       for (auto m = 0; m <= l; ++m) {
-        auto sum = Complex{};
+        const auto i = SurfaceGrid::Index(l, m);
+        // the potential lambda was solved under moves a fluid layer's
+        // density itself
+        auto sum = -deg.tideSelf * ev.toMatPotential_ * psi[i];
         for (auto d = std::size_t{0}; d < ndof; ++d) {
           sum += tideVec[d] * x[static_cast<std::size_t>(m) * ndof + d];
         }
-        const auto i = SurfaceGrid::Index(l, m);
         to[i] += weight * (scale * ev.toMatPotential_ * sum - r2 / g * load[i]);
       }
     }
@@ -1106,7 +1117,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if ((!material && !moments && !tidal) || weight == 0.0) return;
     const auto lambda = fullOf(vs);
     if (moments) addMoments(lambda, node, pairing * weight);
-    if (tidal) addTide(lambda, vs.sigma, node, weight, pairing);
+    if (tidal) addTide(lambda, vs.sigma, vs.psi, node, weight, pairing);
     if (!material && !((moments || tidal) && second)) return;
     const auto e = strainOf(lambda);
     if (!second) {
@@ -1118,7 +1129,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       addSolutions(dlambda, unrelaxedResponseV(e, lambda, &vs.state.m));
     }
     if (moments) addMoments(dlambda, node, pairing * weight, true);
-    if (tidal) addTide(dlambda, ds.sigma, node, weight, pairing, true);
+    if (tidal) addTide(dlambda, ds.sigma, ds.psi, node, weight, pairing, true);
     if (!material) return;
     const auto de = strainOf(dlambda);
     pairBoth(lambda, e, &dlambda, &de, node, pairing * weight);
@@ -1207,7 +1218,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       }
     }
     return std::tuple(std::move(response), resp.relativeSeaLevelChange,
-                      resp.uniformShift);
+                      resp.uniformShift, std::move(dpsiC));
   };
 
   // One reversed coupled step of a carried state under its closure, with
@@ -1623,6 +1634,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                      rhoW * Cn[i] * inst.response.relativeSeaLevelChange[i];
       }
       lumpLoad = grid.Expand(lamGrid);
+      lumpPsi = centrifugalOf(inst.response);
     }
     bump(vs.state, op.itau_, inst.strain);
     if (second) bump(ds.state, *ditau, inst.strain);
@@ -1637,7 +1649,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     base.oceanFunctionOverride = overrideAt(node);
     auto inst = instantaneous(node, base, &analysed, &bulk, nullptr);
     return std::tuple(std::move(inst.x), inst.response.relativeSeaLevelChange,
-                      inst.response.uniformShift);
+                      inst.response.uniformShift, centrifugalOf(inst.response));
   };
 
   auto observe = [&](std::size_t node) {
@@ -1650,6 +1662,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       lumps.emplace(node, j.xiA);
       jumpShift = j.shift;
       lumpLoad = j.lam;
+      lumpPsi = j.psiA;
       applyJump(j);
     }
     outside.lumps.emplace(node, lessShift(lumps.at(node), jumpShift));
@@ -1657,7 +1670,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     auto dxJ = Viscoelastic3D::Solutions{};
     auto deJ = Tensor{};
     if (hasMaterialV) {
-      auto [dx, dxi, dshift] =
+      auto [dx, dxi, dshift, dpsi] =
           lateral ? lateralJumpDerivative(node) : jumpDerivative(node);
       deJ = strainOf(dx);
       bump(ds.state, op.itau_, deJ);
@@ -1670,7 +1683,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           lamGrid[i] = rhoW * Cn[i] * dxi[i];
         }
         const auto dlam = grid.Expand(lamGrid);
-        if (tidal) addTide(dx, dlam, node, 1.0, pairing, true);
+        if (tidal) addTide(dx, dlam, dpsi, node, 1.0, pairing, true);
         dOutside.lumps.emplace(node, lessShift(dxi, dshift));
         dLayer.lumps.emplace(node, minusLoad(dlam));
       }
@@ -1687,7 +1700,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (moments) addMoments(lumpSolutions, node, pairing);
     // the jump solution moves with the moduli alone
     if (moments && hasMaterialV) addMoments(dxJ, node, pairing, true);
-    if (tidal) addTide(lumpSolutions, lumpLoad, node, 1.0, pairing);
+    if (tidal) addTide(lumpSolutions, lumpLoad, lumpPsi, node, 1.0, pairing);
     // The equilibria under lateral moduli are zero-length reversed steps
     // (their fixed points close the instantaneous lateral response; the
     // derivative state's carries v's material source as a step's does).

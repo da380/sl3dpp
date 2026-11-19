@@ -9,10 +9,13 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
+#include <complex>
 #include <iostream>
 #include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <map>
 #include <memory>
@@ -1841,7 +1844,7 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotationU
 
 namespace {
 
-void ContinuousForcingRowsConverge(Scheme scheme) {
+void ContinuousForcingRowsConverge(Scheme scheme, bool lateralModuli = false) {
   // The surface forcings' rows of the Hessian about a tide-driven run
   // with lateral viscosity and the rotational feedback: the continuous
   // sweep's, along a direction in the viscosity and the moduli and
@@ -1849,6 +1852,8 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
   // water budget and one outside it, a layer on the solid surface), tend
   // to the discrete sweep's as the steps are halved; and so do its
   // first-order kernels of the load outside the budget and of the layer.
+  // With `lateralModuli` the run's own shear and bulk moduli vary with
+  // angle too.
   auto scene = Scene::Make(1e22);
   const auto& grid = scene.solver.Grid();
   const auto& sle = scene.solver.SolverScales();
@@ -1871,9 +1876,23 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
     return grid.Integrate(product);
   };
   const auto kappaMu = scene.material.Moduli().KappaMu();
-  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
-    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
-  });
+  auto options = Viscoelastic3D::Options{};
+  if (lateralModuli) {
+    options.moduli = {.shear =
+                          [](double, double theta, double phi) {
+                            return 0.1 * std::sin(theta) * std::cos(theta) *
+                                   std::cos(phi);
+                          },
+                      .bulk = [](double, double theta, double) {
+                        return 0.05 * std::cos(theta);
+                      }};
+  }
+  Viscoelastic3D op(
+      scene.rheology, kLmax,
+      [](double, double theta, double phi) {
+        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      },
+      options);
   const auto& coupling = op.Coupling();
   TangentPerturbation3D u;
   u.itau = TangentLinearSolver3D::ItauOfLogViscosity(
@@ -1891,6 +1910,9 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
       [](double r) { return 0.1 * (0.5 + r * r); }, angular);
 
   const auto layerPattern = scene.Smooth(rng, 5.0 / sle.Length());
+  // the tide kernels' coefficient of degree 2, order 1, under the rows'
+  // weights in time: [first order, along u][level] = (discrete, continuous)
+  auto polar = std::array<std::vector<std::pair<Complex, Complex>>, 2>{};
   constexpr auto kRows = std::size_t{6};
   const char* names[kRows] = {"tide",          "load",
                               "outside",       "layer",
@@ -1914,6 +1936,7 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
           for (auto& c : out) c *= 0.4 + std::cos(0.5 * std::numbers::pi * t / span);
           return out;
         }}));
+    auto polarAt = std::map<AdjointMethod, std::array<Complex, 2>>{};
     auto rows = std::map<AdjointMethod, std::array<double, kRows>>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto run = TangentLinearSolver3D(evolution, {.method = method,
@@ -1943,6 +1966,8 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
         auto t = tide1;
         for (auto& c : t) c *= shape;
         row[0] += pair(along.ice.tideKernels[n], t);
+        polarAt[method][0] += shape * first.ice.tideKernels[n][SurfaceGrid::Index(2, 1)];
+        polarAt[method][1] += shape * along.ice.tideKernels[n][SurfaceGrid::Index(2, 1)];
         auto f = loadPattern;
         for (auto& v : f) v *= shape;
         auto h = layerPattern;
@@ -1957,6 +1982,10 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
       }
       rows[method] = row;
     }
+    for (auto order = std::size_t{0}; order < 2; ++order) {
+      polar[order].emplace_back(polarAt[AdjointMethod::Discrete][order],
+                                polarAt[AdjointMethod::Continuous][order]);
+    }
     const auto& d = rows[AdjointMethod::Discrete];
     const auto& c = rows[AdjointMethod::Continuous];
     for (auto k = std::size_t{0}; k < kRows; ++k) {
@@ -1965,11 +1994,40 @@ void ContinuousForcingRowsConverge(Scheme scheme) {
     }
   }
   for (auto k = std::size_t{0}; k < kRows; ++k) {
+    std::cout << std::format("{}: {:.3e} {:.3e} {:.3e}, ratio {:.2f}\n", names[k],
+                             gaps[k][0], gaps[k][1], gaps[k][2],
+                             gaps[k][1] / gaps[k][2]);
     EXPECT_LT(gaps[k][2], 0.05) << names[k] << ": " << gaps[k][0] << " "
                                 << gaps[k][1] << " " << gaps[k][2];
+    // A gap already under 1e-4 need not show the ratio: its terms of
+    // different orders are of a size there. About lateral moduli under
+    // Sdirk2 the first-order kernel of the load outside the budget
+    // changes sign between 5 and 9 nodes (signed 4.6e-4, -5.4e-5,
+    // -4.3e-5) and falls at second order from 17 (-1.5e-5, -4.3e-6,
+    // -1.1e-6 at 33, 65 and 129 nodes).
+    if (gaps[k][2] < 1e-4) continue;
     EXPECT_GT(gaps[k][1] / gaps[k][2], 3.0)
         << names[k] << ": " << gaps[k][0] << " " << gaps[k][1] << " "
         << gaps[k][2];
+  }
+  // The rotation's own coefficient of the tide kernels, degree 2 and
+  // order 1, where the adjoint centrifugal potential acts: the continuous
+  // sweep's tends to the discrete's and to nothing else, the gap's limit
+  // by Richardson from the two finest levels a small part of the
+  // coefficient: measured 1e-5 and 5e-5 (first order, along u) under
+  // Sdirk2, 1.4e-4 and 2.2e-4 under the trapezoid. (Without the fluid
+  // core's density moved by that potential, DegreeOperator::TideSelf, the
+  // limit is 2e-3 of it, which the rows' ratios above do not see.)
+  for (auto order = std::size_t{0}; order < 2; ++order) {
+    const auto [d1, c1] = polar[order][1];
+    const auto [d2, c2] = polar[order][2];
+    ASSERT_NE(std::abs(d2), 0.0);
+    const auto limit = std::abs(4.0 * (c2 - d2) - (c1 - d1)) / 3.0 / std::abs(d2);
+    std::cout << std::format(
+        "tide (2,1), {}: gaps {:.3e} {:.3e}, their limit {:.2e}\n",
+        order == 0 ? "first order" : "along u", std::abs(c1 - d1) / std::abs(d1),
+        std::abs(c2 - d2) / std::abs(d2), limit);
+    EXPECT_LT(limit, 5e-4) << order;
   }
 }
 
@@ -1980,6 +2038,155 @@ TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
 }
 TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConvergeUnderTheTrapezoid) {
   ContinuousForcingRowsConverge(Scheme::ExponentialTrapezoid);
+}
+TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConvergeAboutLateralModuli) {
+  ContinuousForcingRowsConverge(Evolution3D::Options{}.scheme, true);
+}
+TEST(SecondOrderAdjoint3D,
+     ContinuousForcingRowsConvergeAboutLateralModuliUnderTheTrapezoid) {
+  ContinuousForcingRowsConverge(Scheme::ExponentialTrapezoid, true);
+}
+
+TEST(SecondOrderAdjoint3D, AtOneNodeTheContinuousTideKernelsAreTheDiscreteUnderRotation) {
+  // One time node is the elastic problem, with no error of the time
+  // stepping: under the rotational feedback, on radial moduli and on
+  // lateral ones, the continuous sweep's tide kernels, first order and
+  // along a direction in the moduli, are the discrete sweep's coefficient
+  // by coefficient, and the first-order ones pair with the tangent-linear
+  // run along a tide. The adjoint solution is solved under the adjoint
+  // centrifugal potential, which moves the fluid core's density itself:
+  // without that share of the pairing (DegreeOperator::TideSelf) the
+  // kernel at degree 2, order 1 is 0.2 % out, and at order 0 by 1e-5.
+  auto scene = Scene::Make(1e21);
+  const auto& grid = scene.solver.Grid();
+  using Complex = std::complex<double>;
+  std::mt19937 rng(131);
+  const auto times = std::vector<double>{0.0};
+  const auto load = scene.MeltLoad(-0.1);
+  const auto potential =
+      1.0 / scene.solver.SolverScales().Factor(PotentialDimensions);
+  auto tide = grid.Expand(scene.Smooth(rng, potential));
+  ZeroBelowTideDegrees(tide);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[0].displacementDual = scene.Smooth(rng, 0.5);
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+  auto departure = [](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    auto scale = 0.0, diff = 0.0;
+    for (auto i = std::size_t{0}; i < b.size(); ++i) {
+      scale = std::max(scale, std::abs(b[i]));
+      diff = std::max(diff, std::abs(a[i] - b[i]));
+    }
+    return diff / scale;
+  };
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  for (const bool lateralModuli : {false, true}) {
+    const auto label = lateralModuli ? "lateral moduli" : "radial moduli";
+    auto options = Viscoelastic3D::Options{};
+    if (lateralModuli) {
+      options.solve_rtol = 1e-12;
+      options.moduli = {.shear =
+                            [](double r, double theta, double phi) {
+                              return 0.1 * (0.5 + r * r) * std::sin(theta) *
+                                     std::cos(theta) * std::cos(phi);
+                            },
+                        .bulk = [](double r, double theta, double) {
+                          return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+                        }};
+    }
+    Viscoelastic3D op(
+        scene.rheology, kLmax,
+        [](double, double theta, double phi) {
+          return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        },
+        options);
+    const auto& coupling = op.Coupling();
+    Evolution3D evolution(op, scene.solver, scene.state,
+                          {.rotation = RotationalFeedback::Full,
+                           .rtol = 1e-12,
+                           .coupled_rtol = kModuliCoupledRtol,
+                           .record_stride = 1});
+    Evolution3D::Forcing forcing;
+    forcing.directLoad = [&](double) { return load; };
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
+    TangentPerturbation3D u, alongTide;
+    u.itau = TangentLinearSolver3D::ItauOfLogViscosity(
+        op, OnCoupling(coupling, [](double theta, double phi) {
+          return Cap(theta, phi, 1.9, 4.4, 0.7);
+        }));
+    auto angular = [](double theta, double phi) {
+      return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+    };
+    u.material.kappa = LateralModulus(
+        coupling, scene.material, kappaMu.first,
+        [](double r) { return 0.05 * (1.0 - 0.5 * r); }, angular);
+    u.material.mu = LateralModulus(
+        coupling, scene.material, kappaMu.second,
+        [](double r) { return 0.1 * (0.5 + r * r); }, angular);
+    alongTide.tide = {tide};
+    auto first = std::map<AdjointMethod, std::vector<Complex>>{};
+    auto second = std::map<AdjointMethod, std::vector<Complex>>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      TangentLinearSolver3D tangent(evolution, {.method = method,
+                                                .rtol = 1e-12,
+                                                .coupled_rtol = kModuliCoupledRtol,
+                                                .record = true});
+      const auto runU = tangent.Run(times, u, &trajectory);
+      const auto [kernels, derivatives] =
+          AdjointSolver3D(evolution, {.method = method,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = kModuliCoupledRtol,
+                                      .material_kernels = true,
+                                      .tide_kernels = true})
+              .SecondOrderKernels(times, measurements, runU, u.itau, trajectory,
+                                  {}, u.material);
+      ASSERT_EQ(kernels.ice.tideKernels.size(), 1u) << label;
+      ASSERT_EQ(derivatives.ice.tideKernels.size(), 1u) << label;
+      const auto run = tangent.Run(times, alongTide, &trajectory);
+      const auto along =
+          scene.Surface(measurements[0].relativeSeaLevelDual,
+                        run[0].relativeSeaLevelChange) +
+          scene.Surface(measurements[0].displacementDual, run[0].displacement);
+      ASSERT_NE(along, 0.0) << label;
+      EXPECT_NEAR(pair(kernels.ice.tideKernels[0], tide), along,
+                  1e-8 * std::abs(along))
+          << label << ", method " << static_cast<int>(method);
+      first[method] = kernels.ice.tideKernels[0];
+      second[method] = derivatives.ice.tideKernels[0];
+    }
+    const auto& d1 = first[AdjointMethod::Discrete];
+    const auto& c1 = first[AdjointMethod::Continuous];
+    const auto& d2 = second[AdjointMethod::Discrete];
+    const auto& c2 = second[AdjointMethod::Continuous];
+    // the coefficients a centrifugal potential has are in play
+    for (const auto m : {0, 1}) {
+      const auto i = SurfaceGrid::Index(2, m);
+      EXPECT_GT(std::abs(d1[i]), 1e-3 * std::abs(d1[SurfaceGrid::Index(2, 2)]))
+          << label << ", " << m;
+      EXPECT_GT(std::abs(d2[i]), 1e-3 * std::abs(d2[SurfaceGrid::Index(2, 2)]))
+          << label << ", " << m;
+      std::cout << std::format(
+          "[tide kernels, one node, 3-D, {}] (2,{}): first order {:.2e}, along "
+          "the moduli {:.2e} from the discrete\n",
+          label, m, std::abs(c1[i] - d1[i]) / std::abs(d1[i]),
+          std::abs(c2[i] - d2[i]) / std::abs(d2[i]));
+      EXPECT_LT(std::abs(c1[i] - d1[i]), 1e-9 * std::abs(d1[i])) << label << ", " << m;
+      EXPECT_LT(std::abs(c2[i] - d2[i]), 1e-9 * std::abs(d2[i])) << label << ", " << m;
+    }
+    std::cout << std::format(
+        "[tide kernels, one node, 3-D, {}] every coefficient: first order "
+        "{:.2e}, along the moduli {:.2e}\n",
+        label, departure(c1, d1), departure(c2, d2));
+    EXPECT_LT(departure(c1, d1), 1e-9) << label;
+    EXPECT_LT(departure(c2, d2), 1e-9) << label;
+  }
 }
 
 TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {

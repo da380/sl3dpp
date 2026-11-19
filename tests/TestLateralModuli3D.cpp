@@ -457,7 +457,12 @@ TEST(LateralModuli3D, StartSolveIsTheStaticLateralSolve) {
             << " iterations, static solve " << info.iterations << '\n';
 }
 
-TEST(LateralModuli3D, StepSelfConvergesAtSecondOrderWithModuliAndViscosity) {
+namespace {
+
+void StepSelfConvergesAtSecondOrderWithModuliAndViscosity(Scheme scheme) {
+  // The step under lateral viscosity, shear and bulk modulus, a constant
+  // load switched on at the start: the degree-2, order-2 displacement
+  // after 2 tau, over 4, 8 and 16 steps, converges at second order.
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   Viscoelastic3D op(
@@ -477,7 +482,7 @@ TEST(LateralModuli3D, StepSelfConvergesAtSecondOrderWithModuliAndViscosity) {
     auto state = op.ZeroState();
     Viscoelastic3D::Solutions solutions;
     for (auto i = 0; i < steps; ++i) {
-      auto result = op.Step(state, T / steps, Scheme::ExponentialTrapezoid, load);
+      auto result = op.Step(state, T / steps, scheme, load);
       EXPECT_TRUE(result.info.converged);
       passes = std::max(passes, result.info.iterations);
       state = std::move(result.state);
@@ -492,6 +497,18 @@ TEST(LateralModuli3D, StepSelfConvergesAtSecondOrderWithModuliAndViscosity) {
   EXPECT_NEAR(ratio, 4.0, 1.5);
   std::cout << "self-convergence ratio " << ratio << ", at most " << passes
             << " passes a step\n";
+}
+
+}  // namespace
+
+TEST(LateralModuli3D, StepSelfConvergesAtSecondOrderWithModuliAndViscosity) {
+  StepSelfConvergesAtSecondOrderWithModuliAndViscosity(
+      Evolution3D::Options{}.scheme);
+}
+TEST(LateralModuli3D,
+     StepSelfConvergesAtSecondOrderWithModuliAndViscosityUnderTheTrapezoid) {
+  StepSelfConvergesAtSecondOrderWithModuliAndViscosity(
+      Scheme::ExponentialTrapezoid);
 }
 
 TEST(LateralModuli3D, ConjugateGradientStepMatchesTheFixedPointUnderModuli) {

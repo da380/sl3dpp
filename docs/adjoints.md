@@ -2415,7 +2415,15 @@ tide in its directions, the tide kernels' derivative along the
 relaxation times (in 3D the log viscosity) against central differences
 of the first-order tide kernels (Richardson to 1e-6), and the
 continuous tide kernels and their derivatives converging to the
-discrete as the steps are halved, 1D and 3D.
+discrete as the steps are halved, 1D and 3D. Under the rotational
+feedback the continuous tide kernels are held where the time stepping
+has no error, at one node: first order and along a direction in the
+moduli they are the discrete ones coefficient by coefficient (1e-9;
+`AtOneNodeTheContinuousTideKernelsAreTheDiscreteUnderRotation`, 1D and
+3D, on radial and lateral moduli); and through time the gap of the
+coefficient of degree 2, order 1, extrapolated from the two finest
+levels, is under 5e-4 of it
+(`SecondOrderAdjoint3D.ContinuousForcingRowsConverge`).
 
 ## 19. Interior sources as parameters
 
@@ -2506,7 +2514,17 @@ material's:
   the degree's unit tide force, less r^2 / g times the adjoint load's
   coefficient: the tide moves the solid through its force and the sea
   level through its own potential, and the second acts on the adjoint
-  load (the measurement's sea level dual and the ocean's);
+  load (the measurement's sea level dual and the ocean's). Under the
+  rotational feedback lambda is itself solved under a potential, the
+  adjoint centrifugal one psi-dagger, and in a stratified fluid layer
+  the density answers the total potential, that one included, through
+  the stratification term S = r^2 (d rho / dr) / g of the fluid's
+  potential equation: the density lambda moves, paired with the unit
+  tide, is its pairing with the tide force less psi-dagger's
+  coefficient times the integral of S (r/a)^2l over the fluid layers
+  (`DegreeOperator::TideSelf`). The term touches the coefficients a
+  centrifugal potential has, degree 2 at orders 0 and 1; on PREM it is
+  0.2 % of the kernel at order 1 and 1e-5 at order 0;
 - the toroidal adjoint is the toroidal systems in reversed time, with no
   force between observations and a jump at each by the unrelaxed
   toroidal response to the adjoint traction of a measurement of W
