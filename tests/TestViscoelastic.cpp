@@ -223,7 +223,7 @@ TEST(Rheology, BurgersPronyTermsAreTheBurgersBody) {
       return std::array<double, 2>{terms[0].itau * (e - m[0]),
                                    terms[1].itau * (e - m[1])};
     };
-    auto creep = [&](double t) {
+    auto creep = [&, &mu = mu, &eta = eta, &muK = muK, &etaK = etaK](double t) {
       return 1.0 / mu + t / eta + (1.0 - std::exp(-t * muK / etaK)) / muK;
     };
     auto m = std::array<double, 2>{};

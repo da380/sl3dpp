@@ -129,10 +129,11 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
     }
   } else {
     for (const auto& [name, kind] : ViscoelasticDeckKinds()) {
-      const auto held = std::ranges::any_of(deck.Names(), [&](const auto& c) {
-        const auto member = planetmodel::Member(c);
-        return c == name || (member && member->first == name);
-      });
+      const auto held =
+          std::ranges::any_of(deck.Names(), [&, &name = name](const auto& c) {
+            const auto member = planetmodel::Member(c);
+            return c == name || (member && member->first == name);
+          });
       if (held) kinds.emplace(name, kind);
     }
   }

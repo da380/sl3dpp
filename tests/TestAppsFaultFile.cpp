@@ -258,10 +258,10 @@ TEST_F(FaultFileTest, AThrustLiftsTheSurfaceOverItsUpDipPartTowardsTheTrench) {
   const auto V = Node(file, "tangential_potential_smoothed");
   const auto W = Node(file, "toroidal_potential_smoothed");
   const auto h = 1e-5;
-  auto dTheta = [&](const std::vector<double>& f) {
+  auto dTheta = [&, &ta = ta, &pa = pa](const std::vector<double>& f) {
     return (ValueAt(kLmax, f, ta + h, pa) - ValueAt(kLmax, f, ta - h, pa)) / (2 * h);
   };
-  auto dPhi = [&](const std::vector<double>& f) {
+  auto dPhi = [&, &ta = ta, &pa = pa](const std::vector<double>& f) {
     return (ValueAt(kLmax, f, ta, pa + h) - ValueAt(kLmax, f, ta, pa - h)) /
            (2 * h * std::sin(ta));
   };

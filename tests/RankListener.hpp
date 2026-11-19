@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <mpi.h>
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -42,6 +43,24 @@ class AbortEveryRankOnAFatalFailure : public ::testing::EmptyTestEventListener {
 inline void EndEveryRankOnAFatalFailure() {
   ::testing::UnitTest::GetInstance()->listeners().Append(
       new AbortEveryRankOnAFatalFailure);
+}
+
+/// Holds the world's rank count to the one the launcher was asked for
+/// (SL3DPP_TEST_RANKS, which the tests' CMake sets beside mpiexec's count),
+/// and ends the program where they differ. An mpiexec that does not match
+/// the MPI library starts each process as a world of one rank, and every
+/// test would then pass without the ranks it is there to exercise. After
+/// MPI_Init; a program started without the variable is not held.
+inline void RequireTheRanksAskedFor() {
+  const auto* asked = std::getenv("SL3DPP_TEST_RANKS");
+  if (asked == nullptr) return;
+  auto size = 0;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  if (size == std::atoi(asked)) return;
+  std::cerr << "the launcher was asked for " << asked
+            << " ranks and MPI_COMM_WORLD holds " << size
+            << ": mpiexec and the MPI library do not match" << std::endl;
+  MPI_Abort(MPI_COMM_WORLD, 1);
 }
 
 }  // namespace sl3dpp::test

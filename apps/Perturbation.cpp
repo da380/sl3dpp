@@ -761,8 +761,8 @@ void AddEarthDirection(TangentPerturbation3D& direction,
     const auto end = last < 0 ? mesh.ElementCount() : last;
     const auto& points = coupling.Points();
     const auto& surface = recorded.solver->Grid();
-    const auto uncovered = [&](const io::ModelField& field,
-                               std::string_view name) {
+    const auto uncovered = [&, first = first](const io::ModelField& field,
+                                              std::string_view name) {
       for (auto e = first; e < end; ++e) {
         // a 3-D run takes no lateral moduli in the fluid, its own or a
         // direction's; the element holding the centre is an element like

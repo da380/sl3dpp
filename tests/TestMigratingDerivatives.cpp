@@ -767,9 +767,10 @@ void TheContinuousSweepAboutAStartWithAnIceChange3D(Scheme scheme) {
   const auto gEnd = scene.Smooth(rng, 1.0);
   Viscoelastic3D op(scene.rheology, Scene3D::kLmax3, LateralDelta);
   const auto& coupling = op.Coupling();
-  auto gapsAt = [&](int nodes) {
+  auto gapsAt = [&, &ice0 = ice0](int nodes) {
     auto times = std::vector<double>{};
-    for (auto n = 0; n < nodes; ++n) times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
+    for (auto n = 0; n < nodes; ++n)
+      times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
     auto deltaIce = std::vector<std::vector<double>>{};
     for (const auto t : times) {
       const auto s = t / times.back();
@@ -808,7 +809,8 @@ void TheContinuousSweepAboutAStartWithAnIceChange3D(Scheme scheme) {
       return withBackground(k) - scene.Surface(k.ice.baseline, deltaIce[0]);
     };
     auto e = c.logViscosityKernel3D[0];
-    for (auto i = std::size_t{0}; i < e.size(); ++i) e[i] -= d.logViscosityKernel3D[0][i];
+    for (auto i = std::size_t{0}; i < e.size(); ++i)
+      e[i] -= d.logViscosityKernel3D[0][i];
     return std::array<double, 4>{
         Gap(withBackground(c), withBackground(d)), Gap(held(c), held(d)),
         Gap(scene.Surface(c.ice.initialSeaLevel, deltaSea),
@@ -1062,7 +1064,7 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
                        [&](double e) { return MovedModuli(setup, op, e, material); }),
                    VolumePairing(op.Points(), mesh, kernels.kappaKernel, material.kappa) +
                        VolumePairing(op.Points(), mesh, kernels.muKernel, material.mu)}}) {
-    auto along = [&](AdjointMethod method) {
+    auto along = [&, &direction = direction](AdjointMethod method) {
       return Objective(setup,
                        TangentLinearSolver(evolution, {.method = method, .rtol = 1e-12})
                            .Run(times, direction, &trajectory, oceans),
@@ -1070,8 +1072,9 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
     };
     const auto discrete = along(AdjointMethod::Discrete);
     const auto continuous = along(AdjointMethod::Continuous);
-    const auto fd =
-        Difference([&](double e) { return objective(moved(e)); }, eps, discrete);
+    const auto fd = Difference(
+        [&, &moved = moved](double e) { return objective(moved(e)); }, eps,
+        discrete);
     std::cout << std::format(
         "[forced, 1D] {}: ratio {:.3f}, Richardson gap {:.2e}; discrete kernel {:.2e}; "
         "continuous run {:.2e}\n",
@@ -1473,7 +1476,7 @@ void TheViscosityAndTheModuliAboutAForcedRun3D(Scheme scheme) {
                    }),
                    VolumePairing(coupling, kernels.kappaKernel3D, material.kappa) +
                        VolumePairing(coupling, kernels.muKernel3D, material.mu)}}) {
-    auto along = [&](AdjointMethod method) {
+    auto along = [&, &direction = direction](AdjointMethod method) {
       return Objective3D(scene,
                          TangentLinearSolver3D(evolution, {.method = method,
                                                            .rtol = 1e-12,
@@ -1483,8 +1486,9 @@ void TheViscosityAndTheModuliAboutAForcedRun3D(Scheme scheme) {
     };
     const auto discrete = along(AdjointMethod::Discrete);
     const auto continuous = along(AdjointMethod::Continuous);
-    const auto fd =
-        Difference([&](double e) { return objective(*moved(e)); }, eps, discrete);
+    const auto fd = Difference(
+        [&, &moved = moved](double e) { return objective(*moved(e)); }, eps,
+        discrete);
     std::cout << std::format(
         "[forced, 3D] {}: ratio {:.3f}, Richardson gap {:.2e}; discrete kernel {:.2e}; "
         "continuous run {:.2e}\n",
@@ -1614,9 +1618,10 @@ void TheContinuousSweepsAboutAForcedRun3D(Scheme scheme) {
   const auto names = std::array<const char*, kCount>{
       "inside", "outside", "layer", "thickness", "initial sea level", "moment",
       "log viscosity", "moduli", "Hessian"};
-  auto gapsAt = [&](int nodes) {
+  auto gapsAt = [&, &ice0 = ice0](int nodes) {
     auto times = std::vector<double>{};
-    for (auto n = 0; n < nodes; ++n) times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
+    for (auto n = 0; n < nodes; ++n)
+      times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
     const auto base = BaseForcing(times, inside, outside, layer, source);
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[0].relativeSeaLevelDual = g0;
@@ -2324,9 +2329,10 @@ void TheContinuousTideKernelsAboutAForcedRun3D(Scheme scheme) {
   const auto gDisp = scene.Smooth(rng, 0.7);
   Viscoelastic3D op(scene.rheology, Scene3D::kLmax3, LateralDelta);
   const auto pattern = OnCoupling(op.Coupling(), kPattern);
-  auto gapsAt = [&](int nodes) {
+  auto gapsAt = [&, &ice0 = ice0](int nodes) {
     auto times = std::vector<double>{};
-    for (auto n = 0; n < nodes; ++n) times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
+    for (auto n = 0; n < nodes; ++n)
+      times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
     const auto base = BaseForcing(times, inside, outside, layer, source);
     auto tides = std::vector<Coefficients>{}, held = std::vector<Coefficients>{};
     for (const auto t : times) {

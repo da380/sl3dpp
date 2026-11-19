@@ -2040,6 +2040,7 @@ TEST_F(AppsOverRanks, SecondOrderKernelsOfAMigratingRunMatchOneProcess) {
 int main(int argc, char** argv) {
   auto provided = 0;
   MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
+  sl3dpp::test::RequireTheRanksAskedFor();
   app::StartRanks();
   ::testing::InitGoogleTest(&argc, argv);
   if (Rank() != 0) {

@@ -301,7 +301,7 @@ std::expected<Rheology, RheologyError> Rheology::FromModel(
   auto kelvin = std::map<std::size_t, Kelvin>{};
   auto prony = false;
   for (const auto& [layer, body] : bodies) {
-    auto field = [nd, layer](std::string name) {
+    auto field = [nd, layer = layer](std::string name) {
       return [nd, layer, name = std::move(name)](double r) {
         return nd.EvaluateInLayer(name, layer, r);
       };

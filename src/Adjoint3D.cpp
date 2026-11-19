@@ -485,7 +485,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     auto& to = (derivative ? dTideKernels : tideKernels)[node];
     for (const auto& [l, x] : lambda.spheroidal) {
       if (l == 0) continue;
-      const auto& deg = locked([&]() -> const auto& { return reference.Deg(l); });
+      const auto& deg =
+          locked([&, l = l]() -> const auto& { return reference.Deg(l); });
       const auto& tideVec = deg.tideVec;
       const auto ndof = tideVec.size();
       for (auto m = 0; m <= l; ++m) {

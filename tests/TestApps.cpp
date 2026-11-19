@@ -4948,7 +4948,7 @@ TEST_F(AppsTest, KernelsOfACalibratedRunAgainstTheRunsOfItsIce) {
   for (const auto& [name, node] : {std::pair{"first.nc", std::size_t{0}},
                                    std::pair{"middle.nc", std::size_t{2}}}) {
     WriteToyNodes(dir_ / name, "ice_thickness",
-                  [&, node](std::size_t k, double theta) {
+                  [&, node = node](std::size_t k, double theta) {
                     return k == node ? band(theta) : 0.0;
                   });
   }
@@ -5169,7 +5169,7 @@ TEST_F(AppsTest, KernelsOfACalibratedRunAreItsTotalDerivatives) {
   for (const auto& [name, node] : {std::pair{"first.nc", std::size_t{0}},
                                    std::pair{"middle.nc", std::size_t{2}}}) {
     WriteToyNodes(dir_ / name, "ice_thickness",
-                  [&, node](std::size_t k, double theta) {
+                  [&, node = node](std::size_t k, double theta) {
                     return k == node ? band(theta) : 0.0;
                   });
   }
@@ -12228,7 +12228,9 @@ TEST_F(AppsTest, KernelsOfATideUnderMigratingShorelines) {
   for (const auto& [dimension, model] :
        {std::pair{std::string{"1d"}, atSeven(kBall)},
         std::pair{std::string{"3d"}, atSeven(Prem8())}}) {
-    const auto at = [&](const std::string& name) { return dimension + "_" + name; };
+    const auto at = [&, &dimension = dimension](const std::string& name) {
+      return dimension + "_" + name;
+    };
     const auto base = config(at("run"), model, 20.0, 10.0);
     const auto summary = app::RunKernel(base);
     EXPECT_NE(summary.find("5 nodes 2 to 0 kyr BP, shorelines migrating"),
@@ -12614,10 +12616,10 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
         std::pair{"soft.nc", 1.0 - 1e-3}}) {
     ASSERT_TRUE(io::WriteModuli(
         dir_ / name, model, SurfaceGrid(8),
-        [scale](double, double theta, double) {
+        [scale = scale](double, double theta, double) {
           return scale * 0.1 * std::cos(theta);
         },
-        [scale](double, double theta, double phi) {
+        [scale = scale](double, double theta, double phi) {
           return scale * 0.05 * std::sin(theta) * std::cos(phi);
         },
         {.name = "toy moduli", .elementMetres = 500e3}));
@@ -12935,10 +12937,10 @@ TEST_F(AppsTest, ModuliKernelsOfARunThroughTimeOnLateralModuli) {
         std::pair{"soft.nc", 1.0 - 1e-3}}) {
     ASSERT_TRUE(io::WriteModuli(
         dir_ / name, model, SurfaceGrid(8),
-        [scale](double, double theta, double) {
+        [scale = scale](double, double theta, double) {
           return scale * 0.1 * std::cos(theta);
         },
-        [scale](double, double theta, double phi) {
+        [scale = scale](double, double theta, double phi) {
           return scale * 0.05 * std::sin(theta) * std::cos(phi);
         },
         {.name = "toy moduli", .elementMetres = 500e3}));

@@ -1424,6 +1424,7 @@ TEST(Distributed, CalibratedKernelsMatchTheOneProcess) {
 
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
+  sl3dpp::test::RequireTheRanksAskedFor();
   ::testing::InitGoogleTest(&argc, argv);
   auto rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);

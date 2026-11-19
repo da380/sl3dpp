@@ -134,10 +134,11 @@ void WriteModelFields(const fs::path& path, const EarthModel& model,
     auto sources = std::map<int, pm::LayerSource>{};
     for (auto layer = 0; layer < layers; ++layer) {
       if (model.IsFluid(static_cast<std::size_t>(layer))) continue;
-      sources.emplace(layer, radial ? pm::LayerSource::Radial([field](double r) {
-                                        return field(r, 0.0, 0.0);
-                                      })
-                                    : pm::LayerSource::Lateral(field));
+      sources.emplace(
+          layer, radial ? pm::LayerSource::Radial([field = field](double r) {
+            return field(r, 0.0, 0.0);
+          })
+                        : pm::LayerSource::Lateral(field));
     }
     if (const auto spec = test::LogViscositySpec(name)) {
       file.AddField(name, *spec, sources);
@@ -528,7 +529,7 @@ TEST_F(SecondOrderTest, TheForcingsDirectionsAreKernelsDifferences) {
   for (const auto& [name, scale] :
        {std::pair{"change.nc", 1.0}, std::pair{"change_minus.nc", -1.0}}) {
     WriteToyField(dir_ / name, "ice_thickness_change",
-                  [scale](std::size_t k, double theta, double phi) {
+                  [scale = scale](std::size_t k, double theta, double phi) {
                     return scale * (10.0 + 5.0 * static_cast<double>(k)) *
                            ToyCap(theta) * (1.0 + 0.5 * std::cos(phi));
                   });
@@ -630,12 +631,13 @@ TEST_F(SecondOrderTest, TheEarthsDirectionsAreKernelsDifferences) {
   for (const auto& [name, scale] : {std::pair{"eta.nc", 0.0},
                                     std::pair{"eta_plus.nc", kStep},
                                     std::pair{"eta_minus.nc", -kStep}}) {
-    WriteModelFields(dir_ / name, model,
-                     {{"viscosity",
-                       [scale, change](double r, double theta, double phi) {
-                         return 1e21 * std::exp(scale * change(r, theta, phi));
-                       }}},
-                     true);
+    WriteModelFields(
+        dir_ / name, model,
+        {{"viscosity",
+          [scale = scale, change](double r, double theta, double phi) {
+            return 1e21 * std::exp(scale * change(r, theta, phi));
+          }}},
+        true);
   }
   constexpr auto kTenth = 0.1;
   WriteModelFields(dir_ / "d_moduli.nc", model,
@@ -849,7 +851,7 @@ TEST_F(SecondOrderTest, UnderMigratingShorelinesTheStatesSeaLevel) {
         std::pair{"topography_minus.nc", -kStep}}) {
     WriteToyField(
         dir_ / name, "topography",
-        [scale](std::size_t, double theta, double phi) {
+        [scale = scale](std::size_t, double theta, double phi) {
           return 3000.0 * std::cos(theta) +
                  0.5 * std::exp(-std::pow(
                            (theta - std::numbers::pi / 2) / 0.15, 2)) +
@@ -932,7 +934,7 @@ TEST_F(SecondOrderTest, TheStaticProblem) {
        {std::pair{"change.nc", 1.0}, std::pair{"change_minus.nc", -1.0}}) {
     WriteToyField(
         dir_ / name, "ice_thickness_change",
-        [scale](std::size_t, double theta, double phi) {
+        [scale = scale](std::size_t, double theta, double phi) {
           return scale * 20.0 * ToyCap(theta) * (1.0 + 0.5 * std::cos(phi));
         },
         true);
@@ -942,7 +944,7 @@ TEST_F(SecondOrderTest, TheStaticProblem) {
         std::pair{"topography_minus.nc", -1.0}}) {
     WriteToyField(
         dir_ / name, "topography",
-        [scale](std::size_t, double theta, double phi) {
+        [scale = scale](std::size_t, double theta, double phi) {
           return 3000.0 * std::cos(theta) +
                  0.5 * std::exp(-std::pow(
                            (theta - std::numbers::pi / 2) / 0.15, 2)) +
@@ -1150,7 +1152,7 @@ TEST_F(SecondOrderTest, In3DItsDirectionsAreKernelsDifferences) {
   for (const auto& [name, scale] :
        {std::pair{"change.nc", 1.0}, std::pair{"change_minus.nc", -1.0}}) {
     WriteToyField(dir_ / name, "ice_thickness_change",
-                  [scale](std::size_t k, double theta, double phi) {
+                  [scale = scale](std::size_t k, double theta, double phi) {
                     return scale * (10.0 + 5.0 * static_cast<double>(k)) *
                            ToyCap(theta) * (1.0 + 0.5 * std::cos(phi));
                   });
@@ -1164,10 +1166,11 @@ TEST_F(SecondOrderTest, In3DItsDirectionsAreKernelsDifferences) {
   WriteLateralViscosity(dir_ / "eta.nc", model);
   for (const auto& [name, scale] :
        {std::pair{"eta_plus.nc", kStep}, std::pair{"eta_minus.nc", -kStep}}) {
-    WriteLateralViscosity(dir_ / name, model,
-                          [=](double r, double theta, double phi) {
-                            return scale * logViscosity(r, theta, phi);
-                          });
+    WriteLateralViscosity(
+        dir_ / name, model,
+        [=, scale = scale](double r, double theta, double phi) {
+          return scale * logViscosity(r, theta, phi);
+        });
   }
   const auto shear = [](double theta, double phi) {
     return 0.2 * std::sin(theta) * std::sin(phi);
@@ -1188,8 +1191,12 @@ TEST_F(SecondOrderTest, In3DItsDirectionsAreKernelsDifferences) {
                                     std::pair{"moduli_minus.nc", -kStep}}) {
     WriteLateralModuli(
         dir_ / name, model,
-        [=](double theta, double phi) { return scale * shear(theta, phi); },
-        [=](double theta, double phi) { return scale * bulk(theta, phi); });
+        [=, scale = scale](double theta, double phi) {
+          return scale * shear(theta, phi);
+        },
+        [=, scale = scale](double theta, double phi) {
+          return scale * bulk(theta, phi);
+        });
   }
   struct Case {
     std::string name, viscosity = "eta.nc", moduli = "moduli.nc", ice = "",
@@ -1389,10 +1396,10 @@ TEST_F(SecondOrderTest, In3DTheStaticProblemOnLateralModuli) {
         std::pair{"moduli_minus.nc", -kStep}}) {
     WriteLateralModuli(
         dir_ / name, model,
-        [=](double theta, double) {
+        [=, scale = scale](double theta, double) {
           return scale * kOwn * kShear * std::cos(theta);
         },
-        [=](double theta, double phi) {
+        [=, scale = scale](double theta, double phi) {
           return scale * kOwn * kBulk * std::sin(theta) * std::cos(phi);
         });
   }
@@ -1411,7 +1418,7 @@ TEST_F(SecondOrderTest, In3DTheStaticProblemOnLateralModuli) {
        {std::pair{"change.nc", 1.0}, std::pair{"change_minus.nc", -1.0}}) {
     WriteToyField(
         dir_ / name, "ice_thickness_change",
-        [scale](std::size_t, double theta, double phi) {
+        [scale = scale](std::size_t, double theta, double phi) {
           return scale * 20.0 * ToyCap(theta) * (1.0 + 0.5 * std::cos(phi));
         },
         true);
@@ -1421,7 +1428,7 @@ TEST_F(SecondOrderTest, In3DTheStaticProblemOnLateralModuli) {
         std::pair{"topography_minus.nc", -1.0}}) {
     WriteToyField(
         dir_ / name, "topography",
-        [scale](std::size_t, double theta, double phi) {
+        [scale = scale](std::size_t, double theta, double phi) {
           return 3000.0 * std::cos(theta) +
                  0.5 * std::exp(-std::pow(
                            (theta - std::numbers::pi / 2) / 0.15, 2)) +

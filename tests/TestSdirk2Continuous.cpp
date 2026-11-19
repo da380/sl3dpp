@@ -464,7 +464,7 @@ TEST(Sdirk2Continuous, TheContinuousTangentIsTheDiscrete) {
                                   std::pair{"moduli", &moduli}}) {
       const auto predicted =
           Objective(setup, runs.at(name).second, measurements);
-      auto at = [&](double eps) {
+      auto at = [&, &d = d](double eps) {
         if (!d->itau.empty()) {
           const auto moved = MovedTimes(setup.material, rheology, d->itau, eps);
           return Objective(setup, runOf(ViscoelasticOperator(moved, kLmax)),

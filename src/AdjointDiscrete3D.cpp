@@ -1126,8 +1126,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
               block == &to.spheroidal ? from.spheroidal : from.toroidal;
           for (auto& [l, v] : *block) {
             const auto& o = other.at(l);
-            detail::ForEach(op.options_.parallel, v.size(),
-                            [&](std::size_t i) { v[i] += factor * o[i]; });
+            detail::ForEach(
+                op.options_.parallel, v.size(),
+                [&, &v = v](std::size_t i) { v[i] += factor * o[i]; });
           }
         }
       };

@@ -82,9 +82,12 @@ jobs:
         run: ctest --test-dir build --parallel 4 --output-on-failure
 
   # The distributed parts under a real MPI: the library built with
-  # SL3DPP_WITH_MPI against the runner's MPICH, and the mpiexec tests alone,
-  # on two to four ranks of one thread. The jobs above run the rest of the
-  # suite, the threads-as-ranks tests of the same partition among it.
+  # SL3DPP_WITH_MPI against the runner's Open MPI, and the mpiexec tests
+  # alone, on two to four ranks of one thread. The jobs above run the rest of
+  # the suite, the threads-as-ranks tests of the same partition among it.
+  # Open MPI, because Ubuntu 24.04's MPICH package starts each process of an
+  # mpiexec as a world of one rank; and oversubscribed, so that four ranks
+  # start whatever the runner's count of cores, which are Open MPI's slots.
   mpi:
     name: MPI
     runs-on: ubuntu-24.04
@@ -95,7 +98,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            $BASE_PACKAGES g++-14 libopenblas-openmp-dev mpich libmpich-dev
+            $BASE_PACKAGES g++-14 libopenblas-openmp-dev \
+            openmpi-bin libopenmpi-dev
 
       - name: Configure
         run: >-
@@ -103,6 +107,7 @@ jobs:
           -DCMAKE_CXX_COMPILER=g++-14
           -DCMAKE_BUILD_TYPE=Release
           -DSL3DPP_WITH_MPI=ON
+          -DMPIEXEC_PREFLAGS=--oversubscribe
           -DSL3DPP_BUILD_EXAMPLES=OFF
 
       - name: Build

@@ -1102,7 +1102,7 @@ TEST(Sdirk2Derivatives, AcrossAnOnsetUnderInteriorSources) {
         Objective(setup, tangent.Run(times, *p, &trajectory), measurements);
     ASSERT_NE(predicted, 0.0) << name;
     const auto fd = Difference(
-        [&](double e) {
+        [&, &p = p](double e) {
           const auto moved = MovedOperator(setup, op, e, p->material, p->itau);
           Evolution trial(moved, setup.solver, setup.state, options);
           return Objective(setup, trial.Run(times, forcing), measurements);
