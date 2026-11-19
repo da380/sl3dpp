@@ -278,7 +278,9 @@ longer free, an unphysical effect.
 - **Schemes.** The exponential trapezoid (second order, no
   stability limit, one solve per step) with h = Δt itau, e = e^{−h},
   φ₁ = (1 − e)/h, α = φ₁ − e, β = 1 − φ₁, and m⁺ = e m + α dⁿ + β dⁿ⁺¹;
-  backward Euler and exponential Euler as alternatives; and Sdirk2, a
+  backward Euler as an alternative; exponential Euler, explicit in the
+  strain, in the radial operator's own `Step` alone, the evolutions and
+  the 3D and toroidal steps refusing it; and Sdirk2, a
   damped second-order scheme of two stages (below), the default of the
   drivers, the operators' steps and the app. Step sizes are not
   limited by the shortest Maxwell time. `ViscoelasticOperator` also offers
@@ -301,8 +303,8 @@ longer free, an unphysical effect.
   r = (1 − γ)/γ, to tⁿ⁺¹, each closed by the driver's equilibrium at its
   own time (`StepRecipe.hpp`). Its amplification (1 + (1 − 2γ) z)/(1 − γz)²
   vanishes as z → −∞; it is negative beyond h/T = 1 + √2 and −0.21 at its
-  least (near h/T = 8.5), so a mode it takes there decays at least 4.8
-  times a step, its sign alternating.
+  least (at h/T = 4 + 3√2 ≈ 8.24), so a mode it takes there decays at
+  least 4.8 times a step, its sign alternating.
 - **Its cost and what it is for.** Two solves of one effective operator a
   step (backward Euler's at γ Δt: one factorisation per step size, both
   stages keying it), about twice the trapezoid's solves; in 3D about twice
@@ -768,8 +770,8 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   solution under the structure). The transpose of the lateral force
   (`ForceTranspose`) on that adjoint solution and the forward one is the
   measurement's gradient at the heterogeneous model, the independent
-  check of the kernel route there. Realistic contrasts converge in under
-  ten iterations (docs/adjoints.md §13j).
+  check of the kernel route there. Realistic contrasts (10% or less)
+  converge to 1e-10 in under ten iterations (docs/adjoints.md §13j).
 - **Lateral moduli in the 3D stepper** (`Viscoelastic3D::Options::
   moduli`): relative δμ_U(x), δκ(x) over every solid element (the
   branch moduli scaled with the unrelaxed shear, times held), the
@@ -896,8 +898,8 @@ These hold for the fixture gates here and for the cross-code benchmarks
 4. **Anchor in SI**, channel by channel (§9).
 5. **References.** pyslfp is the reference for the elastic problem; the
    Fortran sl3d serves the time-dependent comparisons, at tolerances judged
-   per case. Elastic Love numbers from an updated Fortran build sit about
-   1% off pyslfp, a known and unexplained discrepancy.
+   per case. The Fortran's elastic Love numbers sit about 1% off
+   pyslfp's, a known and unexplained discrepancy.
 6. **Fixtures.** Reference values are produced by the Python scripts in
    `scripts/` (driving pyslfp and planetmodel) and committed to
    `tests/data/` with a provenance header; the tests read them and need no
@@ -913,14 +915,14 @@ fixture comparisons, which small problems pin as tightly as large ones.
 | Gate | Compared against | Fixture | Tolerance |
 | --- | --- | --- | --- |
 | `GravityGate` | planetmodel's mass, moment of inertia and g(r) | `planetmodel_gravity.txt` | 1e-13 relative |
-| `LoveNumbersGate` | pyslfp's generalised Love numbers | `pyslfp_love_numbers.txt` | 1e-10 relative |
+| `LoveNumbersGate` | pyslfp's generalised Love numbers | `pyslfp_love_numbers.txt` | 1e-9 relative |
 | `SeaLevelGate.GeneralisedSolveMatchesPyslfp` | pyslfp, band-limited generalised solve | `pyslfp_generalised_sea_level.txt` | 5e-9 in coefficients |
 | `SeaLevelGate.SharpOceanFingerprintNearPyslfp` | pyslfp, sharp flotation ocean | `pyslfp_fingerprint.txt` | 8e-2 in coefficients, 1% ocean area |
-| `EvolutionGate.StepperMatchesPyslfp` | pyslfp's 1D stepper, Love-number histories | `pyslfp_stepper.txt` | 1e-9 |
+| `EvolutionGate.StepperMatchesPyslfp` | pyslfp's 1D stepper, Love-number histories | `pyslfp_stepper.txt` | 1e-8 |
 | `EvolutionGate.CoupledEvolutionMatchesPyslfp` | pyslfp's coupled 1D GIA run | `pyslfp_evolution.txt` | 1e-5 |
 | `MigratingGate.RunMisfitAndCalibrationMatchPyslfp` | pyslfp's migrating-shoreline run, the gradient of a final sea level misfit, and both calibrations' misfit histories | `pyslfp_migrating.txt` | ocean functions equal; 1e-9 (run), 1e-10 (gradient), 1e-7 (histories) |
 | `AdjointGate` | pyslfp's ice-history load duals (both adjoints) and itau kernels | `pyslfp_kernels.txt` | 1e-5 |
-| `E1Gate.TractionNumbersMatchPyslfp` | pyslfp's traction numbers, gravitating and not | `e1_traction_numbers.txt` | 1e-10 |
+| `E1Gate.TractionNumbersMatchPyslfp` | pyslfp's traction numbers, gravitating and not | `e1_traction_numbers.txt` | 1e-9 |
 | `DecayTime.MatchesPyslfpOnTheFixture` | pyslfp's decay-time estimator | `decay_time.txt` | 1e-6 relative |
 | `ModelViscosity` | planetmodel's Python reading of model files | `viscosity_*.nc`, `viscosity_probes_*.txt` | 1e-11 |
 | `LateralGate` | the 1D path, with zero lateral variation | — | 1e-11 (pipeline), 1e-10 (step), 1e-8 (coupled evolution) |
@@ -947,7 +949,8 @@ Beyond the fixtures:
   1e17 Pa s layer) within 1e-3 of the resolved run from the fourth step
   on (`Evolution.Sdirk2*`). The closed-form Maxwell sphere without
   gravity at second order; an onset at a repeated node the run started
-  there, radial and 3D, under lateral viscosity and moduli, bitwise; the
+  there, radial and 3D, under lateral viscosity and moduli, to rounding
+  (1e-11); the
   migrating run the frozen one where no shoreline moves, 1D and 3D, and
   flotation's ocean function where they move; the 3D loop the 1D one
   with no lateral structure (8e-15), and at second order under a lateral
@@ -1042,24 +1045,28 @@ Beyond the fixtures:
   reference equal to the exact shifted 1D solve at 1e-9 for loads at
   every degree and order and tides at every degree from 2; the kernels under a 10% lateral
   background against central differences of a measurement through the
-  full solve at 1e-5; 6 to 15 iterations for 5 to 40% contrasts.
+  full solve at 1e-5; 6 to 15 iterations to 1e-10 for 5 to 40%
+  contrasts, as `ConvergenceAgainstContrast` prints them (it holds the
+  solves converged and their counts not falling as the contrast grows),
+  and the solves of the Born gate, to 1e-13, held under 40 iterations.
 - **Lateral moduli in the stepper.** Angle-uniform 10% shifts of shear
-  and bulk against the 1D stepper on the shifted rheology at 8e-12
-  (GLL points; a per-element constant shift of the Maxwell region at
-  Gauss points likewise), both schemes; the unrelaxed start solve
-  against the static lateral solve at 1e-9; Δt self-convergence at
+  and bulk against the 1D stepper on the shifted rheology at 1e-10
+  (measured 8e-12; GLL points; a per-element constant shift of the
+  Maxwell region at Gauss points likewise), both schemes; the unrelaxed
+  start solve against the static lateral solve at 1e-9; Δt self-convergence at
   second order with lateral moduli and viscosity together; the coupled
   evolution against the shifted rheology at every node including the
   start, rotation on, at 1e-9; the instantaneous response against the
-  run's first node, to the bit (one code path), and with zero lateral
-  moduli against the radial fingerprint, to rounding (1e-12; bitwise in
-  the test's one process), and over three threads-as-ranks against one
+  run's first node, its fields to rounding (1e-13) and its iteration
+  counts and residual equal (one code path), and with zero lateral
+  moduli against the radial fingerprint, to rounding (1e-9), and over
+  three threads-as-ranks against one
   process at 1e-9 (measured 1.4e-12).
 - **The sweeps under lateral moduli.** The discrete sweep's pairing
   with the tangent (loads, log viscosity, κ and μ directions) at 1e-8;
   the tangent against central differences on the shifted background at
   1e-6; the discrete second-order sweep symmetric and adjoint to the
-  second-order run to 1e-21; the continuous sweep's gaps closing under
+  second-order run at 1e-8; the continuous sweep's gaps closing under
   refinement (first order, material kernels, second order).
 - **Without gravity.** The evolution of a body with a fluid core is its
   shell's above the core at every degree from 1 (to rounding), and not at
@@ -1230,9 +1237,14 @@ What is not built, or holds only within limits:
 - **Material derivatives** are in the moduli: no derivative is taken in
   the density, radial or lateral (docs/adjoints.md §13l). The
   time-stepped tangents and kernels run under any rotational feedback.
-- **The `sl3d` program** exposes neither the tangent-linear runs nor the
-  Hessian products; they are library calls. Its `kernel` command writes
-  the first-order kernels, the moduli's among them.
+- **The `sl3d` program** runs the tangent-linear run along a direction
+  (`sl3d tangent`), and its `kernel` command writes the first-order
+  kernels, the moduli's among them, and with `kernels.second_order` their
+  derivatives along the `perturbation` block's direction, the Hessian's
+  action on it. The second-order tangent-linear run
+  (`RunSecondOrder`) and the Love-number derivatives and kernels
+  (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`) are
+  library calls alone.
 - **Adaptive stepping** exists in `ViscoelasticOperator` but not in the
   evolution drivers.
 - **Sharp lateral structure** (cratons, slabs) aliases in the pointwise
@@ -1265,8 +1277,8 @@ What is not built, or holds only within limits:
   part is removed there, its net force having no equilibrium.
 - **Inversion.** There are no inversion drivers or optimiser interface: the
   library supplies forward runs, kernels and gradients for one to use.
-- **An unexplained elastic discrepancy with the Fortran.** Elastic Love
-  numbers from an updated build of the Fortran sit about 1% from pyslfp's,
+- **An unexplained elastic discrepancy with the Fortran.** The
+  Fortran's elastic Love numbers sit about 1% from pyslfp's,
   more than numerics, of unknown cause. sl3dpp agrees with
   pyslfp (§11), which is the authority for the elastic problem, and Fortran
   comparisons are made for the time-dependent problems only.

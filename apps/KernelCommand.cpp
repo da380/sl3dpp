@@ -120,10 +120,10 @@ const Json& MemberOr(const Json& object, std::string_view member) {
 }
 
 /// The node a single-instant measurement reads: in a dated run its
-/// `date_kyr_bp` (default 0, the present), in a run counting forwards its
-/// `time` in the run's unit (default the window's last node), each a node
-/// of the run; in the static problem its one node, the instant taking no
-/// member. The member of the other form is refused, naming this form's.
+/// `date_kyr_bp`, in a run counting forwards its `time` in the run's unit,
+/// each a node of the run, and with neither the run's last node, in either
+/// form; in the static problem its one node, the instant taking no member.
+/// The member of the other form is refused, naming this form's.
 std::size_t InstantOf(const Json& item, const Run& run) {
   if (!run.times) {
     for (const auto* name : {"date_kyr_bp", "time"}) {
@@ -142,8 +142,8 @@ std::size_t InstantOf(const Json& item, const Run& run) {
            "is a time on a run's own clock, and the run's nodes are dates "
            "before present: give the measurement's date, `date_kyr_bp`");
     }
-    return NodeOf(MemberOr(item, "date_kyr_bp"),
-                  Number(item, "date_kyr_bp", 0.0), run);
+    if (!Has(item, "date_kyr_bp")) return window.Size() - 1;
+    return NodeOf(item.At("date_kyr_bp"), Number(item, "date_kyr_bp"), run);
   }
   if (Has(item, "date_kyr_bp")) {
     Fail(item.At("date_kyr_bp"),
@@ -185,11 +185,13 @@ bool OfTheSeaLevel(Type type) {
 }
 
 /// The decay time's window and uncertainties, in the form of the run's
-/// times (`window_start_kyr_bp`, `window_end_kyr_bp` default 0,
-/// `time_uncertainty_kyr` in a dated run; `window_start`, `window_end`
-/// default the window's last node, `time_uncertainty` in the run's unit
-/// in one counting forwards), held to the nodes: both ends nodes, the
-/// start the earlier, and at least four nodes for the fit.
+/// times (`window_start_kyr_bp`, `window_end_kyr_bp`,
+/// `time_uncertainty_kyr` in a dated run; `window_start`, `window_end`,
+/// `time_uncertainty` in the run's unit in one counting forwards), the
+/// window's end the run's last node where it is not given, in either form;
+/// held to the nodes: both ends nodes, the start the earlier, and at least
+/// four nodes for the fit. A refusal of the window names its two instants,
+/// and says so where the end is the last node by default.
 void ReadDecayWindow(const Json& item, const Run& run, MeasurementSpec& out) {
   const auto& window = *run.times;
   constexpr auto kDated = std::array{"window_start_kyr_bp",
@@ -212,19 +214,28 @@ void ReadDecayWindow(const Json& item, const Run& run, MeasurementSpec& out) {
     }
   }
   const auto start = Number(item, mine[0]);
-  const auto end = window.Dated() ? Number(item, mine[1], 0.0)
-                                  : Number(item, mine[1], window.End());
+  const bool given = Has(item, mine[1]);
+  const auto end = Number(item, mine[1], window.End());
+  // the window's two instants as a refusal names them
+  const auto unit =
+      window.Dated() ? std::string{"kyr BP"} : std::string{window.unit.name};
+  const auto span = std::format(
+      "from {} to {} {}{}", start, end, unit,
+      given ? std::string{}
+            : std::format(" (the run's last node, `{}` not being given)",
+                          mine[1]));
   if (window.Dated() ? !(start > end) : !(end > start)) {
-    Fail(item, std::format("the decay window runs {} in time",
-                           window.Dated() ? "forward" : "backward"));
+    Fail(item, std::format("the decay window, {}, does not run forward in "
+                           "time: its start is the earlier instant",
+                           span));
   }
   out.first = NodeOf(item.At(mine[0]), start, run);
-  out.last = NodeOf(MemberOr(item, mine[1]), end, run);
+  out.last = given ? NodeOf(item.At(mine[1]), end, run) : window.Size() - 1;
   // the fit (DecayTimeMeasurements) needs four samples
   if (const auto held = out.last - out.first + 1; held < 4) {
-    Fail(item, std::format("the decay window holds {} nodes of the times "
-                           "grid; the fit needs at least four",
-                           held));
+    Fail(item, std::format("the decay window, {}, holds {} nodes of the "
+                           "times grid; the fit needs at least four",
+                           span, held));
   }
   out.time_uncertainty = Number(item, mine[2]);
   out.value_uncertainty_m = Number(item, "value_uncertainty_m");
@@ -1715,12 +1726,22 @@ std::string SweepEach(
                            multiplierSweeps)
              : std::string{});
   }
+  // the kernels in the viscosity and the moduli are fields over the Earth
+  // where `kernels.lateral` says so, and by default about a model with
+  // lateral structure, whose run is the 3-D one
+  const bool earthKernels =
+      std::ranges::any_of(block.parameters, [](KernelParameter parameter) {
+        return parameter == KernelParameter::Viscosity ||
+               parameter == KernelParameter::Moduli;
+      });
+  const bool asFields =
+      earthKernels &&
+      block.lateral.value_or(std::is_same_v<Snapshot, Evolution3D::Snapshot>);
   return std::format(
       "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint{}{}{}{})",
       read, block.measurements.size(), block.output.string(), names,
       MethodWord(w.method), steps, derivatives,
-      block.lateral.value_or(false) ? "; the kernels in the Earth as fields"
-                                    : "",
+      asFields ? "; the kernels in the Earth as fields" : "",
       block.second_order
           ? std::format("; and their second-order kernels along the "
                         "perturbation's {}",

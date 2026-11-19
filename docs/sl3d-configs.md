@@ -465,7 +465,7 @@ Which command takes which:
 | `forcing` | `ice_change`, `load`, `tide` and `seismic`, any mix (`ice_change` with an ocean alone) | as `solve` | as `solve` |
 | `ocean` | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration (counting forwards, at `"at": "start"` and `date_kyr_bp`); absent, a body without an ocean | as `solve` | as `solve` |
 | `rotation`, `moments` | yes | yes | yes |
-| `gravity` | `"full"` or `"none"`; `"none"` a radial run under seismic sources alone | `"full"` alone: `"none"` is refused | `"full"` alone: `"none"` is refused |
+| `gravity` | `"full"` or `"none"`; `"none"` a radial run under surface loads and seismic sources alone (solve, Without gravity, below) | `"full"` alone: `"none"` is refused | `"full"` alone: `"none"` is refused |
 | `solver.rtol` | yes | yes (the adjoint solves' too) | yes (the tangent-linear solves' too) |
 | `solver.step_rtol`, `step_max_iterations` | in a 3D run (the static problem's on lateral moduli too) | as `solve` (the reversed steps' too) | as `solve` (the tangent-linear steps' too) |
 | `solver.transform_degrees`, `cache_mb` | in a 3D run (the static problem's on lateral moduli too); in a 1D run whose config asks for lateral kernels (`kernels.lateral` true), taken and not used | as `solve` (the reversed steps' too); in a 1D run, the lateral kernels' grids | as `solve` |
@@ -545,7 +545,8 @@ Each layer of a region is the body a burgers deck's Burgers layer of the
 same numbers is (Earth models, above): the two give one run to rounding.
 A region whose end cuts a layer, or that covers an elastic or a fluid
 layer, is refused, naming the layer and its depths, and so are regions
-that overlap, a region beyond the deck and one missing a member. A prony
+that overlap, a region beyond the deck, one missing a member and a list
+naming no region. A prony
 or burgers deck states its rheology, and refuses the member; a
 `"mineos"` or `"elastic"` deck has no viscosity to build on, and refuses
 it too. Beside a `model.viscosity` file it is refused: the file replaces
@@ -636,8 +637,9 @@ every form the step is not limited by the shortest Maxwell time.
 It holds the state, what is on the body at one instant (The state and the
 ice change, above): the sea level of the sea level equation, exactly one
 of `ocean.sea_level` and `ocean.topography`, the ice, `ocean.ice`, and
-the land held, `ocean.land`, each a file input of `file`, `format` and
-`variable` alone; the instant, one for the whole block,
+the land held, `ocean.land`, each a file input of `file`, `format`,
+`variable` and `outside_span` alone (File inputs, above); the instant,
+one for the whole block,
 `ocean.date_kyr_bp` in the static problem and `ocean.at` in the
 quasi-static one (with `ocean.date_kyr_bp` too in a run counting
 forwards); the shorelines, in either problem; and, in the quasi-static
@@ -684,6 +686,14 @@ hold what they would.
 | --- | --- | --- | --- |
 | `rotation` | word | `"full"` (`"none"` without gravity) | `"none"`, `"axial"` or `"full"` (Units and conventions, above); `"none"` alone without gravity |
 | `moments` | word | `"input"` | `"input"`: the Earth's standard moments of inertia; `"hydrostatic"`: their difference set from the model's own hydrostatic fluid limit, which full rotational feedback needs when the standard moments sustain less oblateness than the model's tidal response; refused without gravity |
+
+Under `"rotation": "full"` a run through time is refused, before its
+first step, where the moments of inertia sustain less oblateness than
+the model's hydrostatic fluid limit: long steps drive the effective
+tidal number towards that limit, and the transverse feedback is then
+unstable. `"moments": "hydrostatic"`, or `"rotation"` `"axial"` or
+`"none"`, takes such a model. The static problem takes no step and is
+not held to the limit (solve, The static problem, below).
 
 ### The solver block
 
@@ -752,8 +762,9 @@ the weights the stage took them with (adjoints.md §1a).
 In the quasi-static problem `output.exchange` must hold the literal
 `{node}`, which is replaced by the node's index zero-padded to the width
 of the last index (`00` to `40` for 41 nodes); in the static problem it
-must not. `exchange_nodes` needs `output.exchange`, and an index past the
-last node is refused. `output.volume` is refused in the quasi-static
+must not. `exchange_nodes` needs `output.exchange`; an index past the
+last node is refused, and so is an empty list (every node's table is
+written where the member is absent). `output.volume` is refused in the quasi-static
 problem and under seismic sources (the response inside the body is solved
 from the static solve's loads and potentials, which do not hold the
 sources' forces), and without gravity (it is solved by the systems with
@@ -1692,8 +1703,9 @@ factor of the latest time not after the time (a time within 1e-12 (1 +
 |t|) of a listed time t being that time), a STEP function jumping at each
 listed time after the first. Either holds the factor CONSTANT at the
 first before the first time and at the last after the last; a single
-pair is a constant factor, and a term without a history has the factor 1
-throughout. Any term that takes a history takes the rule (a load, a cap
+pair is a constant factor, a history holding no pair is refused, and a
+term without a history has the factor 1 throughout. Any term that takes
+a history takes the rule (a load, a cap
 of the ice change, a tide coefficient, a seismic source); a rule without
 a history is refused, and so is `"none"` (planetmodel's rule of values at
 the stored times alone), which a history does not take. A `previous`
@@ -1705,8 +1717,8 @@ forcing, below). A `field` load's file is read
   axis), or at `date` with its `unit` (`"kyr"`, `"yr"` or `"day"`), a
   time on the file's OWN axis, read at +`date` x the unit, so `"date":
   -1500, "unit": "yr"` is `"date_kyr_bp": 1.5`; one of the two is
-  required of a file with a time axis, and both together, or either on a
-  file without one, are refused;
+  required of a file with a time axis, and both together, either on a
+  file without one, or a `unit` without a `date`, are refused;
 - in a dated run: at each node's date, as the ice change's files are, so
   a load file and an ice file on one calendar agree with nothing more
   said;
@@ -2564,7 +2576,7 @@ refused in the static problem.
 | --- | --- | --- | --- |
 | `checkpoint.directory` | path | required in `checkpoint` | where the checkpoints go |
 | `checkpoint.every` | integer >= 1 | required in `checkpoint` | the checkpoint stride, in time nodes |
-| `checkpoint.max_walltime_min` | number | 0 | stop cleanly once a checkpoint is written after this many minutes; 0 for no limit |
+| `checkpoint.max_walltime_min` | number, 0 or more | 0 | stop cleanly once a checkpoint is written after this many minutes; 0 for no limit |
 | `restart` | boolean | `true` | whether to resume from a checkpoint found in `checkpoint.directory`; `false` starts over, replacing the checkpoints there |
 
 Without a `checkpoint` block nothing is written until the run finishes.
@@ -2695,7 +2707,7 @@ What the config was taken to mean, the inputs as read, then the files:
   It follows everything else, with an ocean, without one and without
   gravity, and in the summary of a run stopped at the wall-time limit;
 - without an ocean, the state's words are left out: `<model>, elastic,
-  no ocean, rotation <rotation>[, moments hydrostatic]; <forcing>[;
+  static, no ocean, rotation <rotation>[, moments hydrostatic]; <forcing>[;
   <field>...]; wrote <surface>[ and <exchange>][ and <volume>]` in the
   static problem (ending as above on lateral moduli), and `<model>,
   viscoelastic, <n> nodes <start> to <end> kyr BP, no ocean, rotation
@@ -3128,7 +3140,8 @@ Each word of `kernels.parameters` names a set of kernels, written per
 measurement into `kernels.output` as files whose names begin with the
 measurement's name. The member is required, and its absence is refused,
 the error listing the words the run takes; a word the run cannot give is
-refused when the config is read, saying why. The kernels in the sources
+refused when the config is read, saying why, and so is a word named
+twice. The kernels in the sources
 are `"moment"`'s: the forcing's word for them, `"seismic"`, is not a
 kernel's, and is refused here, the error naming `"moment"`.
 
@@ -3429,11 +3442,11 @@ Each element of `kernels.measurements` is an object with a `type` and a
 position from 0) is the stem of the measurement's files, so names must be
 distinct plain file names: letters, digits, `_`, `-` and `.`, not
 starting with `.`. A measurement at one instant reads the outputs at a
-node of the run: in a dated run at `date_kyr_bp` (default 0, the
-present), in a run counting forwards at `time` on the run's clock in its
-unit (default the window's last node), each located on the node list (to
-1e-9 of the window's span); in the static problem at its one instant,
-which takes neither member. The member of the other form is refused,
+node of the run: in a dated run at `date_kyr_bp`, in a run counting
+forwards at `time` on the run's clock in its unit, each located on the
+node list (to 1e-9 of the window's span), and with neither at the run's
+last node, in either form (the present, where a dated run ends there); in
+the static problem at its one instant, which takes neither member. The member of the other form is refused,
 naming this form's. Every measurement is held to the run when the config
 is read, before anything runs: an instant that is not a node, a
 coefficient that does not exist at `lmax`, a decay window holding fewer
@@ -3496,12 +3509,13 @@ refused then, naming the member.
   every node of the window is fitted by a e^(-t / tau) + b, following
   Al-Attar & Tromp (2014, Appendix C), and the datum is tau. In a dated
   run the window is `window_start_kyr_bp` (required) to
-  `window_end_kyr_bp` (default 0), with `time_uncertainty_kyr`; in a run
-  counting forwards it is `window_start` (required) to `window_end`
-  (default the window's last node), in the run's unit, with
-  `time_uncertainty` in that unit. Both ends must be nodes, the start the
-  earlier, and the window must hold at least four nodes, the fit's
-  minimum. The timing uncertainty (>= 0, required) and
+  `window_end_kyr_bp`, with `time_uncertainty_kyr`; in a run counting
+  forwards it is `window_start` (required) to `window_end`, in the run's
+  unit, with `time_uncertainty` in that unit; the window's end is the
+  run's last node where it is not given, in either form. Both ends must
+  be nodes, the start the earlier, and the window must hold at least four
+  nodes, the fit's minimum; a refusal of the window names its two
+  instants, and says so where its end is the last node by default. The timing uncertainty (>= 0, required) and
   `value_uncertainty_m` (> 0, required) are the one-sigma timing and
   series errors; only their ratio shapes the fit, and a zero timing
   uncertainty holds the times at the nodes. The window is held to the
@@ -3719,7 +3733,9 @@ it, the innermost.
 Summary: `<what the config was taken to mean>; <the inputs as read>;
 wrote <n> measurement(s) of kernels to <output> (<parameters>; <method>
 adjoint)` (`; the kernels in the Earth as fields` before the
-closing parenthesis with `kernels.lateral` true; before that, of a
+closing parenthesis where the kernels in the viscosity or the moduli are
+written as fields: with `kernels.lateral` true, and by default on a
+model with lateral structure; before that, of a
 calibrated run, `; total derivatives, the initial sea level calibrated
 again[, the multiplier in at most <n> sweeps]`, the sweeps the most a
 measurement took and given under migrating shorelines, or `; partial

@@ -2170,7 +2170,7 @@ TEST(DiscreteAdjoint3D, LoadKernelsUnderRotationAndLateralModuli) {
 }
 
 /// The continuous material kernels at a laterally heterogeneous elastic
-/// background (the equilibria and jumps now zero-length steps) against
+/// background (the equilibria and jumps zero-length steps) against
 /// the exact discrete ones: a few per cent at 2.5 kyr steps, falling
 /// under refinement, both schemes; the forward steps, the continuous
 /// sweep's reversed steps and the discrete sweep's regenerations closed

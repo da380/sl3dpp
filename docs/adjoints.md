@@ -17,13 +17,13 @@ scheme".*
 
 ## 1. Both formulations, and when each is accurate
 
-Two adjoints are implemented as options, as pyslfp and AdGIA carry,
+Two adjoints are implemented, as pyslfp and AdGIA carry,
 behind one interface and one result type so every gate runs on both
 alike:
 
 - **Discrete**: the exact transpose of the time-stepped forward map.
   Gradient identity to solver tolerance for any perturbation on the
-  date grid; gated by dot-product tests at machine precision. Being
+  date grid; gated by dot-product tests at 1e-8 relative. Being
   the exact transpose of THIS code's step, it is also the
   porting-bug detector against pyslfp's (algebraically identical)
   implementation.
@@ -648,9 +648,9 @@ dual by the dot product; densities/rates are per unit SLE time.
 - `Adjoint3D.hpp`: `ForwardTrajectory3D`, `Kernels3D`,
   `KernelDerivatives3D` and `AdjointSolver3D` over a
   `Evolution3D`. `FirstOrderKernels` and `SecondOrderKernels` run
-  the continuous sweep, one core in `Adjoint3D.cpp` (§6a, §11);
-  `Options::method = Discrete` the discrete transpose in
-  `AdjointDiscrete3D.cpp` (§12).
+  the discrete transpose by default, in `AdjointDiscrete3D.cpp` (§12,
+  §14), and under `Options::method = Continuous` the continuous sweep,
+  one core in `Adjoint3D.cpp` (§6a, §11).
 - `TangentLinear.hpp`, `TangentLinear3D.hpp`: `TangentLinearSolver` and
   `TangentLinearSolver3D`, the forward mode (§8, §10).
 - Internals access is by friendship; nothing speculative is made
@@ -682,18 +682,19 @@ dual by the dot product; densities/rates are per unit SLE time.
   limit (§6a), not taken from GSHTrans's tensor types. The reality
   reduction gives the derived spins by sign·conj for free at the
   contraction, and the adjoint fields are real tensors too.
-- **Discrete option**: the exact transpose of the reduced pipeline —
+- **Discrete**, the default: the exact transpose of the reduced pipeline —
   Scatter/batched-synthesis/pointwise-multiply/analysis/force-rows in
   reverse, the m ≥ 0 column reduction and the spin orbit relation
   transposed consistently (the pipeline is ordered for it), and the
   transpose of the converged within-step fixed point
   solved by the same Anderson-mixed iteration on the transposed
-  system (as the SLE adjoint is). This is the machine-precision gate
-  for the 3D machinery, and the sweeps' default beside the continuous
-  one (`AdjointMethod::Discrete`, `Options::method`'s default, as of
-  `kernels.method` in `sl3d kernel`).
+  system (as the SLE adjoint is). Its dot-product identity with the
+  tangent-linear run (1e-8, §12) is the tight gate for the 3D
+  machinery, and it is the sweeps' default, the continuous sweep the
+  alternative (`AdjointMethod::Discrete`, `Options::method`'s default,
+  as it is `kernels.method`'s in `sl3d kernel`).
 - Gate chain: zero-lateral limit — the 3D sweeps must reproduce the 1D
-  sweeps' kernels (machine precision for the discrete, tight for the
+  sweeps' kernels (1e-8 for the discrete, 1e-6 for the
   continuous); dot-product identity for the discrete 3D transpose; FD
   checks on the grid viscosity kernel; discrete-vs-continuous ladder
   over lateral contrast (the check of the time discretisation, §1 — a
@@ -701,8 +702,9 @@ dual by the dot product; densities/rates are per unit SLE time.
 
 ## 6a. The 3D continuous sweep as built
 
-`Adjoint3D.hpp/cpp`: `AdjointSolver3D` (the continuous sweep; the
-discrete transpose is built too, §12), `ForwardTrajectory3D` (a recording
+`Adjoint3D.hpp/cpp`: `AdjointSolver3D` (its continuous sweep, under
+`AdjointMethod::Continuous`; the discrete transpose, the default, is
+§12), `ForwardTrajectory3D` (a recording
 at any `Evolution3D::Options::record_stride`: the sweep rebuilds
 the gaps by forward steps from the kept states), and
 `Kernels3D`: the 1D `Kernels` views, `itauKernel3D` (per branch, the
@@ -793,7 +795,7 @@ a–d are described in §3 and §6a, e in §12.
 a. **Discrete 1D sweep** (ice kernels, full Measurement). GATES:
    dot-product/gradient identity at solver tolerance against the
    forward driver for random perturbations on the time grid; pyslfp
-   fixture comparison (identical algebra — near machine precision).
+   fixture comparison (identical algebra; `AdjointGate` at 1e-5).
 b. **Continuous 1D sweep**. GATES: agreement with (a) at
    discretisation accuracy, tightening under dt refinement; the
    singular-part separation and quelled-view identities (pyslfp's
@@ -803,8 +805,8 @@ c. **itau/viscosity kernels + checkpointing**, both sweeps. GATES: FD
    whose gaps span many relaxation times; pyslfp fixtures.
 d. **3D continuous sweep + grid viscosity kernel** (§6). GATES:
    zero-lateral limit; FD checks; Δt refinement.
-e. **3D discrete transpose** (§12). GATES: dot-product at machine
-   precision; zero-lateral == 1D discrete; the contrast-ladder
+e. **3D discrete transpose** (§12). GATES: dot-product at 1e-8;
+   zero-lateral == 1D discrete; the contrast-ladder
    diagnostic.
 
 Fixtures: `scripts/make_kernel_fixtures.py` driving pyslfp, committed
@@ -1052,8 +1054,9 @@ at the moved operator (second order, Richardson to 1e-6), symmetric at
 
 ## 11. The 3D second-order adjoint
 
-`AdjointSolver3D::SecondOrderKernels`: the continuous sweep of §6a runs
-as one core (`Sweep`) that carries, when given v's recorded 3D
+`AdjointSolver3D::SecondOrderKernels` under `AdjointMethod::Continuous`:
+the continuous sweep of §6a runs as one core (`Sweep`) that carries,
+when given v's recorded 3D
 tangent run and δitau(x), a second carried state — the derivative of
 the adjoint state along v — beside the first. The derivative state is
 stepped by the same reversed coupled machinery, its step driven by the
@@ -1070,8 +1073,8 @@ pairing itself — with the same null-basis metric. The result is
 derivatives, the itau kernel's derivative on the grid and its spherical
 reduction, and the log-viscosity kernel's derivative
 −(δitau K + itau dK), the Hessian-vector product of the log
-parameterisation. `FirstOrderKernels` is the same sweep with no
-tangent run, so the first-order gates guard it too.
+parameterisation. `FirstOrderKernels` under the same method is the same
+sweep with no tangent run, so the first-order gates guard it too.
 
 GATES (`TestSecondOrderAdjoint3D`, lmax 8): zero-lateral — with δ = 0 at
 the GLL points the kernels and the derivatives (thickness views,
@@ -1092,7 +1095,7 @@ transpose is §12.
 
 ## 12. The discrete 3D transpose as built
 
-`AdjointSolver3D` with `Options::method = Discrete`
+`AdjointSolver3D` with `Options::method = Discrete`, the default
 (`AdjointDiscrete3D.cpp`): the exact transpose of the coupled
 lateral-viscosity time-stepped map, the §6b design realised with no new
 low-level transposes. The load-bearing duality holds as stated there:
@@ -1217,8 +1220,10 @@ direction f(r) P_L^M cos Mφ couples a degree-l order-m load only to the
 degrees |l − L|..l + L and orders m ± M, spheroidal and toroidal alike,
 with the toroidal response present. The lateral response beyond the
 angle-uniform limit rests on the pipeline (gated through the viscosity
-path) and these structural identities; its independent check is the
-cross-code comparison with AdGIA, which is what this is for.
+path) and these structural identities, and is checked against the full
+lateral solve, whose departure from the reference-plus-Born response is
+second order in the contrast (§13j,
+`ElasticPerturbation3D.LateralSolveIsBornToFirstOrder`).
 
 ### 13c. The material tangent, 1D
 
@@ -1551,7 +1556,7 @@ a surface potential measurement through the full solve at 1e-5 (the
 difference's own error). Convergence to 1e-10 against a degree-2 shear
 pattern of 5, 10, 20 and 40 per cent of the local shear modulus takes
 6, 7, 9 and 15 iterations, geometric throughout; the solve of the
-10% kernel gate converges in about 20. Cost on 16 threads (the
+10% kernel gate, to 1e-13, converges in about 20. Cost on 16 threads (the
 disabled `TimingAtHigherDegree`, `SL3DPP_LMAX`): a 10% degree-2
 pattern and a cap-like load at lmax 16, 32 and 64 take 0.4, 2.4 and
 15 s for six iterations, the lateral force (the grid transforms) the
@@ -1635,10 +1640,11 @@ long-term modulus plus the branches' at the points (`UnrelaxedShearAtNodes`).
 GATES (`TestLateralModuli3D`, PREM's Voigt average with a Maxwell
 mantle, lmax 6): smooth 10% shifts of shear and bulk over the whole
 solid above the centre element at the GLL points equal the 1D stepper
-on the shifted rheology at 8e-12 (U, V, φ at every degree and order,
-no toroidal motion), both schemes, two steps from rest; at Gauss
-points a per-element constant 10% shift of the Maxwell region (where
-every shear term is a point term) is exact likewise at 9e-12; the
+on the shifted rheology at 8e-12 (gate 1e-10; U, V, φ at every degree
+and order, no toroidal motion), both schemes, two steps from rest; at
+Gauss points a per-element constant 10% shift of the Maxwell region
+(where every shear term is a point term) is exact likewise at 9e-12
+(gate 1e-10); the
 unrelaxed solve of a zero state under a load with angle-varying shear
 and bulk equals the static lateral solve on the same fields at 1e-9,
 toroidal motion included; with lateral moduli and lateral viscosity on
@@ -1693,31 +1699,37 @@ it and the Gauss points every solid element;
 `LateralModuli3D.ZeroModuliOnBodiesViscousToTheirCentreAreTheRunWithout`
 — lateral moduli set to zero equal the run without them on the
 homogeneous Maxwell ball and on PREM with a Maxwell inner core, four
-steps from rest, at 0 (Sdirk2) and 1.2e-13 and 3.8e-13 (trapezoid), the
-unrelaxed solve at 4.0e-12 and 3.2e-12;
+steps from rest, measured 0 (Sdirk2) and 1.2e-13 and 3.8e-13
+(trapezoid) (gate 1e-11), the unrelaxed solve measured 4.0e-12 and
+3.2e-12 (gate 1e-10);
 `LateralModuli3D.ShiftsReachingTheCentreMatchThe1DStepperOnABallViscousToItsCentre`
 — on the Maxwell ball a shear shift constant per element (25% in the
 element holding the centre) equals the 1D stepper on the shifted
-rheology at 3.9e-12 (both schemes; the unrelaxed solve 4.6e-12), smooth
-shifts of shear and bulk the 1D stepper given them at its points at
-4.3e-12, the centre element's own shift moving the run by 9.9e-7;
+rheology, measured 3.9e-12 (both schemes; the unrelaxed solve 4.6e-12)
+(gate 1e-10), smooth shifts of shear and bulk the 1D stepper given them
+at its points, measured 4.3e-12 (gate 1e-10), the centre element's own
+shift moving the run by 9.9e-7 (gate: above 1e-8);
 `TangentLinear3D.DirectionsInTheCentreMatchDifferencesOnABallViscousToItsCentre`
 — on the ball meshed in 1500 km elements, directions confined to the
 element holding the centre (κ and μ; ln η) match central differences at
-second order (ratio 4.00), Richardson within 1e-8 of the tangent, both
-schemes; `DiscreteAdjoint3D.PairsWithTheTangentOnABallViscousToItsCentre`
+second order (ratio 4.00; gate 3 to 5), Richardson measured within 1e-8
+of the tangent (gate 1e-6), both schemes;
+`DiscreteAdjoint3D.PairsWithTheTangentOnABallViscousToItsCentre`
 — the discrete load, itau, κ and μ kernels pair with the tangent along
-loads, ln η and the moduli concentrated about the centre to 1e-10 at
-worst, both schemes, the kernels non-zero in that element;
+loads, ln η and the moduli concentrated about the centre, measured
+1e-10 at worst (gate 1e-8), both schemes, the kernels non-zero in that
+element;
 `DiscreteAdjoint3D.ContinuousGapClosesOnABallViscousToItsCentre` — the
-continuous sweep's gap falls by 3.6 to 3.8 as the steps halve;
+continuous sweep's gap falls by 3.6 to 3.8 as the steps halve (gate:
+below 0.1, and by more than 1.5);
 `SecondOrderAdjoint3D.DiscreteMaterialHessianIsExactOnABallViscousToItsCentre`
-— symmetric and adjoint to the second-order run to 1e-13 relative;
+— symmetric and adjoint to the second-order run, measured 1e-13
+relative (gate 1e-8);
 `TangentTest.In3DOnABallViscousToItsCentreTheViscosityIsTheDecks` —
 `sl3d tangent` along a uniform ln η equals the difference of two `solve`
 runs on the deck's viscosity scaled at 1.3e-6 (Maxwell ball) and 1.1e-6
 (Burgers ball), the gate's tolerance 1e-5, and the kernel's uniform
-pairing is the tangent's change at 1e-13;
+pairing is the tangent's change, measured 1e-13 (gate 1e-8);
 `TangentTest.In3DAChangeOfTheModuliAtTheCentreIsAChangeLikeAnyOther` —
 on prem8 under a lateral viscosity alone (an elastic inner core the run
 carries no nodes in) a change of the moduli about the centre is refused
@@ -1725,8 +1737,8 @@ at the member, naming the depth of the centre element's first memory
 point, as a change in any element the run does not carry; and over two
 and three ranks
 `AppsOverRanks.OnABallViscousToItsCentreSolveKernelAndTangentMatchOneProcess`
-— `solve`, `kernel` and `tangent` on the ball are the one process's at
-5e-12, 3e-11 and 8e-12.
+— `solve`, `kernel` and `tangent` on the ball are the one process's,
+measured 5e-12, 3e-11 and 8e-12 (gates 1e-8, 1e-7 and 1e-8).
 
 **The sweeps under lateral moduli.** Three things change
 for the tangent, the adjoints and the second-order sweeps, and nothing
@@ -1791,7 +1803,7 @@ along a lateral material direction matches central differences of the
 coupled run with the background moduli shifted, Richardson at 1e-6
 (`TangentLinear3D.MaterialDirectionMatchesDifferencesUnderLateralModuli`);
 the discrete second-order sweep is symmetric and adjoint to the
-second-order run to 1e-21 relative (`SecondOrderAdjoint3D.
+second-order run at 1e-8 relative (`SecondOrderAdjoint3D.
 DiscreteMaterialHessianIsExactUnderLateralModuli`); the continuous
 sweep's gap to the discrete closes under refinement at ratio 4 for
 loads and log viscosity (`ContinuousGapClosesUnderLateralModuli`), and
@@ -1799,11 +1811,11 @@ the continuous material
 kernels and continuous second-order sweep converge likewise
 (`ContinuousMaterialKernelsAgreeUnderLateralModuli`,
 `ContinuousMaterialHessianConvergesUnderLateralModuli`). The
-instantaneous response equals the run's first node to the bit, with and
+instantaneous response equals the run's first node, its fields to
+rounding (1e-13) and its iteration counts and residual equal, with and
 without lateral moduli, rotation off and full, both step solvers
 (`LateralModuli3D.InstantaneousIsTheRunsFirstNode`); with the moduli set
-but zero it is the radial fingerprint, to rounding (1e-12; bitwise in the
-test's one process)
+but zero it is the radial fingerprint, to rounding (1e-9)
 (`InstantaneousWithoutLateralStructureIsTheRadialFingerprint`); 10%
 shear and 5% bulk perturbations move it by 2.3e-2 of the sea level's
 largest magnitude, the two step solvers agreeing at 1e-9
@@ -1926,8 +1938,7 @@ to converge, and in practice in fewer iterations than the fixed point
 takes passes everywhere measured. An iteration is one grid pipeline
 (synthesis, weight, analysis, assembly) like a pass, plus the reference
 band products on the columns (hand-written, threaded over the degrees:
-a BLAS call inside the OpenMP loops starts a second thread pool on the
-server)
+a BLAS call inside the OpenMP loops starts a second thread pool)
 and the preconditioner's reference solve, plus the Krylov vector
 algebra; at lmax 16, where the pipeline is 4 ms, an iteration costs
 about 1.3 passes, and the ladder's second steps still take less time
@@ -2072,8 +2083,8 @@ sweep's at 1e-7 (thickness views, spherical reductions of the itau
 kernel and its derivative). `DiscreteLateralHessianIsExact` — lateral
 structure on (δ of amplitude 0.6, η = 1e22, 9 nodes over 10 kyr, a
 sea-level measurement at the end): the carried kernels equal the
-first-order discrete sweep's bitwise; ⟨H u, w⟩ against ⟨H w, u⟩ agree at
-1.2e-13 (gate 1e-8); against ⟨g, F''[u, w]⟩ from the discrete 3D
+first-order discrete sweep's to rounding (gate 1e-10); ⟨H u, w⟩
+against ⟨H w, u⟩ agree at 1.2e-13 (gate 1e-8); against ⟨g, F''[u, w]⟩ from the discrete 3D
 second-order tangent-linear run (the uv term of the log parameterisation
 accounted for) at 1.5e-13 (gate 1e-8); and central differences of the
 discrete first-order kernels along u (δ and the thickness moved
@@ -2654,12 +2665,13 @@ which checks them:
 `StaticDerivatives.OneNodeSweepsReproduceTheForceTranspose` holds the
 one-node sweeps' kernels in kappa and mu, both methods, to that
 transpose's means over the sphere at every node of the static coupling
-at 1e-11, under a load and under a body tide measured in U, V and phi,
-and `…UnderLateralModuli` to the transpose itself at every grid value
-of the coupling at 1e-11, the static solutions from the full lateral
-solves. The 3D one-node route forms its kernels at the coupling's
-memory nodes only, which on a branchless rheology are where the
-lateral moduli are non-zero.
+at 1e-7 (measured below 1e-11), under a load and under a body tide
+measured in U, V and phi, and `…UnderLateralModuli` to the transpose
+itself at every grid value of the coupling at 1e-7 (measured below
+1e-11), the static solutions from the full lateral solves. The 3D
+one-node route forms its kernels at the coupling's memory nodes only,
+which on a branchless rheology are where the lateral moduli are
+non-zero.
 
 **What is formed on one process.** The 3D moment kernels of both
 sweeps and the continuous sweep's tide kernels are formed on one
@@ -2671,7 +2683,8 @@ The derivative classes read every step's size from the time grid (the
 per-dt caches of weights and effective systems, the cursors' rebuilt
 steps, the trapezoid node weights and the continuous sweeps' split
 weights), so a grid of unequal steps needs nothing further.
-`TestUnevenSteps` holds them on steps 1 : 3 : 0.5 : 2 : 1.5 kyr, both
+`TestUnevenSteps` holds them on steps 1 : 3 : 0.5 : 2 : 1.5 kyr (in 3D
+the first four), both
 schemes, 1D and under lateral viscosity in 3D: the tangent along the
 loads and the thickness the difference of two runs at 1e-8; along the
 relaxation times (the log viscosity in 3D) and the moduli the

@@ -566,9 +566,13 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     const auto kHyd = FluidTidalNumber(op.GetRheology().BaseMaterial(), 2);
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
       throw std::invalid_argument(
-          "the transverse rotational feedback is unstable against the "
-          "model's hydrostatic fluid limit; use WithHydrostaticMoments, or "
-          "rotation = Axial or None");
+          "the transverse rotational feedback is unstable: the specified "
+          "moments of inertia sustain less oblateness than the model's "
+          "hydrostatic fluid limit. Take the moments of the model's own "
+          "hydrostatic figure (WithHydrostaticMoments; in an sl3d config "
+          "\"moments\": \"hydrostatic\"), or the axial feedback or none "
+          "(RotationalFeedback::Axial, None; \"rotation\": \"axial\", "
+          "\"none\")");
     }
   }
 

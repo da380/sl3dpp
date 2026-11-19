@@ -522,7 +522,9 @@ OceanBlock ReadOceanBlock(const Json& block,
   source.kind =
       given ? SeaLevelSource::Kind::SeaLevel : SeaLevelSource::Kind::Topography;
   // the state's members are read at the block's instant, not their own
-  for (const auto& name : {source.Member(), std::string_view{"ice"}}) {
+  for (const auto& name :
+       {source.Member(), std::string_view{"ice"}, std::string_view{"land"}}) {
+    if (name == "land" && !Has(block, name)) continue;  // optional
     const auto& input = block.At(name);
     if (!input.IsObject()) continue;  // ReadFileInput says what it is
     if (Has(input, "date_kyr_bp")) {
@@ -663,6 +665,11 @@ CheckpointBlock ReadCheckpointBlock(const Json& block,
   out.every = Integer(block, "every");
   if (out.every < 1) Fail(block.At("every"), "is not a positive stride");
   out.max_walltime_min = Number(block, "max_walltime_min", 0.0);
+  if (out.max_walltime_min < 0.0) {
+    Fail(block.At("max_walltime_min"),
+         "is negative: the wall-time limit is a number of minutes, 0 for "
+         "none");
+  }
   return out;
 }
 
@@ -682,6 +689,11 @@ OutputBlock ReadOutputBlock(const Json& block,
   }
   if (Has(block, "volume")) out.volume = PathOf(block, "volume", directory);
   if (Has(block, "exchange_nodes")) {
+    if (block.At("exchange_nodes").AsArray().empty()) {
+      Fail(block.At("exchange_nodes"),
+           "lists no node: every node's table is written where the member "
+           "is absent");
+    }
     for (const auto& item : block.At("exchange_nodes").AsArray()) {
       const auto value = item.AsNumber();
       if (value != std::floor(value) || value < 0) {

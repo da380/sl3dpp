@@ -46,6 +46,8 @@
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
+#include "RankListener.hpp"
+
 using namespace sl3dpp;
 
 namespace {
@@ -1429,10 +1431,22 @@ int main(int argc, char** argv) {
     auto& listeners = ::testing::UnitTest::GetInstance()->listeners();
     delete listeners.Release(listeners.default_result_printer());
   }
+  sl3dpp::test::EndEveryRankOnAFatalFailure();
   auto failed = RUN_ALL_TESTS() != 0 ? 1 : 0;
   MPI_Allreduce(MPI_IN_PLACE, &failed, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   MPI_Finalize();
   return failed;
+}
+
+TEST(Distributed, DISABLED_AThrowOnOneRankEndsEveryRank) {
+  // Run by ctest on its own (Distributed.AFailureOnOneRankEndsEveryRank,
+  // tests/CMakeLists.txt), which holds the listener's words in its output:
+  // the first rank throws before a barrier the others reach, and without
+  // the listener (RankListener.hpp) they would wait in it.
+  auto rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  if (rank == 0) throw std::runtime_error("thrown on the first rank alone");
+  MPI_Barrier(MPI_COMM_WORLD);
 }
 
 TEST(Distributed, LateralModuliStepsMatchTheOneProcessSteps) {

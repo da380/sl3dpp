@@ -113,6 +113,19 @@ if(SL3DPP_WITH_MPI)
     set_tests_properties(Distributed.Ranks${ranks} PROPERTIES
       ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
   endforeach()
+  # A fatal failure on one rank ends every rank (RankListener.hpp) where
+  # the others would wait on its collectives: the test that throws on the
+  # first rank alone ends, the listener's words in its output, well inside
+  # its time.
+  add_test(NAME Distributed.AFailureOnOneRankEndsEveryRank
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestDistributed>
+            --gtest_also_run_disabled_tests
+            --gtest_filter=Distributed.DISABLED_AThrowOnOneRankEndsEveryRank
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(Distributed.AFailureOnOneRankEndsEveryRank PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS 2 TIMEOUT 60
+    PASS_REGULAR_EXPRESSION "every rank is ended: the other ranks would wait")
   # ... and sl3d's 3D commands over 2 and 3 ranks.
   if(TARGET sl3d_app)
     add_executable(TestAppsDistributed TestAppsDistributed.cpp)

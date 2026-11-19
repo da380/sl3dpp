@@ -2475,6 +2475,13 @@ TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
           "output.exchange_nodes", "need `output.exchange`");
   refused(read, config("", "", R"({"surface": "o.nc", "exchange_nodes": [0]})"),
           "output.exchange_nodes", "needs the quasi-static problem");
+  // an empty list does not stand for every node
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt",
+                               "exchange_nodes": []})"),
+          "output.exchange_nodes",
+          "lists no node: every node's table is written where the member is "
+          "absent");
   refused(read,
           config("", R"( "solver": {"scheme": "backward_euler"},)",
                  R"({"surface": "o.nc"})"),
@@ -2482,7 +2489,8 @@ TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
   refused(read,
           config("", R"( "solver": {"step": "fixed_point"},)",
                  R"({"surface": "o.nc"})"),
-          "solver.step", "needs the quasi-static problem");
+          "solver.step",
+          "which a run takes on a model with lateral structure alone");
   refused(read, config(even, R"( "solver": {"step": "picard"},)"),
           "solver.step", "none of");
   refused(read,
@@ -8378,9 +8386,11 @@ TEST_F(AppsTest, SolveAndKernelsRefuseWhatTheyCannotDo) {
   refused(read, fingerprint(R"( "solver": {"scheme": "backward_euler"},)"),
           "solver.scheme", "needs the quasi-static problem");
   refused(read, fingerprint(R"( "solver": {"step_rtol": 1e-8},)"),
-          "solver.step_rtol", "needs the quasi-static problem");
+          "solver.step_rtol",
+          "which a run takes on a model with lateral structure alone");
   refused(read, fingerprint(R"( "solver": {"step": "conjugate_gradients"},)"),
-          "solver.step", "or lateral moduli (`model.moduli`)");
+          "solver.step",
+          "in the static problem lateral moduli (`model.moduli`)");
   // with a moduli file the time step is still refused
   refused(read,
           fingerprint(R"( "solver": {"scheme": "backward_euler"},)",
@@ -8550,6 +8560,20 @@ TEST_F(AppsTest, SolveAndKernelsRefuseWhatTheyCannotDo) {
                           "topography": {"file": "history.nc", "at": "start"},
                           "ice": {"file": "history.nc"}})"),
           "ocean.topography.at", "`ocean.date_kyr_bp`");
+  // the land file's instant is the block's too
+  refused(read,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"topography": {"file": "history.nc"},
+                          "ice": {"file": "history.nc"},
+                          "land": {"file": "history.nc", "date_kyr_bp": 0}})"),
+          "ocean.land.date_kyr_bp",
+          "the state's date is the block's, `ocean.date_kyr_bp`");
+  refused(read,
+          timed("", kTimes, "",
+                R"({"at": "start", "topography": {"file": "history.nc"},
+                    "ice": {"file": "history.nc"},
+                    "land": {"file": "history.nc", "at": "start"}})"),
+          "ocean.land.at", "is the block's, `ocean.at`");
   refused(read,
           timed("", kTimes, "",
                 R"({"at": "end", "topography": {"file": "history.nc"},
@@ -8656,6 +8680,12 @@ TEST_F(AppsTest, SolveAndKernelsRefuseWhatTheyCannotDo) {
   refused(read, timed(R"( "checkpoint": {"directory": "c", "every": 1,
                                    "stride": 2},)"),
           "checkpoint.stride", "not a recognised member");
+  // no wall-time limit is 0, or the member absent; a negative one is refused
+  refused(read, timed(R"( "checkpoint": {"directory": "c", "every": 1,
+                                   "max_walltime_min": -1},)"),
+          "checkpoint.max_walltime_min",
+          "is negative: the wall-time limit is a number of minutes, 0 for "
+          "none");
   refused(read,
           std::format(R"({{"problem": "quasi_static",
               "model": {{"deck": "ball.deck", "visc": {{}}}},
@@ -9340,6 +9370,25 @@ TEST_F(AppsTest, KernelMeasurementsAreCheckedWhenTheConfigIsRead) {
              "width_deg": 15, "window_start_kyr_bp": 1.0,
              "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})",
          "holds 3 nodes");
+  // a refusal of the window names its two instants, and says so where its
+  // end is the run's last node by default
+  refuse(R"({"type": "decay_time", "latitude": 80, "longitude": 0,
+             "width_deg": 15, "window_start_kyr_bp": 1.0,
+             "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})",
+         "the decay window, from 1 to 0 kyr BP (the run's last node, "
+         "`window_end_kyr_bp` not being given), holds 3 nodes of the times "
+         "grid; the fit needs at least four");
+  refuse(R"({"type": "decay_time", "latitude": 80, "longitude": 0,
+             "width_deg": 15, "window_start_kyr_bp": 2.0,
+             "window_end_kyr_bp": 1.0,
+             "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})",
+         "the decay window, from 2 to 1 kyr BP, holds 3 nodes");
+  refuse(R"({"type": "decay_time", "latitude": 80, "longitude": 0,
+             "width_deg": 15, "window_start_kyr_bp": 0.5,
+             "window_end_kyr_bp": 1.5,
+             "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})",
+         "the decay window, from 0.5 to 1.5 kyr BP, does not run forward in "
+         "time: its start is the earlier instant");
   // a name is its files' stem in the output directory
   refuse(R"({"type": "rotation", "component": "z", "name": "../escape"})",
          "is not a plain file name");
@@ -9355,6 +9404,29 @@ TEST_F(AppsTest, KernelMeasurementsAreCheckedWhenTheConfigIsRead) {
           "width_deg": 15, "window_start_kyr_bp": 1.5,
           "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})"));
   EXPECT_EQ(input.kernels.measurements.size(), 2u);
+  // with no date a measurement reads the run's last node, and a decay
+  // window ends there, in a dated run that does not end at the present
+  // as in one that does: here seven nodes from 2 to 0.5 kyr BP
+  auto early = std::string{R"({
+      "model": {"deck": "ball.deck"}, "discretisation": {"lmax": 8}, )"} +
+               Window(7) + R"(,
+      "kernels": {"parameters": ["ice", "viscosity"], "measurements": [
+        {"type": "relative_sea_level_point", "latitude": 80, "longitude": 0},
+        {"type": "decay_time", "latitude": 80, "longitude": 0,
+         "width_deg": 15, "window_start_kyr_bp": 1.5,
+         "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0},
+        {"type": "relative_sea_level_point", "latitude": 80, "longitude": 0,
+         "date_kyr_bp": 0.5}],
+      "output": "out"}})";
+  const auto end = std::string{R"("end_kyr_bp": 0.0)"};
+  ASSERT_NE(early.find(end), std::string::npos);
+  early.replace(early.find(end), end.size(), R"("end_kyr_bp": 0.5)");
+  const auto before = app::ReadKernelInput(Write("kernel_early.json", early));
+  ASSERT_EQ(before.run.times->Size(), 7u);
+  EXPECT_EQ(before.kernels.measurements[0].node, 6u);
+  EXPECT_EQ(before.kernels.measurements[1].first, 2u);
+  EXPECT_EQ(before.kernels.measurements[1].last, 6u);
+  EXPECT_EQ(before.kernels.measurements[2].node, 6u);
 }
 
 TEST_F(AppsTest, The1DRunsRefuseThe3DStep) {
@@ -11045,8 +11117,9 @@ TEST_F(AppsTest, SolveRefusesWhatEachFormOfItsTimesCannotSay) {
                      "date_kyr_bp": 1})"),
           "kernels.measurements[0].date_kyr_bp",
           "1 kyr BP is not a node of the times grid");
-  // the listed nodes and the run's clock are taken; a time defaults to the
-  // last node, a date to the present
+  // the listed nodes and the run's clock are taken; with no time or date
+  // a measurement reads the run's last node, in either form, whether or
+  // not a dated run ends at the present
   EXPECT_EQ(app::ReadKernelInput(
                 Write("clock.json",
                       kernel(kForwards, R"({"type": "rotation",
@@ -11065,6 +11138,18 @@ TEST_F(AppsTest, SolveRefusesWhatEachFormOfItsTimesCannotSay) {
                 .kernels.measurements[0]
                 .node,
             1u);
+  for (const auto* nodes : {"[2, 0.5, 0]", "[2, 1.5, 1]", "[3, 2.5, 2, 1.5]"}) {
+    const auto input = app::ReadKernelInput(Write(
+        "last.json",
+        kernel(std::format(R"({{"at_kyr_bp": {}}})", nodes),
+               R"({"type": "rotation", "component": "z"},
+                  {"type": "rotation", "component": "x", "date_kyr_bp": 2})")));
+    EXPECT_EQ(input.kernels.measurements[0].node, input.run.times->Size() - 1)
+        << nodes;
+    EXPECT_EQ(input.kernels.measurements[1].node,
+              std::string_view{nodes} == "[3, 2.5, 2, 1.5]" ? 2u : 0u)
+        << nodes;
+  }
 }
 
 // -- the kernels of every problem, against solve --------------------------------

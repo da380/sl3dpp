@@ -148,7 +148,7 @@ If W is band-limited at K, the integrand has degree at most 2L_b + K. The
 grid's Gauss–Legendre colatitudes (n_θ of them) integrate exactly to
 degree 2n_θ − 1, and its longitudes likewise. The 3/2 rule, n_θ ≈ 1.5 L_b
 + 1, is therefore exact for K up to about L_b. On the lmax grid a deep
-node's product was exact to K ≈ 3 lmax − 2 L(e). The only change is in
+node's product is exact to K ≈ 3 lmax − 2 L(e). The only change is in
 W's components between those bounds. That is a matter of the viscosity's
 spectrum, not the fields': lateral viscosity is typically smoother than
 the solution, whose resolution and the shorelines set lmax. Measured: a

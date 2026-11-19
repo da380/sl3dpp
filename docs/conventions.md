@@ -54,8 +54,7 @@ is MFEM's doing, not a model to copy.
 - **Almost-always-auto**: `auto` is the default for locals and loop
   variables, with the type on the right where it needs saying
   (`auto x = Thing{...}`); spell a type only where it changes behaviour
-  (a deliberate conversion, a span over an owning return). Existing code
-  migrates opportunistically, not in sweeps.
+  (a deliberate conversion, a span over an owning return).
 - **Errors:** `std::expected<T, E>` with a small error enum/struct for
   recoverable, caller-decidable failures (parsing a deck, a factorisation
   that may legitimately fail); exceptions (`std::runtime_error` or a thin
@@ -63,12 +62,11 @@ is MFEM's doing, not a model to copy.
   internal invariants. Solver non-convergence is a returned diagnostic, not
   an exception. Messages via `std::format`.
 - Toolchain floor is GCC 13 / Clang 18: `std::expected` and `std::format`
-  are in; `std::mdspan` is **not** (libstdc++ gained it in GCC 15 — tested
-  absent under the machine's g++-14 too). Strided multi-dimensional views
-  get a small `detail` view type until the floor rises (swap for
-  `std::mdspan` then). Clang 18 under-reports `__cpp_concepts`, which makes
-  libstdc++ hide `<expected>`; CMake and `.clangd` carry the standard
-  `-D__cpp_concepts=202002L` workaround until the floor is Clang 19.
+  are in; `std::mdspan` is **not** (libstdc++ has it from GCC 15).
+  Strided multi-dimensional views get a small `detail` view type. Clang 18
+  under-reports `__cpp_concepts`, which makes libstdc++ hide `<expected>`;
+  CMake and `.clangd` carry the standard `-D__cpp_concepts=202002L`
+  workaround.
 
 ## Testing
 
@@ -85,14 +83,14 @@ is MFEM's doing, not a model to copy.
   provenance header: generating script, the computing libraries'
   versions (or commits), date. Fixtures are committed; tests never invoke
   Python.
-- Adjoint code is gated by dot-product tests at machine precision,
+- Adjoint code is gated by dot-product tests at 1e-8 relative,
   following pyslfp.
 - **Cost.** Tests run mostly at small degree (lmax <= 8) and few steps,
   each on one thread (`tests/CMakeLists.txt`): the gates are identities,
   convergence orders and fixture comparisons, which small problems pin as
   tightly as large ones. High-degree or long-duration 3D runs are
-  benchmark or server work (`benchmarks/`, `scripts/run_fortran_gate.sh`),
-  never suite tests.
+  benchmarks (`benchmarks/`, `scripts/run_fortran_gate.sh`), never suite
+  tests.
 - The MPI tests (`TestDistributed`, `TestAppsDistributed`; built with
   `SL3DPP_WITH_MPI`) run under `mpiexec` on several rank counts, one
   thread per rank.

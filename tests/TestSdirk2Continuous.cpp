@@ -412,6 +412,11 @@ TEST(Sdirk2Continuous, TheContinuousTangentIsTheDiscrete) {
       thickness.iceThickness.push_back(setup.Smooth(rng, 0.1 * setup.Metre()));
     }
     thickness.itau = logViscosity.itau;
+    // the second-order run's first direction: the viscosity and the moduli
+    // together
+    auto both = TangentPerturbation{};
+    both.itau = logViscosity.itau;
+    both.material = moduli.material;
     const auto record = [](AdjointMethod method) {
       return TangentLinearSolver::Options{
           .method = method, .rtol = 1e-12, .record = true};
@@ -425,6 +430,7 @@ TEST(Sdirk2Continuous, TheContinuousTangentIsTheDiscrete) {
     for (const auto& [name, d] :
          {std::pair{"ln viscosity", &logViscosity},
           std::pair{"one branch", &oneBranch}, std::pair{"moduli", &moduli},
+          std::pair{"viscosity and moduli", &both},
           std::pair{"thickness", &thickness}}) {
       auto a = discrete.Run(times, *d, &trajectory, oceans);
       auto b = continuous.Run(times, *d, &trajectory, oceans);
@@ -440,7 +446,7 @@ TEST(Sdirk2Continuous, TheContinuousTangentIsTheDiscrete) {
     uv.itauU = logViscosity.itau;
     uv.itauV = thickness.itau;
     uv.materialU = moduli.material;
-    const auto& [uD, uC] = runs.at("ln viscosity");
+    const auto& [uD, uC] = runs.at("viscosity and moduli");
     const auto& [vD, vC] = runs.at("thickness");
     const auto secondD =
         discrete.RunSecondOrder(times, uD, vD, uv, &trajectory, oceans);

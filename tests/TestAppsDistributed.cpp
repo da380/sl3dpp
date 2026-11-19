@@ -49,6 +49,7 @@
 #include "AppFixtures.hpp"
 #include "Commands.hpp"
 #include "Ranks.hpp"
+#include "RankListener.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -1966,6 +1967,7 @@ int main(int argc, char** argv) {
     auto& listeners = ::testing::UnitTest::GetInstance()->listeners();
     delete listeners.Release(listeners.default_result_printer());
   }
+  sl3dpp::test::EndEveryRankOnAFatalFailure();
   auto failed = RUN_ALL_TESTS() != 0 ? 1 : 0;
   MPI_Allreduce(MPI_IN_PLACE, &failed, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
   MPI_Finalize();

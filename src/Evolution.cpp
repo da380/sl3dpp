@@ -320,8 +320,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
       throw std::invalid_argument(
           "the transverse rotational feedback is unstable: the specified "
           "moments of inertia sustain less oblateness than the model's "
-          "hydrostatic fluid limit. Use WithHydrostaticMoments, or rotation "
-          "= Axial or None.");
+          "hydrostatic fluid limit. Take the moments of the model's own "
+          "hydrostatic figure (WithHydrostaticMoments; in an sl3d config "
+          "\"moments\": \"hydrostatic\"), or the axial feedback or none "
+          "(RotationalFeedback::Axial, None; \"rotation\": \"axial\", "
+          "\"none\")");
     }
   }
 

@@ -3,10 +3,10 @@
 /**
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
- * evolution: by the CONTINUOUS adjoint or by the DISCRETE transpose of the
- * coupled time-stepped map (AdjointDiscrete3D.cpp), each accurate as
- * docs/adjoints.md §1 says (the discrete to the forward run's own error,
- * the continuous once the steps are short against the shortest
+ * evolution: by the DISCRETE transpose of the coupled time-stepped map
+ * (AdjointDiscrete3D.cpp), the default, or by the CONTINUOUS adjoint, each
+ * accurate as docs/adjoints.md §1 says (the discrete to the forward run's
+ * own error, the continuous once the steps are short against the shortest
  * relaxation time, Viscoelastic3D::ShortestRelaxation): ice-history
  * kernels, the full 3D inverse-relaxation-time kernel on the (memory
  * node × angular grid) with its spherical reduction, and, on request, the

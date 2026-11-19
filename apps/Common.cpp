@@ -172,11 +172,11 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
           if (transforms && grid) continue;
           if (Has(solver, name)) {
             Fail(solver.At(name),
-                 std::format("sets the 3-D step, which {} or lateral moduli "
-                             "(`model.moduli`): the static problem on a "
-                             "radial Earth is one solve of the sea level "
-                             "equation",
-                             kNeedsQuasiStatic));
+                 "sets the 3-D step, which a run takes on a model with "
+                 "lateral structure alone: in the static problem lateral "
+                 "moduli (`model.moduli`), through time those or a lateral "
+                 "viscosity (`model.viscosity`). The static problem on a "
+                 "radial Earth is one solve of the sea level equation");
           }
         }
       }

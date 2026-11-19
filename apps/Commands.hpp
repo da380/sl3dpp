@@ -142,8 +142,9 @@ enum class KernelParameter { Ice, Load, Tide, Moment, Viscosity, Moduli };
 /// node's outputs, or the decay time of a site's series over a window of
 /// nodes. Its instants are located on the run's nodes when the config is
 /// read: a date before present (`date_kyr_bp`) in a dated run, a time on
-/// the run's own clock in its unit (`time`) in one counting forwards, and
-/// the one node of the static problem, which takes neither.
+/// the run's own clock in its unit (`time`) in one counting forwards, the
+/// run's last node where neither is given, and the one node of the static
+/// problem, which takes neither.
 struct MeasurementSpec {
   enum class Type {
     RelativeSeaLevelCap,
