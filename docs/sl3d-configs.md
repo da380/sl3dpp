@@ -2033,7 +2033,10 @@ The `ocean` block changes the start and the equation:
   ice at the window's start is `ocean.ice` at the end plus each term's
   thickness at the start less its thickness at the end, so a state and a
   term naming one file give that file's ice at the start (to rounding),
-  and the load at a node is each term's change since the start. The
+  and the load at a node is each term's change since the start. A
+  `change` file and a cap are refused: a change wanted in such a run is
+  written into a thickness history, whose change at a date is its
+  thickness there less its thickness at the end. The
   calibration then starts from the run's ice at the start, with the
   target itself as its guess for the sea level (a topography converted
   with the state's ice), so the state's sea level

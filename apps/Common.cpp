@@ -228,7 +228,10 @@ void HoldForcingToState(const Run& run, const Forcing& forcing,
            std::format("is {}, which the state at the window's end "
                        "(`ocean.at`: \"end\") does not take: the ice changes "
                        "are then thickness histories, `thickness` terms, each "
-                       "read back from the end",
+                       "read back from the end. Write this change into an ice "
+                       "thickness history and name the file by a `thickness` "
+                       "term, whose change at a date is its thickness there "
+                       "less its thickness at the end",
                        term.kind == IceChangeTerm::Kind::Change
                            ? "a change taken as it stands"
                            : "a cap of ice change"));
