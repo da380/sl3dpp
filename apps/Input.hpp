@@ -21,8 +21,8 @@ namespace sl3dpp::app {
 
 using planetmodel::Json;
 
-/// Seconds in a kiloyear of Julian years, as pyslfp counts them: the
-/// configs' dates are kyr before present.
+/// Seconds in a kiloyear of Julian years (1000 years of 365.25 days of
+/// 86400 s): the configs' dates are kyr before present.
 inline constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
 
 /// A unit of time a config names in a `unit` member: its word and its

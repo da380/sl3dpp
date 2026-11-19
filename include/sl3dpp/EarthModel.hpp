@@ -36,8 +36,9 @@
  * the density interpolant (Gauss-Legendre of sufficient order on each
  * spline segment). The potential is
  * phi(r) = -G [ M(r)/r + 4 pi int_r^b rho s ds ] inside the body and
- * -G M / r outside, so g = d(phi)/dr > 0 matches the pyslfp sign
- * convention. Pressure is hydrostatic, p(r) = int_r^b rho g ds.
+ * -G M / r outside, so g = d(phi)/dr > 0: phi is the physical potential,
+ * negative, and the acceleration -grad(phi) points inwards. Pressure is
+ * hydrostatic, p(r) = int_r^b rho g ds.
  */
 
 #include <Interpolation/CubicSpline.hpp>

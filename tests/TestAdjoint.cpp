@@ -2,10 +2,9 @@
 // tolerance for a full measurement set, the thickness-view identity with
 // the baseline, the continuous adjoint's agreement with the discrete and
 // its convergence under step refinement, and the cross-validation of the
-// delta amplitudes — the structure of pyslfp's
-// test_continuous_adjoint_against_the_discrete; the continuous sweep
-// stepped by Sdirk2's stages against finite differences of its forward
-// runs, and what is not built for it refused.
+// delta amplitudes; the continuous sweep stepped by Sdirk2's stages
+// against finite differences of its forward runs, and what is not built
+// for it refused.
 
 #include <gtest/gtest.h>
 
@@ -584,12 +583,13 @@ TEST(Adjoint, SavedAndRegeneratedStrainsAgree) {
 }
 
 TEST(AdjointGate, KernelsMatchPyslfp) {
-  // The reference is pyslfp's adjoint kernels on its GLQ grid (which
-  // coincides with ours at this lmax, isolating implementation error):
-  // load duals per node and the branch-0 itau kernel, each method against
-  // its own counterpart — the algebra is identical. The resolved
-  // regime: the continuous kernels amplify exponentially when stiff
-  // (see the generating script), so only here is parity meaningful.
+  // The reference, written by scripts/make_kernel_fixtures.py, is
+  // pyslfp's adjoint kernels on its GLQ grid (which coincides with ours at
+  // this lmax, isolating implementation error): load duals per node and
+  // the branch-0 itau kernel, each method against its own counterpart —
+  // the algebra is identical. The resolved regime (eta 1e22, h = dt itau
+  // < ~1.4 everywhere): the continuous kernels amplify exponentially when
+  // stiff, so only here is parity meaningful.
   auto setup = Scene::Make(1e22);
   const auto& grid = setup.solver.Grid();
   ASSERT_EQ(grid.NumberOfLongitudes(), 2 * kLmax + 1)
@@ -607,11 +607,11 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
   // The potential and angular-velocity duals are SI-anchored (the
-  // generating script's PHI_ANCHOR / OMEGA_ANCHOR): pyslfp's EarthModel
-  // scales differ from planetmodel/sl3dpp geophysical (phi_nd ~ T^2, a
-  // factor 4 pi / 3 — docs/design.md), so each code
-  // multiplies its dual by ITS OWN factor against the shared anchor and
-  // the objective is code-invariant. Lengths need no anchor.
+  // generating script's PHI_ANCHOR / OMEGA_ANCHOR): a non-dimensional
+  // potential scales as the time unit squared and an angular velocity as
+  // its inverse, so each code multiplies its dual by ITS OWN factor
+  // against the shared anchor and the objective does not depend on
+  // either code's unit scheme (docs/design.md). Lengths need no anchor.
   const double potConv =
       scales.Factor(PotentialDimensions) / 1.0e7;  // PHI_ANCHOR
   const double omConv =
@@ -698,9 +698,10 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
       auto head = std::string{};
       auto count = std::size_t{0};
       row >> head >> count;
-      // The continuous block carries no itau reference (the generating
-      // script records why). sl3dpp's own continuous kernel is checked
-      // against its exact discrete in ContinuousViscosityKernelsConverge.
+      // A block without an itau reference (a count of zero) is passed
+      // over; the fixture carries one under both methods. sl3dpp's own
+      // continuous kernel is checked against its exact discrete in
+      // ContinuousViscosityKernelsConverge.
       if (count == 0) continue;
       ASSERT_EQ(count, kernels.itauKernel[0].size());
       // the reference pairs by the plain nodal sum: our density per unit

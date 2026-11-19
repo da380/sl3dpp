@@ -4,10 +4,8 @@
  * @file SeaLevel.hpp
  * @brief The sea level engine: the gravitationally consistent sea level
  * equation — linear, generalised, or nonlinear with migrating shorelines,
- * with the rotational feedbacks — for whatever Love numbers it is given.
- * Corresponds to pyslfp's `core.sea_level` (its docstrings and
- * `pyslfp_theory.tex` are the authoritative statements), on GSHTrans
- * fields.
+ * with the rotational feedbacks — for whatever Love numbers it is given,
+ * on GSHTrans fields.
  *
  * This is an internal component and works non-dimensionally throughout
  * (the SI user boundary is Fingerprint.hpp): the constructor converts the
@@ -15,24 +13,24 @@
  * table's radius, and every method's fields, coefficients and scalars are
  * non-dimensional under SolverScales().
  *
- * Numerical scheme, as in pyslfp: both solvers iterate on the surface
- * load; within each iteration the sea level change is synthesised from
- * the load coefficients with the combined factor -(h_l + k_l / g), the
- * rotational feedback is solved in closed form at degree 2 (transverse at
- * order 1, axial at order 0 with its degree-0 part through the axial Love
+ * Numerical scheme: both solvers iterate on the surface load; within each
+ * iteration the sea level change is synthesised from the load
+ * coefficients with the combined factor -(h_l + k_l / g), the rotational
+ * feedback is solved in closed form at degree 2 (transverse at order 1,
+ * axial at order 0 with its degree-0 part through the axial Love
  * numbers), and mass is conserved by a uniform shift over the oceans. The
  * tangential displacement, which the sea level does not see, is formed
  * from the converged load and angular velocity by the tangential Love
- * numbers, as its potential V. The linear fixed point is accelerated by Anderson mixing on the load
- * coefficients; the nonlinear solver recomputes the flotation ocean
- * function each pass (Kendall-style migration). The adjoint solve is the
- * exact transpose of the generalised solve's input channels, run through
- * the same mixer.
+ * numbers, as its potential V. The linear fixed point is accelerated by
+ * Anderson mixing on the load coefficients; the nonlinear solver
+ * recomputes the flotation ocean function each pass (Kendall-style
+ * migration). The adjoint solve is the exact transpose of the generalised
+ * solve's input channels, run through the same mixer.
  *
- * The rotation block's algebra is pyslfp's verbatim, carried on the real
- * (cos, sin) coefficient pairs of the pyshtools basis; the conversions to
- * GSHTrans's complex basis live in ShConventions.hpp and are orthogonal
- * for the pairing used, so the adjoint identities survive them.
+ * The rotation block's algebra is carried on the real (cos, sin)
+ * coefficient pairs of the pyshtools basis; the conversions to GSHTrans's
+ * complex basis live in ShConventions.hpp and are orthogonal for the
+ * pairing used, so the adjoint identities survive them.
  */
 
 #include <array>
@@ -48,11 +46,10 @@
 
 namespace sl3dpp {
 
-/// Physical parameters of the rotating body, SI (pyslfp's
-/// `EarthModelParameters` defaults). With `body_from_table` (the default)
-/// the sea-floor radius and surface gravity are replaced by the Love
-/// table's values on construction of the solver (pyslfp's `with_body`),
-/// so the body and its response agree; without it they are the
+/// Physical parameters of the rotating body, SI, the Earth's by default.
+/// With `body_from_table` (the default) the sea-floor radius and surface
+/// gravity are replaced by the Love table's values on construction of the
+/// solver, so the body and its response agree; without it they are the
 /// parameters given — the engine's gravity an independent parameter.
 struct SeaLevelParameters {
   double equatorial_radius = 6378137.0;
@@ -79,13 +76,13 @@ struct SeaLevelParameters {
     SeaLevelParameters parameters, double fluid_tidal_number,
     double non_hydrostatic_fraction = 0.008);
 
-/// The sea level of a state from its topography T and ice thickness I, by
-/// pyslfp's construction, which the sl3d program applies to the states it
-/// reads: -T over the ocean floor (T < 0) and -T + I over land, raised by
-/// the floating fraction (ice density / water density) of any ice standing
-/// on the ocean floor. T and I as pyslfp's `export_ice_history` writes them
-/// from ICE-5G/6G/7G; any consistent units (SI for Fingerprint, the
-/// solver's for GRDSolver::MakeState). Refused when the sizes differ.
+/// The sea level of a state from its topography T and ice thickness I, as
+/// the sl3d program forms it for the states it reads: -T over the ocean
+/// floor (T < 0) and -T + I over land, raised by the floating fraction
+/// (ice density / water density) of any ice standing on the ocean floor.
+/// T and I as pyslfp's `export_ice_history` writes them from
+/// ICE-5G/6G/7G; any consistent units (SI for Fingerprint, the solver's
+/// for GRDSolver::MakeState). Refused when the sizes differ.
 [[nodiscard]] std::vector<double> SeaLevelFromTopography(
     std::span<const double> topography, std::span<const double> iceThickness,
     const SeaLevelParameters& parameters = {});
@@ -191,9 +188,9 @@ class GRDSolver {
    * @brief A snapshot of ice thickness and sea level (non-dimensional),
    * with the ocean function the flotation condition rho_w SL - rho_i I > 0
    * implies and its area. `forcedLand` marks points held at C = 0
-   * whatever the flotation says (pyslfp masks the Caspian this way); the
-   * state keeps it, so the nonlinear solve's migrating shorelines respect
-   * it too (empty: none).
+   * whatever the flotation says (a landlocked depression such as the
+   * Caspian); the state keeps it, so the nonlinear solve's migrating
+   * shorelines respect it too (empty: none).
    *
    * The ocean function need not be the flotation one: a state may carry a
    * prescribed C (the frozen shorelines of a calibrated initial state,
@@ -504,7 +501,8 @@ class GRDSolver {
   // Degree-2 and axial numbers.
   double h2_ = 0, k2_ = 0, ht2_ = 0, kt2_ = 0;
   double hc_ = 0, kc_ = 0, mu_ = 0, mphi_ = 0, mc_ = 0;
-  // Non-dimensional parameters and the rotation factors (pyslfp's names).
+  // Non-dimensional parameters and the rotational feedback factors, as the
+  // constructor forms them.
   double g_ = 0, waterDensity_ = 0, iceDensity_ = 0, radius_ = 0;
   double rotationFactor_ = 0, inertiaFactor_ = 0;
   double axialRotationFactor_ = 0, axialInertiaFactor_ = 0;

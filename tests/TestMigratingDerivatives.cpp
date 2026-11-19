@@ -466,11 +466,11 @@ struct Scene3D {
     for (auto i = std::size_t{0}; i < f.size(); ++i) fg[i] = f[i] * g[i];
     return a * a * solver.Grid().Integrate(fg);
   }
-  /// A marine-grounded cap after pyslfp's (KernelScene's MarineCap) on
-  /// this grid, of the given peak thickness in metres and angular radius
-  /// in degrees: its ice and the uniform 3000 m ocean. On this degree-8
-  /// grid the 5 km, 20-degree cap's band-limited thickness grounds no
-  /// cell, so the gates here take a wider one.
+  /// KernelScene's marine-grounded cap (MarineCap) on this grid, of the
+  /// given peak thickness in metres and angular radius in degrees: its ice
+  /// and the uniform 3000 m ocean. On this degree-8 grid the 5 km, 20-degree
+  /// cap's band-limited thickness grounds no cell, so the gates here take a
+  /// wider one.
   [[nodiscard]] std::pair<std::vector<double>, std::vector<double>> MarineCapState(
       double peak, double radiusDegrees) const {
     const auto& grid = solver.Grid();

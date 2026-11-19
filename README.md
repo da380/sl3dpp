@@ -139,7 +139,8 @@ and threads, memory, MPI and long runs in [docs/running.md](docs/running.md).
 ## Working with planetmodel and pyslfp
 
 sl3dpp reads and writes [planetmodel](https://github.com/da380/planetmodel)'s
-files and its formulation is pyslfp's, so the three are one toolchain
+files, and pyslfp builds its Earth models with planetmodel and writes its
+ice histories as planetmodel files, so the three are one toolchain
 (`pip install "planetmodel[netcdf]" pyslfp`). planetmodel writes decks
 (`deck.write_deck`; a model's prony and burgers decks,
 `conversion.prony.prony_deck` and `burgers_deck`), 3D models from tomography (`conversion`,

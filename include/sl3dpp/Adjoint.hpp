@@ -5,9 +5,7 @@
  * @brief Ice-history sensitivity kernels of the coupled evolution, by the
  * continuous adjoint or the exact discrete transpose
  * — one interface and result type for both, so every test and driver is
- * formulation-blind. Corresponds to pyslfp's `adjoint_ice_history` /
- * `continuous_adjoint_ice_history` (whose docstrings, with Yu et al. 2025,
- * are the authoritative statements); see docs/adjoints.md.
+ * formulation-blind. The theory is Yu et al. 2025; see docs/adjoints.md.
  *
  * The discrete adjoint transposes the time-stepped forward map exactly:
  * the gradient identity holds to solver tolerance for any load
@@ -36,7 +34,7 @@
  * the ocean functions of a migrating run (OceanFunctions), about that
  * trajectory: the adjoint stays linear with the time-reversed C(t) as its
  * coefficients (Yu et al. 2025, §3.3; the shoreline-motion singular terms
- * cancel), as pyslfp's `ocean_functions`.
+ * cancel).
  *
  * The same sweeps form the kernels in LATERAL structure about the radial
  * run, their fields expanded on angular grids (LateralKernels.hpp,
@@ -315,7 +313,6 @@ struct Kernels {
  * initial-sea-level views (the same pairings; the thickness view's
  * baseline folded into node 0 as there), `itauKernel` that of the
  * inverse-relaxation-time kernels (per branch, nodal, material units).
- * pyslfp's `KernelDerivatives`.
  */
 struct KernelDerivatives {
   std::vector<double> times;
@@ -498,13 +495,13 @@ class AdjointSolver {
   /**
    * @brief The second-order adjoint: the kernels of the objective and
    * their derivative along a direction v, the action of the objective's
-   * Hessian on v (pyslfp's `second_order_adjoint_ice_history`, Yu et al.
-   * 2025 §4). The sweep that gives the kernels is itself a function of
-   * the parameters, through the forward trajectory and the relaxation
-   * times; differentiating it along v gives a second sweep of the same
-   * form, forced not by the measurement but by the first sweep's state
-   * and v's perturbation of the relaxation times, with v's tangent-linear
-   * trajectory entering where the forward one enters the kernels. By the
+   * Hessian on v (Yu et al. 2025 §4). The sweep that gives the kernels
+   * is itself a function of the parameters, through the forward
+   * trajectory and the relaxation times; differentiating it along v
+   * gives a second sweep of the same form, forced not by the measurement
+   * but by the first sweep's state and v's perturbation of the
+   * relaxation times, with v's tangent-linear trajectory entering where
+   * the forward one enters the kernels. By the
    * discrete method this is the exact derivative of the exact gradient,
    * so the Hessian it gives is symmetric to rounding; by the continuous
    * method it discretises the second-order adjoint equations with the

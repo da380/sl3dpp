@@ -149,8 +149,8 @@ GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
                     table.degrees.empty() ? -1 : table.degrees.back(), lmax));
   }
 
-  // The body of the parameters is the Love table's (pyslfp's with_body),
-  // unless the caller holds its own.
+  // The body of the parameters is the Love table's (its sea-floor radius
+  // and surface gravity), unless the caller holds its own.
   if (parameters.body_from_table) {
     parameters.mean_sea_floor_radius = table.radius;
     parameters.gravitational_acceleration = table.surface_gravity;
@@ -217,9 +217,12 @@ GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
   slcFactor_.resize(lmax + 1);
   for (auto l = 0; l <= lmax; ++l) slcFactor_[l] = -(h_[l] + k_[l] / g_);
 
-  // The rotational feedback factors, pyslfp's `EarthModelParameters`
-  // verbatim (there in the pyshtools real basis, which is where our
-  // rotation block runs too).
+  // The rotational feedback factors, in the pyshtools real basis where the
+  // rotation block runs: the rotation factors take the angular velocity
+  // change to the centrifugal potential's (2, 1), (2, 0) and (0, 0)
+  // coefficients, the inertia factors take the (2, 1) and (2, 0) potential
+  // perturbations back to it (MacCullagh, with C - A transverse and C
+  // axial).
   const double a = radius_;
   rotationFactor_ = std::sqrt(4.0 * kPi / 15.0) * omega * a * a;
   inertiaFactor_ = std::sqrt(5.0 / (12.0 * kPi)) * omega * a * a * a /
@@ -337,12 +340,11 @@ GRDSolver::State GRDSolver::NoOceanState() const {
 
 /**
  * The degree-2 / degree-0 rotational feedback, solved exactly within an
- * iteration: pyslfp's `SeaLevelEquation._rotation`, verbatim, on the real
- * (cos, sin) pairs. The transverse components are set by the (2, 1)
- * potential and the axial by (2, 0) (MacCullagh), each feeding back
- * through the degree-2 tidal numbers; the axial component also carries the
- * trace of the inertia perturbation through the axial Love numbers and the
- * uniform shell term.
+ * iteration, on the real (cos, sin) pairs. The transverse components are
+ * set by the (2, 1) potential and the axial by (2, 0) (MacCullagh), each
+ * feeding back through the degree-2 tidal numbers; the axial component
+ * also carries the trace of the inertia perturbation through the axial
+ * Love numbers and the uniform shell term.
  */
 struct GRDSolver::Rotation {
   std::array<double, 3> omega{0.0, 0.0, 0.0};

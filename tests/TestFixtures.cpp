@@ -227,12 +227,14 @@ TEST(SeaLevelGate, SharpOceanFingerprintNearPyslfp) {
       iceChange, sl3dpp::RotationalFeedback::Full);
   ASSERT_TRUE(result.converged);
 
-  // The tolerances below are pyslfp's own measured grid sensitivity for
-  // this problem (DH vs GLQ at lmax 32): ocean area 0.44%, sea-level
-  // coefficients 0.049 of the largest, the axial rotation 4%. The
-  // transverse rotation is a small residual of a nearly zonal load and is
-  // not determined at this resolution (pyslfp's own grids disagree on it
-  // by a factor of two), so it is not compared.
+  // The reference, written by scripts/make_sea_level_fixtures.py, is
+  // pyslfp's fingerprint of the same melt on its DH grid. The tolerances
+  // below cover pyslfp's own measured grid sensitivity for this problem
+  // (DH vs GLQ at lmax 32): ocean area 0.44%, sea-level coefficients 0.049
+  // of the largest, the axial rotation 4%. The transverse rotation is a
+  // small residual of a nearly zonal load and is not determined at this
+  // resolution (pyslfp's own grids disagree on it by a factor of two), so
+  // it is not compared.
   std::vector<double> ocean(fingerprint.OceanFunction().begin(),
                             fingerprint.OceanFunction().end());
   const auto area = table.radius * table.radius * grid.Integrate(ocean);
@@ -378,7 +380,8 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
   auto material = sl3dpp::Material::Create(model, mesh).value();
   auto ln = sl3dpp::ComputeLoveNumbers(material, lmax);
 
-  // Parse the pyslfp reference.
+  // Parse the reference, written by scripts/make_love_number_fixtures.py:
+  // pyslfp's generalised Love numbers of the same deck and mesh rule.
   std::ifstream file(data / "pyslfp_love_numbers.txt");
   ASSERT_TRUE(file.is_open());
   auto radius = 0.0, surfaceGravity = 0.0, fluidTidal = 0.0;

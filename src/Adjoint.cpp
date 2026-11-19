@@ -1462,8 +1462,7 @@ Kernels AdjointSolver::ContinuousSweep(
   // pairing lives on the MATERIAL surface (g a^2, material units); the
   // carried state is the true multiplier times the ratio of the two
   // pairings. The ratio is dimensionless but not 1 even in matched
-  // frames (the solver's sea-floor radius differs from the surface) —
-  // pyslfp carries the same ratio.
+  // frames (the solver's sea-floor radius differs from the surface).
   const auto& matMesh = op.BaseMaterial().Mesh();
   const double aMat =
       matMesh.Radius(matMesh.ElementCount() - 1, matMesh.NGll() - 1);

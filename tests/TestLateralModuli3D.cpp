@@ -728,7 +728,7 @@ TEST(LateralModuli3D, NestedConjugateGradientEvolutionMatchesTheFixedPoint) {
 namespace {
 
 /// The sea level problem the instantaneous gates share: the radial
-/// reference's elastic sea level solver, pyslfp's analytic present-day
+/// reference's elastic sea level solver, the analytic present-day test
 /// state, and the grounded load of melting a tenth of its ice.
 struct Ocean {
   GRDSolver solver;

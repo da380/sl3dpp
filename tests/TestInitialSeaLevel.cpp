@@ -1,13 +1,13 @@
-// The migrating-shoreline evolution and the initial sea level calibration,
-// after pyslfp 3.0.0's tests: the frozen calibration is one linear step;
-// migrating runs reduce to frozen ones when nothing can move, conserve mass
-// when it does, and are the date-by-date nonlinear solve in the elastic
-// limit; the kernels about a migrating trajectory match central
-// differences; and both calibration methods recover a known initial sea
-// level from the final one its migrating run reached. In 3D the
-// zero-lateral migrating run and its kernels are the 1D ones, and with
-// lateral viscosity the run conserves mass and resumes exactly, its kernels
-// converge to central differences, and both methods calibrate.
+// The migrating-shoreline evolution and the initial sea level calibration:
+// the frozen calibration is one linear step; migrating runs reduce to
+// frozen ones when nothing can move, conserve mass when it does, and are
+// the date-by-date nonlinear solve in the elastic limit; the kernels about
+// a migrating trajectory match central differences; and both calibration
+// methods recover a known initial sea level from the final one its
+// migrating run reached. In 3D the zero-lateral migrating run and its
+// kernels are the 1D ones, and with lateral viscosity the run conserves
+// mass and resumes exactly, its kernels converge to central differences,
+// and both methods calibrate.
 
 #include <gtest/gtest.h>
 
@@ -144,10 +144,10 @@ double MaxDiff(std::span<const double> a, std::span<const double> b) {
   return out;
 }
 
-/// pyslfp's marine-grounded cap on a uniform ocean, non-smooth enough that
-/// melting flips flotation cells: a 5 km cap centred at 60N 85W (radius 20
-/// degrees, cos^2 profile, band-limited) on a uniform 3000 m ocean,
-/// complete at 10 ka and melting linearly to nothing at present.
+/// A marine-grounded cap on a uniform ocean, non-smooth enough that melting
+/// flips flotation cells: a 5 km cap centred at 60N 85W (radius 20 degrees,
+/// cos^2 profile, band-limited) on a uniform 3000 m ocean, complete at 10 ka
+/// and melting linearly to nothing at present.
 struct MarineCap {
   std::vector<double> ice0;  ///< solver units
   std::vector<double> sea0;
@@ -383,7 +383,7 @@ TEST(Migrating, MatchesFrozenWhenShorelinesCannotMove) {
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   // The nonlinear solve forms its load from the absolute fields (3 km of
   // ocean, 5 km of ice) for a change of metres, so its error has a
-  // round-off floor near 1e-11: pyslfp's tolerance for this test.
+  // round-off floor near 1e-11; the test allows 1e-6 of the largest change.
   Evolution evolution(op, body.solver, state, {.rtol = 1e-9});
   const auto frozen =
       evolution.Run(cap.times, FrozenLoad(body.solver, state, thinning, 0.0));
@@ -910,8 +910,7 @@ TEST(InitialSeaLevel, CalibrationRecoversTheTruthUnderMigratingShorelines) {
     ASSERT_EQ(plain.misfits.size(), 4u);
     rates[method] = plain.misfits[3] / plain.misfits[2];
   }
-  // pyslfp's homogeneous body gives about 0.08 and 0.33; this one 0.6
-  // for the gradient.
+  // On this body the gradient update contracts at about 0.6.
   EXPECT_LT(rates[CalibrationMethod::FixedPoint],
             0.5 * rates[CalibrationMethod::Gradient]);
   EXPECT_LT(rates[CalibrationMethod::Gradient], 0.8);
@@ -921,8 +920,10 @@ TEST(InitialSeaLevel, CalibrationRecoversTheTruthUnderMigratingShorelines) {
 
 namespace {
 
-/// pyslfp_migrating.txt: the initial fields, the per-node run, the misfit
-/// gradient and the calibration histories.
+/// pyslfp_migrating.txt, written by scripts/make_migrating_fixture.py:
+/// pyslfp's migrating run of the prem8 Maxwell body under the melting 5 km
+/// marine cap on a tilted 3000 m ocean, as the initial fields, the per-node
+/// run, the misfit gradient and the calibration histories.
 struct MigratingFixture {
   std::vector<std::complex<double>> ice0, sea0, gradient;
   struct Node {

@@ -5,7 +5,9 @@ This is make_ice_history.py --model ICE7G --download: pyslfp's
 export_ice_history reads ICE-7G's stored time slices (every kiloyear from
 26 to 21 ka, then every half kiloyear to the present, 48 in all) and
 writes the `ice_thickness` and `topography` histories on the dataset's own
-grid, in metres, at the stored dates alone. That is the form the
+grid, in metres, at the stored dates alone, and `land`, a static field
+that is one over the present-day landlocked depressions (a config's
+`ocean.land`) and zero elsewhere. The two histories are the form the
 synthetic Earth takes too, so anything run on data/synthetic_earth.nc
 runs on data/ice7g.nc:
 

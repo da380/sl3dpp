@@ -2,13 +2,20 @@
 shorelines, the gradient of its final sea level misfit, and its calibration
 of the initial sea level.
 
-The stepper fixture's Maxwell body (as make_evolution_fixture.py) under
-pyslfp's marine-grounded cap: a 5 km cap at 60N 85W (radius 20 degrees, a
-cos^2 profile) on a 3000 m ocean with a 200 m degree-one tilt, melting
-linearly from 10 ka to nothing at present, so that melting floods the
-cap's footprint and flotation cells flip. The ice and the initial sea level
-are band-limited and written here as coefficients, so the C++ synthesises
-the same grid values. tests/TestInitialSeaLevel.cpp holds the C++ to it.
+The stepper fixture's Maxwell body (as make_evolution_fixture.py) under a
+marine-grounded cap: a 5 km cap at 60N 85W (radius 20 degrees, a cos^2
+profile) on a 3000 m ocean with a 200 m degree-one tilt, melting linearly
+from 10 ka to nothing at present, so that melting floods the cap's
+footprint and flotation cells flip. The ice and the initial sea level are
+band-limited and written here as coefficients, so the C++ synthesises the
+same grid values. The run is pyslfp's (`run_ice_history`,
+`final_sea_level_misfit`, `calibrate_initial_sea_level`) at lmax 16 on
+its GLQ grid, and the file holds, in SI, the initial ice and sea level;
+at each of the 6 nodes the time, the angular-velocity change, the ocean
+area, the sea level change and the ocean function; the misfit's gradient
+against the reached sea level plus 50 m cos(theta); and each calibration
+method's rms misfit per run. tests/TestInitialSeaLevel.cpp holds the C++
+to it.
 
 Run in this directory's environment (pyproject.toml):
 

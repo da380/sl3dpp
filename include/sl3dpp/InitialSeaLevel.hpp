@@ -3,11 +3,7 @@
 /**
  * @file InitialSeaLevel.hpp
  * @brief The initial sea level of a run, calibrated so that the run reaches
- * a given final sea level, as pyslfp's
- * `Evolution.final_sea_level_misfit` and
- * `calibrate_initial_sea_level` (pyslfp 3.0.0; its docstrings and
- * `pyslfp_theory.tex`, "Calibrating the initial sea level", are the
- * authoritative statements).
+ * a given final sea level.
  *
  * A thickness-only ice history leaves the initial sea level S0 to be
  * found, and the standard device is to choose it so that the run
@@ -152,7 +148,7 @@ struct FinalSeaLevelMisfit {
  * the weighted residual; under migrating shorelines it adds the initial
  * sea level kernel of a sea level measurement w r at the last node,
  * linearised about the run's C(t) — one adjoint sweep by `adjoint`
- * (pyslfp uses the discrete transpose, the default here). The gradient is
+ * (the discrete transpose by default). The gradient is
  * exact away from changes of the initial ocean function itself, where J is
  * not differentiable.
  */

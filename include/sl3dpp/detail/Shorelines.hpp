@@ -2,8 +2,8 @@
 
 /**
  * @file detail/Shorelines.hpp
- * @brief What the 1D and 3D evolutions share under migrating shorelines
- * (pyslfp's `_run_migrating`). Internal.
+ * @brief What the 1D and 3D evolutions share under migrating shorelines.
+ * Internal.
  *
  * A migrating run starts from its background state, which must be the state
  * at the first node unless the start is solved.

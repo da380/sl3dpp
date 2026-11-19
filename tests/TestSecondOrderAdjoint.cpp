@@ -2,7 +2,7 @@
 // first-order sweep's, its derivatives match central differences of the
 // gradient along the direction, the Hessian it gives is symmetric and is
 // the adjoint of the second-order tangent-linear run, and the continuous
-// method converges to the discrete one — pyslfp's test_second_order.py.
+// method converges to the discrete one.
 
 #include <gtest/gtest.h>
 

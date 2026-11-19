@@ -1,6 +1,7 @@
 // The sea level engine: structural identities that need no external
 // reference — conventions, conservation, the adjoint dot-product test, the
-// nonlinear mass budget. The pyslfp comparisons live in TestFixtures.
+// nonlinear mass budget. The comparisons with pyslfp's sea level solutions
+// live in TestFixtures.
 
 #include <gtest/gtest.h>
 
@@ -112,8 +113,9 @@ TEST(SurfaceGrid, TransformsAndIntegrals) {
               1e-10 * Pair(flm, flm, 16));
 }
 
-// The sea level of a state from topography and ice, pyslfp's construction:
-// ocean, land, grounded ice, and ice standing on the ocean floor.
+// The sea level of a state from topography T and ice I: -T where T < 0
+// (raised by I times the ice-to-water density ratio) and -T + I elsewhere;
+// at ocean, land, grounded ice, and ice standing on the ocean floor.
 TEST(SeaLevel, FromTopography) {
   const auto parameters = SeaLevelParameters{};
   const auto flotation = parameters.ice_density / parameters.water_density;

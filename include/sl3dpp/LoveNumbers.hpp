@@ -2,9 +2,8 @@
 
 /**
  * @file LoveNumbers.hpp
- * @brief Generalised Love numbers by degree, pyslfp's conventions
- * (`love_numbers.table` there states them in full; Al-Attar et al. 2024,
- * eq. 62).
+ * @brief Generalised Love numbers by degree (Al-Attar et al. 2024,
+ * eq. 62), in the conventions below.
  *
  * Per degree, the surface response (U, V, phi) to four forcings: the
  * traction piece of a unit surface load (channel u), its attraction piece
@@ -88,10 +87,10 @@ struct LoveNumbers {
   /// any scheme the table is stated in.
   [[nodiscard]] ConventionalLoveNumbers Conventional() const;
 
-  /// A table from a fixture-style file as
-  /// `scripts/make_love_number_fixtures.py` writes one (SI): the `radius`,
-  /// `surface_gravity`, `axial` and `table` records. Also the interchange route
-  /// from pyslfp.
+  /// A table from a fixture-style file (SI): the `radius`,
+  /// `surface_gravity`, `axial` and `table` records, as
+  /// `scripts/make_love_number_fixtures.py` writes the Love numbers it
+  /// computes with pyslfp.
   [[nodiscard]] static std::expected<LoveNumbers, ModelError> FromFile(
       const std::filesystem::path& path);
 };
@@ -190,8 +189,7 @@ struct TractionNumbers {
 /// so the pair isolates the effect of gravity. The non-gravitating
 /// problem's degree 1 is NaN, and on a model with a fluid core its systems
 /// stop at the core's top above degree zero (DegreeOperator.hpp). Degrees
-/// in parallel under OpenMP unless `options.parallel` is false. Mirrors
-/// pyslfp's `traction_numbers` (on a solid model, without gravity).
+/// in parallel under OpenMP unless `options.parallel` is false.
 [[nodiscard]] TractionNumbers ComputeTractionNumbers(
     const Material& material, int lmax, bool gravitating = false,
     LoveNumberOptions options = {});

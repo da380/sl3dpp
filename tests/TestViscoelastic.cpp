@@ -6,7 +6,7 @@
 // recipes (StepRecipe.hpp) and Sdirk2 through them: its tableau and
 // amplification on a scalar equation, its order, its zero-length step and
 // what it refuses; a step's flavour held through the cache's evictions.
-// The pyslfp comparison lives in TestFixtures.
+// The comparison with pyslfp's stepper histories lives in TestFixtures.
 
 #include <gtest/gtest.h>
 
@@ -43,8 +43,7 @@ using namespace sl3dpp;
 namespace {
 
 /// The PREM-like elastic model from prem8.elastic.deck, with a 1e21 Pa s
-/// Maxwell mantle: solid layers fully inside [3480, 6151] km. The same
-/// rule selects the layers in the pyslfp fixture script.
+/// Maxwell mantle: solid layers fully inside [3480, 6151] km.
 struct TestBody {
   EarthModel model;
   Material material;

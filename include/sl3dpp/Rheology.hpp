@@ -2,9 +2,8 @@
 
 /**
  * @file Rheology.hpp
- * @brief Generalised Maxwell (Prony) branch data on the mesh nodes, as
- * pyslfp's `viscoelastic.rheology`; non-dimensional like every internal
- * component.
+ * @brief Generalised Maxwell (Prony) branch data on the mesh nodes;
+ * non-dimensional like every internal component.
  *
  * A Rheology pairs an elastic Material (whose moduli are the UNRELAXED
  * ones) with relaxing shear branches: per branch k, nodal arrays mu_k and

@@ -19,18 +19,17 @@
  * caller's units (the drivers' solver units, with `a` the solver's
  * radius).
  *
- * The decay time follows Al-Attar & Tromp (2014, Appendix C), the
- * machinery of pyslfp's `fit_decay_time`: the series is fitted as
- * a e^(-s t) + b, the model times joining the parameters under Gaussian
- * penalties towards the nominal ones where the timing uncertainty is
- * non-zero, and the datum's exact sensitivity to the series comes from
- * differentiating the fit's stationarity, turning the fitted 1 / s into
- * per-node weights on the series — behind which every kernel driver
- * applies unchanged. Only the ratio of the two uncertainties shapes the
- * fit and the weights. The window must hold a decay: rebound series
- * look exponential near the centre of a former ice sheet and only after
- * the melting has ceased, and a window constraining no decay is
- * refused.
+ * The decay time follows Al-Attar & Tromp (2014, Appendix C): the series
+ * is fitted as a e^(-s t) + b, the model times joining the parameters
+ * under Gaussian penalties towards the nominal ones where the timing
+ * uncertainty is non-zero, and the datum's exact sensitivity to the
+ * series comes from differentiating the fit's stationarity, turning the
+ * fitted 1 / s into per-node weights on the series — behind which every
+ * kernel driver applies unchanged. Only the ratio of the two
+ * uncertainties shapes the fit and the weights. The window must hold a
+ * decay: rebound series look exponential near the centre of a former ice
+ * sheet and only after the melting has ceased, and a window constraining
+ * no decay is refused.
  */
 
 #include <array>

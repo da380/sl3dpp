@@ -4,7 +4,7 @@
 // the prem8 deck's body with a Maxwell mantle, its elastic solver and the
 // analytic test state; smooth random fields and itau perturbations; the
 // objective of a measurement set on snapshots; a per-node load history;
-// and pyslfp's marine-grounded cap for migrating runs.
+// and a marine-grounded ice cap for migrating runs.
 
 #include <algorithm>
 #include <cmath>
@@ -284,9 +284,9 @@ struct ByNode {
   }
 };
 
-/// pyslfp's marine-grounded cap on a uniform ocean (the initial-sea-level
-/// tests' scene): a 5 km cap at 60N 85W on a 3000 m ocean, complete at
-/// 10 ka and melting linearly to nothing.
+/// A marine-grounded cap on a uniform ocean (the initial-sea-level tests'
+/// scene): a 5 km cap at 60N 85W on a 3000 m ocean, complete at 10 ka and
+/// melting linearly to nothing.
 struct MarineCap {
   std::vector<double> ice0, sea0, times;
   double span = 0.0;

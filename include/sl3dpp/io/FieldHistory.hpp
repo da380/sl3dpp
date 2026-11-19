@@ -22,11 +22,11 @@
  * `node` field interpolated between its nodes or read from the latest
  * one, an `interval` field from the interval holding the time, an
  * `instant` field at its stored instants alone, a `static` field at any
- * time. Outside a field's span its end values are held by default (the
- * behaviour of pyslfp's `IceNG`); `hold_outside = false` refuses such
- * times instead. A `previous` field and an `interval` field are step
- * functions of time: `Jumps` says where they jump, `Values` serves the
- * right limit there and `ValuesBefore` the left.
+ * time. Outside a field's span its end values are held by default;
+ * `hold_outside = false` refuses such times instead. A `previous` field
+ * and an `interval` field are step functions of time: `Jumps` says where
+ * they jump, `Values` serves the right limit there and `ValuesBefore` the
+ * left.
  *
  * Fields come back colatitude-major on the grid given at `Read`, the
  * library's storage order.

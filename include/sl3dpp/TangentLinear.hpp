@@ -5,8 +5,7 @@
  * @brief The tangent-linear runs of the coupled evolution: the derivative
  * of a run's responses along a perturbation of the ice history, the
  * initial sea level and the inverse relaxation times, about a forward
- * trajectory. Corresponds to pyslfp's `tangent_linear_ice_history`; see
- * docs/adjoints.md.
+ * trajectory; see docs/adjoints.md.
  *
  * With the trajectory's ocean functions held the forward problem is linear
  * in its loads, so the derivative is the forward problem once more: the
@@ -243,11 +242,10 @@ class TangentLinearSolver {
   /// trajectory (its full solution and its decayed memory with v's itau
   /// drive, which carries the mixed moduli–relaxation-time term) and of
   /// v's on u's, the start's alike (docs/adjoints.md §15). Symmetric
-  /// in u and v. pyslfp's `second_order_tangent_linear_ice_history` under
-  /// the sharp flotation rule, extended to the moduli. The two runs are by
-  /// this solver's method (Options::method), and a run of the other is
-  /// refused; about a calibrated migrating run the initial sea level is
-  /// held, and refused unless Options::initial_sea_level_held.
+  /// in u and v. The two runs are by this solver's method
+  /// (Options::method), and a run of the other is refused; about a
+  /// calibrated migrating run the initial sea level is held, and refused
+  /// unless Options::initial_sea_level_held.
   [[nodiscard]] std::vector<Evolution::Snapshot> RunSecondOrder(
       std::span<const double> times,
       std::span<const Evolution::Snapshot> tangentU,
@@ -263,8 +261,7 @@ class TangentLinearSolver {
   /// drive q_k = (d - m_k) delta itau_k / itau_k discretised by the scheme
   /// (Continuous). `scheme` is a one-stage scheme (a stage's family under
   /// a multi-stage one, `dt` the stage's length); under backward Euler the
-  /// two drives are one and `prev`'s strain is not read. pyslfp's
-  /// `_first_order_drive`.
+  /// two drives are one and `prev`'s strain is not read.
   [[nodiscard]] static std::map<int, std::vector<double>> FirstOrderDrive(
       const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
       double dt, const ViscoelasticState& prev, const ViscoelasticState& next,
@@ -303,7 +300,6 @@ class TangentLinearSolver {
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two
   /// perturbations of the inverse relaxation times at the memory points.
-  /// pyslfp's `_second_weight_drive`.
   [[nodiscard]] static std::map<int, std::vector<double>> SecondWeightDrive(
       const ViscoelasticOperator& op, Scheme scheme, double dt,
       const ViscoelasticState& prev, const ViscoelasticState& next,

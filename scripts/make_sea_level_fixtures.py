@@ -8,16 +8,23 @@ A. The tight gate: a generalised solve in which every input is exactly
    response channels, an inertia-moment change, and a smooth ocean-function
    override — so the solution is grid-independent to spectral accuracy.
    Inputs are recorded as coefficients; both codes synthesise them on
-   their own grids.
+   their own grids. pyslfp_generalised_sea_level.txt holds the inputs and
+   the solution: the sea level change, displacement and potential, and the
+   angular-velocity change.
 
-B. The loose gate: a true fingerprint on the shared analytic state, whose
+B. The loose gate: a true fingerprint, melting a tenth of the ice, on the
+   analytic test state (pyslfp's `AnalyticalIceModel` at the present,
+   which the C++ builds as Fingerprint::SetAnalyticTestState), whose
    sharp flotation ocean function makes the solution sensitive to each
    grid's coastline quadrature. Documented as such and compared coarsely.
+   pyslfp_fingerprint.txt holds the ocean area and the solution, as in A.
 
-Both take their Love numbers from the committed Love-number fixture
-(tests/data/pyslfp_love_numbers.txt), so the sea level equation is
-compared apart from the radial solver. tests/TestFixtures.cpp holds the
-C++ to them.
+Both solve with pyslfp's SeaLevelEquation to degree 32, rotational
+feedback included, and write coefficients in the real orthonormal basis
+without the Condon-Shortley phase, in SI. Both take their Love numbers
+from the committed Love-number fixture (tests/data/pyslfp_love_numbers.txt),
+so the sea level equation is compared apart from the radial solver.
+tests/TestFixtures.cpp holds the C++ to them.
 
 Run in this directory's environment (pyproject.toml):
 

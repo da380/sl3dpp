@@ -2,9 +2,8 @@
 // objective and their derivative along a direction v of the model
 // parameters, by the discrete method (the exact derivative of the exact
 // gradient) and by the continuous one (the second-order adjoint equations
-// discretised by the forward stepper), as pyslfp's
-// `second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
-// under the sharp flotation rule; see docs/adjoints.md.
+// discretised by the forward stepper), under the sharp flotation rule; see
+// docs/adjoints.md.
 
 #include <algorithm>
 #include <cmath>
@@ -37,7 +36,7 @@ namespace {
 
 /// The scheme weights of one branch at one memory point, with their first
 /// and second h-derivatives, in the trapezoid's (E, A, B) form: backward
-/// Euler keeps E = w, A = 0, B = 1 - w (pyslfp's `triples`).
+/// Euler keeps E = w, A = 0, B = 1 - w.
 struct Triple {
   double E, A, B;
 };

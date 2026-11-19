@@ -27,14 +27,13 @@ void dgelss_(const int* m, const int* n, const int* nrhs, double* a,
 
 namespace sl3dpp::detail {
 
-/// Anderson acceleration for a fixed point x = G(x) (Walker and Ni 2011),
-/// pyslfp's `AndersonMixer`: ring buffers of iterate and residual
-/// differences, combined in the least-squares sense through the small Gram
-/// system. Operates on flat real views; complex coefficient vectors pass
-/// through as twice-as-long real ones. The iterate differences are kept
-/// only as their sums with the residual differences, the one form the
-/// mixed iterate reads: the vectors are large and the update is bound by
-/// memory traffic.
+/// Anderson acceleration for a fixed point x = G(x) (Walker and Ni 2011):
+/// ring buffers of iterate and residual differences, combined in the
+/// least-squares sense through the small Gram system. Operates on flat
+/// real views; complex coefficient vectors pass through as twice-as-long
+/// real ones. The iterate differences are kept only as their sums with the
+/// residual differences, the one form the mixed iterate reads: the vectors
+/// are large and the update is bound by memory traffic.
 ///
 /// With `parallel`, the sweeps over the vector run threaded on OpenMP's
 /// thread count. The sums are formed over blocks of the vector fixed by its

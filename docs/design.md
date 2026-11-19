@@ -58,31 +58,31 @@ Deliberately out of scope:
   explicit fluid–solid interface couplings), and its toroidal analogue for
   W on solid regions (Myhill & Al-Attar). The exterior is closed by the
   Dirichlet-to-Neumann term at the surface; a domain truncated above the
-  centre is closed by the interior continuation at its base. The
-  formulation follows pyslfp's `love_numbers`, whose `pyslfp_theory.tex`
-  is the authoritative statement of signs and normalisations: g = ∂_r Φ >
-  0, the sea level ξ = −u − (φ + ψ)/g + c, and the Love numbers
-  normalised with the radial model's body triple (b, g, G).
+  centre is closed by the interior continuation at its base. Signs and
+  normalisations: g = ∂_r Φ > 0, the sea level ξ = −u − (φ + ψ)/g + c,
+  and the Love numbers normalised with the radial model's body triple
+  (b, g, G).
 - **Rheology.** Generalised Maxwell (Prony) branches in shear on an
   isotropic elastic background where any branch is active:
   T = κ tr(ε) I + 2μ∞ d + Σ_k 2μ_k (d − m_k), dm_k/dt = (d − m_k)/τ_k,
   with μ∞ = μ_U − Σ_k μ_k. A Maxwell body is one branch with μ_1 = μ_U and
   τ = η/μ_U, planetmodel's `viscosity` convention.
-- **Sea level.** The gravitationally consistent sea level equation of
-  pyslfp's `core.sea_level`: a fixed point on the surface load with
-  Anderson mixing, exact-quadrature surface integrals, mass conservation by
-  a uniform ocean shift, and rotational feedback by first-order
-  quasi-static Liouville theory solved in closed form at degree 2 (axial
-  and transverse, no Chandler wobble, the hydrostatic-moment guard of
-  pyslfp). Beside the sea level change, the radial displacement and the
-  potential, a solve returns the potential V of the tangential
-  displacement, from the tangential Love numbers and a ready response
-  channel of its own; its dual is an input of the adjoint solve. The
-  evolutions use the linear equation with frozen shorelines,
+- **Sea level.** The gravitationally consistent sea level equation: a
+  fixed point on the surface load with Anderson mixing, exact-quadrature
+  surface integrals, mass conservation by a uniform ocean shift, and
+  rotational feedback by first-order quasi-static Liouville theory
+  solved in closed form at degree 2 (axial and transverse, no Chandler
+  wobble, the transverse feedback refused where the moments of inertia
+  sustain less oblateness than the model's hydrostatic fluid limit,
+  Mitrovica et al. 2005). Beside the sea level change, the radial
+  displacement and the potential, a solve returns the potential V of the
+  tangential displacement, from the tangential Love numbers and a ready
+  response channel of its own; its dual is an input of the adjoint
+  solve. The evolutions use the linear equation with frozen shorelines,
   or the nonlinear (Kendall-style) solve at every step with migrating
-  shorelines (`RunMigrating`, pyslfp's `_run_migrating`): the step's
-  memory field enters through the response channels and the step finishes
-  under the converged state's grounded-ice and ocean load. In 3D the
+  shorelines (`RunMigrating`): the step's memory field enters through
+  the response channels and the step finishes under the converged
+  state's grounded-ice and ocean load. In 3D the
   nonlinear solve runs in every pass of the combined fixed point (§6). A
   state may carry a prescribed ocean function, which the linear solves use
   as given. A run of one node is the solve of its start alone, the static
@@ -90,10 +90,10 @@ Deliberately out of scope:
   differ from the background's); it takes no step, so the fluid-limit
   guard of the transverse feedback, which guards the steps, does not
   apply to it.
-- **The initial sea level.** `InitialSeaLevel.hpp` lifts pyslfp's
-  calibration (pyslfp 3.0.0): the initial sea level whose run reaches a
-  given final one. Under frozen shorelines the problem is linear and one
-  run gives it exactly, the shorelines kept as a prescribed ocean
+- **The initial sea level.** `InitialSeaLevel.hpp` calibrates the
+  initial sea level: the one whose run reaches a given final one. Under
+  frozen shorelines the problem is linear and one run gives it exactly,
+  the shorelines kept as a prescribed ocean
   function; under migrating ones it iterates, by the classical update
   (Kendall et al. 2005) or steepest descent with the adjoint gradient (Yu
   et al. 2025, §3.9), Anderson-mixed. A calibrated run's kernels are by
@@ -116,9 +116,9 @@ Deliberately out of scope:
   Legendre nodes (5 per element by default) serves every degree and every
   grid field. Every model boundary is an element boundary, and each span
   is divided uniformly into elements no wider than 0.1 a/(lmax + 1)
-  (planetmodel's rule). `RadialMesh::CreateGraded` (pyslfp's
-  `graded_mesh`) widens the elements with depth instead, each degree
-  keeping the uniform rule's resolution over its own subset; the
+  (planetmodel's rule). `RadialMesh::CreateGraded` widens the elements
+  with depth instead, each degree keeping the uniform rule's resolution
+  over its own subset; the
   benchmarks (`step_timing`, `fortran_gate`, `substructure_timing`,
   `distributed_*`) use it, the `sl3d` program and the examples the uniform
   rule. Nodal arrays are stored per element, so a shared node carries one
@@ -128,8 +128,8 @@ Deliberately out of scope:
   boundary. The pseudospectral 3D coupling needs every degree's
   coefficients on the same radial nodes, which per-degree meshes would
   break. Two truncation rules are offered: `TruncationRule::Graded`,
-  r_l = a ε^(1/(l+1)) (pyslfp's, the default) and `TruncationRule::Legacy`,
-  r_l = a (1 − 20/(l + 0.5)) (the old Fortran's).
+  r_l = a ε^(1/(l+1)) (the default) and `TruncationRule::Legacy`,
+  r_l = a (1 − 20/(l + 0.5)) (the Fortran's).
 - **Low degrees.** At l = 1 the surface potential dof is removed (the
   centre-of-mass frame, §8; without gravity a pinned dof and the frame
   imposed directly, §3a); at l = 0 there is no tangential dof, fluids are
@@ -148,9 +148,9 @@ Deliberately out of scope:
 - **The problem without gravity.** `DegreeOperator` with `gravitating =
   false` drops the gravity and potential terms: two unknowns a node, U and
   V (U alone at l = 0), against three, and no exterior closure. On a
-  solid model it is pyslfp's `traction_numbers` system exactly, the
-  non-gravitating tier of the cross-code benchmarks. It is an option of
-  the time-stepped problem too (§3a).
+  solid model its traction numbers are pyslfp's to 1e-9 (`E1Gate`,
+  §11), the non-gravitating tier of the cross-code benchmarks. It is an
+  option of the time-stepped problem too (§3a).
 
 ## 3a. The problem without gravity
 
@@ -273,8 +273,7 @@ longer free, an unphysical effect.
 ## 5. Time stepping
 
 - **State.** The evolving state is the internal variables m_k alone; the
-  displacement is slaved through one elastic solve, as in pyslfp and
-  AdGIA.
+  displacement is slaved through one elastic solve, as in AdGIA.
 - **Schemes.** The exponential trapezoid (second order, no
   stability limit, one solve per step) with h = Δt itau, e = e^{−h},
   φ₁ = (1 − e)/h, α = φ₁ − e, β = 1 − φ₁, and m⁺ = e m + α dⁿ + β dⁿ⁺¹;
@@ -645,7 +644,7 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   point values, expansion coefficients, rotation components, and the decay
   time of a site's series (Al-Attar & Tromp 2014, Appendix C) as per-node
   weights.
-- **Ice-history kernels.** `Kernels` carries pyslfp's three views: the
+- **Ice-history kernels.** `Kernels` carries three views: the
   discrete view (duals of the load at each node), the distributional view
   (a density in time plus the instantaneous amplitude of each
   measurement; Yu et al. 2025 §3.7), and the quelled view (the kernel
@@ -661,8 +660,8 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   The loads beside the ice, the layer on the solid surface and the
   interior sources of a migrating run are perturbed, and their kernels
   formed, as about a frozen one, each node on its own ocean function.
-- **Viscosity kernels**, in the multiplier form of Yu et al. (2025), as
-  pyslfp: in 1D, dJ/d itau = ∫ W_k m†/itau (d − m) dt per branch, mapped to
+- **Viscosity kernels**, in the multiplier form of Yu et al. (2025): in
+  1D, dJ/d itau = ∫ W_k m†/itau (d − m) dt per branch, mapped to
   dJ/dη by dη = −η² d(itau)/μ; in 3D, μ_k m†:(d − m)/itau per branch and
   memory point, with the contraction on the reduced storage
   r² [12 A₀B₀ + 8 Re(A₋₁B̄₋₁) + 4 Re(A₋₂B̄₋₂)] — the metric fixed by
@@ -670,10 +669,10 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   (4/3, k², k²(k² − 2)). The 3D results are the itau kernel on (memory
   node × grid), its spherical reduction, and the log-viscosity kernel
   −itau(x) K.
-- **Tangent-linear runs** (`TangentLinearSolver`, the forward mode,
-  pyslfp's `tangent_linear_ice_history`): the derivative of a run's
-  responses along a direction in the direct load, the ice thickness, the
-  initial sea level and the inverse relaxation times, about a recorded
+- **Tangent-linear runs** (`TangentLinearSolver`, the forward mode): the
+  derivative of a run's responses along a direction in the direct load,
+  the ice thickness, the initial sea level and the inverse relaxation
+  times, about a recorded
   trajectory (frozen, or a migrating run's ocean functions held). It is
   the forward loop once more — the shorelines prescribed, the direct load
   the perturbation's grounded by each node's C relative to the first's,
@@ -706,9 +705,9 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   continuous 3D sweep to the commute error. The second-order run takes
   material directions too (`SecondOrderDirection3D::materialU/V`), with
   the base step's lateral weights in the effective shear.
-- **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`, pyslfp's
-  `second_order_adjoint_ice_history`): the kernels and their derivative
-  along a direction v, the Hessian's action on v, as `KernelDerivatives`
+- **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`): the
+  kernels and their derivative along a direction v, the Hessian's action
+  on v, as `KernelDerivatives`
   (the thickness and initial-sea-level views' derivatives and the itau
   kernel's). Given v's recorded tangent-linear run, the sweep carries a
   second dual state forced by the first sweep's and δitau. Discrete: the
@@ -870,9 +869,7 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   units, and `UnitsParity` holds the constants and the geophysical factors
   equal to planetmodel's exactly.
 - **Across codes**, non-dimensional numbers are never compared directly:
-  pyslfp's internal scheme differs (T ≈ 805 s; the non-dimensional
-  potential scales as T²), so comparisons anchor in SI, channel by channel
-  (§10).
+  comparisons anchor in SI, channel by channel (§10).
 
 ## 10. Comparison rules for cross-code work
 
@@ -921,7 +918,7 @@ fixture comparisons, which small problems pin as tightly as large ones.
 | `EvolutionGate.StepperMatchesPyslfp` | pyslfp's 1D stepper, Love-number histories | `pyslfp_stepper.txt` | 1e-8 |
 | `EvolutionGate.CoupledEvolutionMatchesPyslfp` | pyslfp's coupled 1D GIA run | `pyslfp_evolution.txt` | 1e-5 |
 | `MigratingGate.RunMisfitAndCalibrationMatchPyslfp` | pyslfp's migrating-shoreline run, the gradient of a final sea level misfit, and both calibrations' misfit histories | `pyslfp_migrating.txt` | ocean functions equal; 1e-9 (run), 1e-10 (gradient), 1e-7 (histories) |
-| `AdjointGate` | pyslfp's ice-history load duals (both adjoints) and itau kernels | `pyslfp_kernels.txt` | 1e-5 |
+| `AdjointGate` | pyslfp's ice-history load duals and itau kernels (both adjoints) | `pyslfp_kernels.txt` | 1e-5 |
 | `E1Gate.TractionNumbersMatchPyslfp` | pyslfp's traction numbers, gravitating and not | `e1_traction_numbers.txt` | 1e-9 |
 | `DecayTime.MatchesPyslfpOnTheFixture` | pyslfp's decay-time estimator | `decay_time.txt` | 1e-6 relative |
 | `ModelViscosity` | planetmodel's Python reading of model files | `viscosity_*.nc`, `viscosity_probes_*.txt` | 1e-11 |
@@ -1232,8 +1229,9 @@ What is not built, or holds only within limits:
   branch relaxes. What a relaxed TI medium is — the relaxed bulk response,
   and whether moduli relax on different time-scales — is open.
 - **Bulk relaxation** is not modelled.
-- **Second-order runs and adjoints** do not port the shoreline terms of
-  pyslfp's smoothed flotation rule (sl3dpp has the sharp rule only).
+- **Second-order runs and adjoints** are those of the sharp flotation
+  rule, the only one sl3dpp has; the shoreline terms a smoothed rule
+  would add are not built.
 - **Material derivatives** are in the moduli: no derivative is taken in
   the density, radial or lateral (docs/adjoints.md §13l). The
   time-stepped tangents and kernels run under any rotational feedback.

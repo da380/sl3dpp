@@ -1,10 +1,9 @@
 # Adjoints: discrete and continuous
 
-*The adjoints and kernels of sl3dpp, 1D and 3D. The 1D path follows
-pyslfp's adjoint machinery (`viscoelastic/evolution.py`: discrete and
-continuous adjoints, quelling, 1D viscous kernels, checkpointing) and
-Yu et al. 2025 (equation references below are to that paper); the 3D
-path is sl3dpp's own. Sections 6a and 6b give the 3D continuous sweep
+*The adjoints and kernels of sl3dpp, 1D and 3D: discrete and
+continuous adjoints, quelling, viscosity kernels and checkpointing, on
+the adjoint theory of Yu et al. 2025 (equation references below are to
+that paper). Sections 6a and 6b give the 3D continuous sweep
 and the design of the discrete 3D transpose; §8–§17 the tangent-linear
 runs, the second-order adjoints, the discrete 3D transpose (§12), the
 material derivatives and kernels, and their distribution over radius;
@@ -17,16 +16,17 @@ scheme".*
 
 ## 1. Both formulations, and when each is accurate
 
-Two adjoints are implemented, as pyslfp and AdGIA carry,
+Two adjoints are implemented, as in AdGIA,
 behind one interface and one result type so every gate runs on both
 alike:
 
 - **Discrete**: the exact transpose of the time-stepped forward map.
   Gradient identity to solver tolerance for any perturbation on the
   date grid; gated by dot-product tests at 1e-8 relative. Being
-  the exact transpose of THIS code's step, it is also the
-  porting-bug detector against pyslfp's (algebraically identical)
-  implementation.
+  the exact transpose of THIS code's step, it also checks the step
+  against pyslfp's, whose algebra is the same: the two discrete
+  adjoints' load duals and itau kernels agree at 1e-5 (`AdjointGate`,
+  §7).
 - **Continuous**: the adjoint equations of the continuum problem,
   discretised. They have the same form as the forward problem (Yu et
   al. §3.3), so between observations the adjoint state is stepped by
@@ -451,7 +451,7 @@ above are.
 
 ## 2. Scope
 
-1. **1D kernels** (the pyslfp port): ice-history kernels for objectives
+1. **1D kernels**: ice-history kernels for objectives
    J = Σ_i ∫ g_i · (ξ, u, φ)(t_i) dS + g_ω·ω(t_i), by both sweeps;
    inverse-relaxation-time (itau) kernels, both ways, with the
    viscosity mapping; checkpointing (record stride + forward rebuilds
@@ -462,64 +462,98 @@ above are.
    §6b and built (§12).
    **Both kernel granularities are deliverables**:
    the full 3D viscosity kernel on the (memory nodes × angular grid),
-   AND the spherically averaged 1D radial kernel as pyslfp provides —
+   AND the spherically averaged 1D radial kernel —
    the latter both from the 1D sweeps directly and as the spherical
    average of the 3D kernel, whose agreement in the zero-lateral limit
    is a free consistency gate between the two pipelines.
-3. Linearisation about a migrating-shoreline trajectory (pyslfp's
-   `ocean_functions`), 1D and 3D: the sweeps' `oceanFunctions` argument
-   (design.md §7). Decay-time functionals (pyslfp `functionals.py`), a
-   front end over Measurement: `DecayTimeMeasurements` in
+3. Linearisation about a migrating-shoreline trajectory, 1D and 3D:
+   the sweeps' `oceanFunctions` argument (design.md §7). Decay-time
+   functionals, a front end over Measurement: `DecayTimeMeasurements` in
    `Measurements.hpp`.
 
-## 3. The 1D sweeps (pyslfp's algebra, verbatim)
+## 3. The 1D sweeps
 
-The authoritative statements are pyslfp `evolution.py` docstrings and
-code; what follows fixes the sl3dpp mapping only.
+The objective and its adjoint problem are those of Yu et al. 2025, §3,
+the adjoint theory of glacial isostatic adjustment of Crawford et al.
+2018 extended to rotational feedback: the adjoint problem has the
+forward problem's form under more general forces, its ocean function
+the forward run's reversed in time. Per degree, one step of the forward
+run (one stage under Sdirk2, §1a) is a linear map of the internal
+variables m and the strain scalars d at the memory points and of the
+direct load ζ_d:
 
-- **Discrete** (`adjoint_ice_history`): one reversed sweep carrying the
-  duals (m†, d†) per degree. Per step: the duals of the end solve
-  gather through the strain transpose (`Degree::DualFromScalars` — the
-  plain transpose of `Degree::Strain` under the nodal pairing); the
-  unit load/tide responses contract them to load/tide coefficient
-  duals; those join the measurement duals through the engine adjoint
-  (`GRDSolver::SolveAdjoint`, the sea-level solver's transpose); its channel
-  duals force one symmetric effective solve per degree; the weight
-  recursion closes m† and d†. The start is the transposed
-  instantaneous elastic solve. Yu et al. §3; pyslfp lines 1554–1663.
-- **Continuous** (`continuous_adjoint_ice_history`): reversed zero-load
+    m̃ = E mⁿ + A dⁿ,                 x_m = K⁻¹ Dᵀ W m̃,   J₀ = q·x_m,
+    (σ, ψ) = SLE(ζ_d, P x_m, J₀),     x = x_m + x_σ σ + x_ψ ψ,
+    dⁿ⁺¹ = D x,                       mⁿ⁺¹ = m̃ + B dⁿ⁺¹,
+
+with D the strain map from a degree solution to the scalars (M, R, S)
+at the memory points (`Degree::Strain`; the scalars of Al-Attar &
+Tromp 2014, eqs D68–D73); W the point weights μ_k w_p w_c, the branch
+modulus, the memory quadrature and the scalar weights k²(k² − 2), 4/3,
+k² (`Degree::ApplyWeights`), so that Dᵀ W m̃ is the memory force; E, A
+and B the scheme weights per branch and point (the trapezoid's e, α, β;
+backward Euler's w = 1/(1 + h), 0, 1 − w); K the step's symmetric
+effective system, whose branch weights are 1 − B; P the surface rows
+reading U(a), φ(a) and V(a); q the degree-0 inertia-moment row; SLE the
+step's generalised sea level solve, giving the total-load and
+centrifugal coefficients σ and ψ from the direct load ζ_d and the
+memory solution's surface values and inertia moment J₀; and x_σ, x_ψ the
+unit responses to a load and a tide. The first node is the
+instantaneous elastic solve.
+
+- **Discrete** (`AdjointMethod::Discrete`): the transpose of that map,
+  one reversed sweep carrying the duals (m†, d†) per degree:
+
+      x† = Dᵀ (B mⁿ⁺¹† + dⁿ⁺¹†),         σ† = x_σ·x†,   ψ† = x_ψ·x†,
+      (ζ_d†, (P x_m)†, J₀†) = SLEᵀ(σ†, ψ†),
+      y = K⁻¹ (x† + Pᵀ (P x_m)† + q J₀†),
+      m̃† = mⁿ⁺¹† + W D y,   mⁿ† = E m̃†,   dⁿ† = A m̃†,
+
+  the duals of the measurement at node n + 1 joining the inputs of SLEᵀ,
+  and ζ_d† the node's load kernel. Dᵀ is `Degree::DualFromScalars`, the
+  plain transpose of `Degree::Strain` under the nodal pairing; SLEᵀ is
+  the engine adjoint (`GRDSolver::SolveAdjoint`, the sea level solver's
+  transpose); K⁻¹ is one symmetric effective solve per degree. The
+  start is the transposed instantaneous elastic solve.
+- **Continuous** (`AdjointMethod::Continuous`): reversed zero-load
   stepping by `StartStep`/`Finish` with the memory responses through
   the SLE's response channels — exactly the forward loop with no ice
   load. At an observation: the instantaneous adjoint fingerprint via
   the forward channel mapping (ζ_d = g_ξ, ζ^u = −g_u, ζ^φ = −g g_φ,
   L = −g (g_ω − Ψ* g_φ), with Ψ* the adjoint of the centrifugal
-  operator), then the radial jump m† += itau d̃† with d̃† the strain of
-  the unrelaxed solve under the converged (λ, ψ†) and the SPLIT load
-  channels (`DegreeOperator::Load(LoadPart::Force/Potential)`) carrying
-  displacement and potential measurements. The smooth kernel density is
-  the memory-only adjoint equilibrium's sea level, kept one-sided
-  across each observation (the density jumps there).
-- **itau kernels.** Discrete: per step, the h-derivatives of the scheme
-  weights (`ExponentialTrapezoidWeightDerivatives`,
+  operator), then the radial jump m† += itau d̃† (eq. 80) with d̃† the
+  strain of the unrelaxed solve under the converged (λ, ψ†) and the
+  SPLIT load channels (`DegreeOperator::Load(LoadPart::Force/Potential)`)
+  carrying displacement and potential measurements. The smooth kernel
+  density is the memory-only adjoint equilibrium's sea level, kept
+  one-sided across each observation (the density jumps there).
+- **itau kernels.** Discrete: per step, branch and point, with
+  dh = Δt d(itau),
+
+      dJ/dh = m̃†·(dE mⁿ + dA dⁿ) + dB [mⁿ⁺¹†·dⁿ⁺¹ + (W dⁿ⁺¹)·(D y)]:
+
+  the h-derivatives of the scheme weights
+  (`ExponentialTrapezoidWeightDerivatives`,
   `BackwardEulerWeightDerivative`) pair the sweep's duals with the
-  recorded forward internal variables and strains, and the effective
-  modulus's dependence pairs the transposed and forward solutions
-  through the branch bilinear (pyslfp lines 1603–1627). Continuous:
-  dJ/d itau(r) = ∫ W_k m†/itau (d − m) dt over the reversed nodes with
-  the split trapezoid (the adjoint state jumps at observations; the
-  self-adjoint channel mapping poses the adjoint in the g-weighted
-  energy form, so the carried radial state is g × the true multiplier —
-  hence a division by g in material units). `Kernels::Viscosity`
-  maps to dJ/dη via dη = −η² d(itau)/μ per branch, as pyslfp.
+  recorded forward internal variables and strains, and the last term,
+  the effective system's dependence through its branch weights 1 − B,
+  pairs the transposed and forward solutions. Continuous:
+  dJ/d itau(r) = ∫ W_k m†/itau (d − m) dt, the 1D reduction of eq. 61,
+  over the reversed nodes with the split trapezoid (the adjoint state
+  jumps at observations; the self-adjoint channel mapping poses the
+  adjoint in the g-weighted energy form, so the carried radial state is
+  g × the true multiplier — hence a division by g in material units).
+  `Kernels::Viscosity` maps to dJ/dη via dη = −η² d(itau)/μ per branch
+  (itau = μ/η).
 - **Checkpointing.** The forward `record_stride` stores the internal
   state every stride-th node (the first and the last always) and the
   per-node load/tide coefficients; a `TrajectoryCursor`
   (`detail/TrajectoryCursor.hpp`) serves the states to every 1D
   derivative run, the reverse sweeps (first and second order, discrete
   and continuous, the lateral kernels' too) and the tangent-linear runs
-  (§8). Recordings keep the internal variables only, as in pyslfp and
-  AdGIA; the cursor regenerates each stored state's strain by one elastic
-  solve under that node's recorded loads, and the 3D sweep does the same
+  (§8). Recordings keep the internal variables only, as in AdGIA; the
+  cursor regenerates each stored state's strain by one elastic solve
+  under that node's recorded loads, and the 3D sweep does the same
   per node. A state between two kept ones is rebuilt by the run's own
   steps forward from the kept state below, each finished under its end
   node's recorded total-load and centrifugal coefficients, which are all
@@ -552,8 +586,8 @@ code; what follows fixes the sl3dpp mapping only.
 
 ## 4. Result type and views
 
-`Kernels` carries the same three views as pyslfp, so the gates and
-any inversion driver are formulation-blind:
+`Kernels` carries three views, the same from either sweep, so the
+gates and any inversion driver are formulation-blind:
 
 - **Discrete view**: `directLoadKernels[n]` (dual of the direct load grid at
   node n), `thickness[n]` (grounding factor ρ_i (1−C) applied, the
@@ -625,7 +659,7 @@ carried (§13k, "The element holding the centre").
 The kernels with respect to the ice history are fields on the surface
 grid and pair by ∫ · dS (below).
 
-Conventions (sl3dpp's, not pyslfp's): times are the forward driver's —
+Conventions: times are the forward driver's —
 increasing, SLE solver units, a node repeated once for a jump of the
 forcing (§20); measurements are keyed by NODE INDEX into the time grid
 (no float matching), an observation at a repeated time on the right
@@ -674,7 +708,7 @@ dual by the dot product; densities/rates are per unit SLE time.
   within-step lateral iteration intact, jumps at observations through
   the unrelaxed 3D solve, the lateral term entering the fixed point
   exactly as forward. The viscosity kernel is the 3D form of Yu et al.
-  2025's multiplier integral, as in pyslfp and the 1D sweep (not the
+  2025's multiplier integral, as in the 1D sweep (not the
   Fortran's rate-form kernel expression): per branch and memory point,
   μ_k m†:(d − m)/itau, accumulated over the reversed nodes with the
   split trapezoid. The contraction pairs the adjoint memory with the
@@ -727,8 +761,11 @@ The pieces, each mirroring a gated 1D counterpart:
   4 Re(A₋₂B̄₋₂)] — derived by requiring the angle-uniform Parseval
   reduction to reproduce the force weights (4/3, k², k²(k²−2)) through
   `ComponentsFromScalars`, and verified by the zero-lateral gate;
-- the covariant pairing ratio of the 1D sweep (the pyslfp
-  units-covariance fix) carries over unchanged.
+- the covariant pairing ratio of the 1D sweep carries over unchanged:
+  the carried adjoint state is the true multiplier times the ratio of
+  the unit responses' load pairing (g a², in the material's units) to
+  the sea level equation's surface pairing (r², in the solver's), which
+  the kernel divides out.
 
 GATES (TestAdjoint3D): zero-lateral — ice kernels and the spherical
 reduction equal the 1D continuous sweep's at 1e-6 through the whole
@@ -795,14 +832,18 @@ a–d are described in §3 and §6a, e in §12.
 a. **Discrete 1D sweep** (ice kernels, full Measurement). GATES:
    dot-product/gradient identity at solver tolerance against the
    forward driver for random perturbations on the time grid; pyslfp
-   fixture comparison (identical algebra; `AdjointGate` at 1e-5).
+   fixture comparison (`AdjointGate` at 1e-5).
 b. **Continuous 1D sweep**. GATES: agreement with (a) at
    discretisation accuracy, tightening under dt refinement; the
-   singular-part separation and quelled-view identities (pyslfp's
-   `test_kernel_singular_parts_are_separated`, `test_quelled_rate_kernels`).
+   singular-part separation (the two sweeps' delta amplitudes agree at
+   1e-7, `Adjoint.ContinuousAgreesWithDiscreteAndConverges`) and the
+   quelled-view identities (the rate kernel the tail of the thickness
+   view, `TangentLinear.TheContinuousSweepAcrossALoadJump`); its load
+   duals and itau kernel against pyslfp's (`AdjointGate` at 1e-5).
 c. **itau/viscosity kernels + checkpointing**, both sweeps. GATES: FD
    kernel checks; checkpointed == full-record to rounding at strides
-   whose gaps span many relaxation times; pyslfp fixtures.
+   whose gaps span many relaxation times; pyslfp fixtures (the itau
+   kernel of each sweep, `AdjointGate`).
 d. **3D continuous sweep + grid viscosity kernel** (§6). GATES:
    zero-lateral limit; FD checks; Δt refinement.
 e. **3D discrete transpose** (§12). GATES: dot-product at 1e-8;
@@ -814,11 +855,9 @@ under `tests/data/` with provenance headers, like the other fixtures.
 
 ## 8. The tangent-linear runs
 
-The forward mode, ported from pyslfp's `tangent_linear_ice_history`
-(its docstring is the authoritative statement). With the
-trajectory's ocean functions held the forward problem is linear in its
-loads, so the derivative along (δf, δI, δS₀, δitau) is the forward
-problem once more:
+The forward mode. With the trajectory's ocean functions held the
+forward problem is linear in its loads, so the derivative along
+(δf, δI, δS₀, δitau) is the forward problem once more:
 
 - the shorelines prescribed from the trajectory (`oceanFunctionOverride`
   on every generalised solve, as the sweeps do);
@@ -879,8 +918,7 @@ continuous run against the discrete one as the steps shorten, are
 `TestAppsTangent`'s ([sl3d-configs.md](sl3d-configs.md),
 tangent).
 
-**The second-order run** (`RunSecondOrder`; pyslfp's
-`second_order_tangent_linear_ice_history` under the sharp flotation
+**The second-order run** (`RunSecondOrder`, under the sharp flotation
 rule): F''(x)[u, v] as the forward problem with no direct load, the
 shorelines prescribed, and the drive the sum of the first-order drive
 taken with v's recorded tangent trajectory and u's δitau, with u's
@@ -890,9 +928,9 @@ the discrete method, the second derivatives of the scheme weights with
 the forward trajectory and both perturbations (dh_u dh_v (d2e m⁰ +
 d2α d⁰ + d2β d¹), or d2w dh_u dh_v (m⁰ − d¹)). With the ocean functions
 held the map is affine in the loads and the initial sea level, so those
-directions enter only through the tangent trajectories. The smoothed
-flotation rule's shoreline terms (pyslfp's `flotation_curvature`) are
-not ported: sl3dpp has no smoothed rule. Both runs share one loop
+directions enter only through the tangent trajectories. sl3dpp has the
+sharp flotation rule alone: the shoreline terms a smoothed rule would
+add are not built. Both runs share one loop
 (`March`: prescribed shorelines, a direct load per node, a memory
 increment per step).
 
@@ -910,9 +948,8 @@ and under Sdirk2 is the discrete one (1.8e-11 and 9.5e-12 on those grids;
 
 ## 9. The second-order adjoint
 
-`AdjointSolver::SecondOrderKernels` (`AdjointSecondOrder.cpp`; pyslfp's
-`second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
-under the sharp flotation rule, Yu et al. 2025 §4): the kernels of the
+`AdjointSolver::SecondOrderKernels` (`AdjointSecondOrder.cpp`; under
+the sharp flotation rule, Yu et al. 2025 §4): the kernels of the
 objective and their derivative along a direction v — the action of the
 objective's Hessian on v, returned as `KernelDerivatives` (the thickness,
 baseline, quelled and initial-sea-level views' derivatives in the
@@ -960,8 +997,8 @@ the kernels.
   (δitau/itau) times the first-order pairing. Assembly as the first
   sweep's (split node weights, lumps on the kernels only).
 
-The shoreline terms of pyslfp's smoothed flotation rule are not ported.
-The sweeps' shared pieces (dual packers, node weights, measurement
+The shoreline terms a smoothed flotation rule would add are not built
+(§8). The sweeps' shared pieces (dual packers, node weights, measurement
 check) are in `detail/AdjointInternals.hpp`, the trajectory cursor in
 `detail/TrajectoryCursor.hpp`.
 
@@ -1011,10 +1048,10 @@ exact derivative of the continuous kernels (§1a, `TestSdirk2Continuous`).
 
 ## 10. The 3D tangent-linear runs
 
-`TangentLinearSolver3D` (`TangentLinear3D.hpp/cpp`; sl3dpp's own — pyslfp
-has no 3D): the derivative of the coupled lateral-viscosity evolution
-along a direction in the direct load, the ice thickness, the initial sea
-level and the laterally varying inverse relaxation times, and the
+`TangentLinearSolver3D` (`TangentLinear3D.hpp/cpp`): the derivative of
+the coupled lateral-viscosity evolution along a direction in the direct
+load, the ice thickness, the initial sea level and the laterally
+varying inverse relaxation times, and the
 second-order run along two directions. The direction in itau is per
 branch over the coupling's grid values (the layout of
 `Kernels3D::itauKernel3D`), or a log-viscosity field δδ(x) which maps
@@ -1143,8 +1180,8 @@ in 3D).
 
 ## 13. Material derivatives and kernels
 
-New design, not a port (pyslfp has no material derivatives): the static
-elastic problem (§13a), its lateral Born response (§13b), the
+The derivatives in the moduli κ and μ: the static elastic problem
+(§13a), its lateral Born response (§13b), the
 time-stepped tangents in the moduli (§13c, §13d), their exact transposes,
 the material kernels (§13e, §13f), the continuous kernels (§13g) and the
 static kernels (§13h).
@@ -2102,9 +2139,8 @@ the relaxation times held — so that the Hessian's
 action covers every pairing of (ice, itau, κ, μ): `SecondOrderDirection::
 materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
 `KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
-spherical reductions). New design, no pyslfp counterpart. Everything
-runs under any rotational feedback. The
-moduli's directions and kernels are held at the memory points, GLL or
+spherical reductions). Everything runs under any rotational feedback.
+The moduli's directions and kernels are held at the memory points, GLL or
 Gauss, in 1D (§13c, §13e) as on the 3D coupling's memory nodes. The 3D
 forms are distributed (§17).
 

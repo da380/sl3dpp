@@ -3,8 +3,7 @@
 /**
  * @file Viscoelastic.hpp
  * @brief The radial viscoelastic core: state, slaved degree solves,
- * steppers. Corresponds to pyslfp's `viscoelastic/operator.py`;
- * non-dimensional throughout.
+ * steppers; non-dimensional throughout.
  *
  * The state is the internal variables alone; the displacement is slaved
  * through elastic solves (AdGIA's layering). Per branch and degree the
@@ -172,8 +171,8 @@ class ViscoelasticOperator {
     bool parallel = true;
     /// Where the internal variables live within each element
     /// (MemoryPoints.hpp): the interior Gauss points (the default, ~20%
-    /// fewer, docs/design.md) or the GLL nodes (pyslfp's and the Fortran's,
-    /// for like-for-like comparisons).
+    /// fewer, docs/design.md) or the GLL nodes (for like-for-like
+    /// comparisons with codes that place the internal variables there).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
     /// Radial cuts for every degree system (DegreeOperator::Options::cuts,
     /// RadialMesh::BalancedCuts): solved by substructuring over the

@@ -168,8 +168,8 @@ struct Scene {
   }
 };
 
-/// pyslfp's marine-grounded cap on a uniform 3000 m ocean, melting over
-/// the run: a background whose ocean function is flotation's.
+/// A marine-grounded 5 km cap on a uniform 3000 m ocean, melting over the
+/// run: a background whose ocean function is flotation's.
 struct Marine {
   std::vector<double> ice0;
   GRDSolver::State state;

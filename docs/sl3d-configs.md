@@ -325,9 +325,9 @@ and the sources alone (solve, Without an ocean, below).
   is grounded, the sea floor under floating ice), converted with the
   state's ice, at the same instant by construction: -T over the ocean
   (T < 0) and -T + I over land, raised by the floating fraction
-  (917/1000) of the ice where ice sits on the ocean floor (pyslfp's
-  construction). The member names the quantity the file holds; no other
-  is tried. The ocean function follows from the sea level.
+  (917/1000) of the ice where ice sits on the ocean floor. The member
+  names the quantity the file holds; no other is tried. The ocean
+  function follows from the sea level.
 - The ocean function is decided by flotation, so every depression below
   sea level is ocean, joined to the sea or not. `ocean.land`, optional,
   is a file input of a field that is one where the surface is held as
@@ -1191,8 +1191,8 @@ or of another body is refused at the member, as the run's own would be.
 ## love-numbers
 
 The per-degree Love numbers of the deck's elastic structure, degrees 0 to
-`lmax`, in pyslfp's conventions (the generalised Love numbers of Al-Attar
-et al. 2024).
+`lmax`: the generalised Love numbers of Al-Attar et al. 2024, in SI
+(below).
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -2004,8 +2004,7 @@ axis, held through the run. A post-seismic relaxation over decades, a
 surface load cycled over years, or a tide over days are runs of this
 kind; a deglaciation, whose ice history is dated, is not.
 
-The `ocean` block changes the start and the equation, as pyslfp's
-`run_ice_history` does:
+The `ocean` block changes the start and the equation:
 
 - `ocean.shorelines: "migrating"` solves the nonlinear sea level equation
   at every node instead of the linear one: the ocean function follows the
@@ -2034,10 +2033,10 @@ The `ocean` block changes the start and the equation, as pyslfp's
   ice at the window's start is `ocean.ice` at the end plus each term's
   thickness at the start less its thickness at the end, so a state and a
   term naming one file give that file's ice at the start (to rounding),
-  and the load at a node is each term's change since the start. The run
-  then starts as pyslfp's calibration does: the ice is the run's at the
-  start, and the starting guess for the sea level is the target itself (a
-  topography converted with the state's ice), so the state's sea level
+  and the load at a node is each term's change since the start. The
+  calibration then starts from the run's ice at the start, with the
+  target itself as its guess for the sea level (a topography converted
+  with the state's ice), so the state's sea level
   and ice files are read at the window's end alone, which must lie
   within their time spans unless the inputs hold their ends
   (`"outside_span": "hold"`, the target then the files' last state).

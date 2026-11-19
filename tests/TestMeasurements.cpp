@@ -803,8 +803,10 @@ TEST(DecayTime, RefusesUncertaintiesOutOfScale) {
 
 TEST(DecayTime, MatchesPyslfpOnTheFixture) {
   // tests/data/decay_time.txt, written by scripts/make_decay_fixtures.py
-  // from pyslfp's fit_decay_time: the two estimators are the same
-  // construction, so the C++ is held to the Python's numbers.
+  // with pyslfp's fit_decay_time: a deterministic noisy decay fitted with
+  // the times pinned and free (decay time, amplitude, offset and every
+  // weight). The two estimators are the same construction, so the C++ is
+  // held to the Python's numbers to 1e-6.
   auto in = std::ifstream(std::string(SL3DPP_TEST_DATA_DIR) +
                           "/decay_time.txt");
   ASSERT_TRUE(in) << "run scripts/make_decay_fixtures.py from pyslfp";

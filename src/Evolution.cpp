@@ -680,7 +680,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
       if (migrating) {
         // The stage's equilibrium is the nonlinear equation from the
         // background, the memory field entering through the response
-        // channels (pyslfp's `_run_migrating`).
+        // channels.
         GRDSolver::NonlinearForcing moving;
         moving.iceThicknessChange = iceAt(node, c);
         for (auto i = std::size_t{0}; i < fieldSize; ++i) {

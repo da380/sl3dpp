@@ -3,8 +3,7 @@
 /**
  * @file DegreeOperator.hpp
  * @brief The degree-l system of the loading problem: dofs, band assembly,
- * factorisation, right-hand sides. Corresponds to pyslfp's
- * `love_numbers.assembly.DegreeSystem`; non-dimensional throughout.
+ * factorisation, right-hand sides; non-dimensional throughout.
  *
  * For one spherical-harmonic degree l, with k^2 = l(l + 1), the unknowns
  * are the radial and tangential displacement scalars U, V and the
@@ -41,14 +40,13 @@
  * With `gravitating = false` the same discretisation solves the
  * non-gravitating problem: the gravity and potential terms are dropped,
  * the unknowns are U and V alone (U alone at l = 0), and the natural
- * surface forcings are the unit tractions. On a solid model this is
- * pyslfp's `DegreeSystem(..., gravitating=False)` exactly. A fluid region
- * carries no degree-l pressure above degree zero without gravity (its
- * pressure is uniform), so above degree zero the system stops at the top
- * of the outermost fluid region, the solid above it traction-free there,
- * and what lies below is not solved; at degree zero the fluid keeps its
- * bulk modulus, a mu = 0 elastic medium, as with gravity. A model with
- * more than one fluid region is refused.
+ * surface forcings are the unit tractions. A fluid region carries no
+ * degree-l pressure above degree zero without gravity (its pressure is
+ * uniform), so above degree zero the system stops at the top of the
+ * outermost fluid region, the solid above it traction-free there, and
+ * what lies below is not solved; at degree zero the fluid keeps its bulk
+ * modulus, a mu = 0 elastic medium, as with gravity. A model with more
+ * than one fluid region is refused.
  *
  * Degree 1 without gravity has one null vector, the rigid translation
  * U = V = 1 (RigidTranslation): no strain, so no stress. The gauge is

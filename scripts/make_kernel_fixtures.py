@@ -2,11 +2,14 @@
 
 The evolution fixture's setting (analytic test state, PREM-deck Maxwell
 body, lmax 16, GLQ grid — which coincides with sl3dpp's GSHTrans grid, so
-the comparison isolates implementation error) with a full measurement set:
-a sea-level dual at the middle node and displacement + potential +
-angular-velocity duals at the last. Both adjoint methods are dumped —
-the C++ port's algebra is identical formulation by formulation, so each
-gates its own counterpart tightly.
+the comparison isolates implementation error), here with a 1e22 Pa s
+mantle and a tenth of the ice melting linearly over 10 kyr at 6 nodes,
+with a full measurement set: a sea-level dual at node 3 and
+displacement + potential + angular-velocity duals at the last. pyslfp's
+discrete and continuous adjoints (`adjoint_ice_history`,
+`continuous_adjoint_ice_history`) are both recorded; the C++ follows the
+same algebra in each formulation, so each is held tightly to its
+counterpart.
 
 Per method block: the load-dual coefficients per node (SI, the kernel
 against the direct load paired by the SI surface integral) and the
@@ -100,14 +103,13 @@ def main() -> None:
             grid=earth.grid_name, copy=False)
 
     dates = np.linspace(T_KYR, 0.0, NODES)
-    # The potential and angular-velocity duals are SI-ANCHORED: pyslfp's
-    # EarthModel scales (T ≈ 805 s, g_nd ≈ 1) differ from
-    # planetmodel/sl3dpp geophysical (T ≈ 1648 s, G_nd = 1), and the
-    # non-dimensional potential scales as T^2 (omega as 1/T), so a plain
-    # shared dual would define DIFFERENT objectives (a factor 4 pi / 3 on
-    # phi). Each code multiplies
-    # the dual by ITS OWN factor against the shared SI anchor, making the
-    # objective code-invariant. Lengths need no anchor (same L).
+    # The potential and angular-velocity duals are SI-ANCHORED: the
+    # non-dimensional potential scales as the time unit squared (omega as
+    # its inverse), so a plain shared dual would define different
+    # objectives in two codes whose unit schemes differ. Each code
+    # multiplies the dual by ITS OWN factor against the shared SI anchor,
+    # making the objective independent of either scheme (the scales used
+    # are written to the file's header). Lengths need no anchor (same L).
     PHI_ANCHOR = 1.0e7   # m^2 s^-2
     OMEGA_ANCHOR = 1.0e-4  # s^-1
     pot_conv = scales.factor(POTENTIAL) / PHI_ANCHOR

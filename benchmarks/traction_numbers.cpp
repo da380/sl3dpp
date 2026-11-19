@@ -9,9 +9,9 @@
 //   traction_numbers <deck> <lmax> <out.txt> [nongrav|grav]
 //
 // The deck is the elastic cross-code format (r rho vpv vsv vph vsh eta,
-// SI, no header), the mesh the uniform lmax rule shared with pyslfp, and
-// the problem non-gravitating unless `grav` asks for the full one under
-// the same forcing.
+// SI, no header), the mesh the uniform lmax rule (elements no wider than
+// 0.1 a / (lmax + 1)), and the problem non-gravitating unless `grav` asks
+// for the full one under the same forcing.
 
 #include <chrono>
 #include <format>

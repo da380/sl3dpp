@@ -22,7 +22,7 @@ from planetmodel.surfacefile import SurfaceVariable, write_surface
 from planetmodel.units import LENGTH, Scales
 
 DATA = Path("data")
-KYR = 1.0e3 * 365.25 * 86400.0  # s: sl3d's (and pyslfp's) kiloyear
+KYR = 1.0e3 * 365.25 * 86400.0  # s: sl3d's kiloyear, of 365.25-day years
 SURFACE_DENSITY = Dimensions(mass=1, length=-2)  # kg m^-2
 
 # sl3d's "elastic" deck: r rho vpv vsv vph vsh eta, SI, no header lines.

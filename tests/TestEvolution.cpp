@@ -662,10 +662,12 @@ TEST(Evolution, APrescribedTideDrivesTheBodyWithAndWithoutAnOcean) {
 }
 
 TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
-  // The reference is pyslfp on its GLQ grid, which coincides with ours at
-  // this lmax, so the comparison isolates the implementation; the sharp
-  // coastline makes the solution itself grid-determined at the ~19%
-  // level (the fixture header records pyslfp's own DH-vs-GLQ spread).
+  // The reference, written by scripts/make_evolution_fixture.py, is
+  // pyslfp's run of this setup under the same melt (sea level change and
+  // rotation per node) on its GLQ grid, which coincides with ours at this
+  // lmax, so the comparison isolates the implementation; the sharp
+  // coastline makes the solution itself grid-determined at the ~19% level
+  // (the fixture header records pyslfp's own DH-vs-GLQ spread).
   auto setup = Setup::Make(true);
   ASSERT_EQ(setup.solver.Grid().NumberOfLongitudes(), 2 * kLmax + 1)
       << "the GSHTrans grid no longer coincides with pyshtools GLQ here";

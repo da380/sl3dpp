@@ -11,8 +11,9 @@
  * Gauss-Legendre points by default: the same 2N - 1 exactness for the
  * memory-force integral, no doubling at shared element boundaries, ~20%
  * fewer points. The displacement stays at the GLL nodes either way. The
- * alternative is the GLL nodes themselves (pyslfp's and the Fortran's
- * choice), kept for like-for-like comparisons with those codes.
+ * alternative is the GLL nodes themselves, kept for like-for-like
+ * comparisons with codes that place the internal variables there (the
+ * Fortran among them).
  *
  * The shear energy splits as int mu_inf |d|^2 + sum_k int mu_k |d - m_k|^2,
  * the long-term part at the GLL nodes (the stiffness assembly's own

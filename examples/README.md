@@ -95,9 +95,10 @@ Every input is in `build/examples/data/`.
   (configs/README.md), for `ExampleSeismic` and the post-seismic
   configs.
 
-A state's sea level is built from its topography and ice thickness by
-`SeaLevelFromTopography` (pyslfp's construction), as the `sl3d` program
-does.
+A state's sea level is built from its topography T and ice thickness I by
+`SeaLevelFromTopography`, as the `sl3d` program does: -T on the ocean
+floor (T < 0) and -T + I on land, raised by the floating fraction (ice
+density over water density) of any ice on the ocean floor.
 
 A generated input is replaced only where its content changed: the build's
 generators (`KeepUnchanged.hpp`) and the `make_*.py` scripts
@@ -122,7 +123,7 @@ uses it; `inputs.py` holds what they share.
 | `make_planet_deck.py` | `planet.gia.deck`, `planet.elastic.deck`: a three-layer toy Mars (fluid core, Maxwell mantle, elastic lid); prints its mass and surface gravity | `model.deck`; `no_ocean_tide_planet*.json` |
 | `make_postseismic_deck.py` | `prem8.postseismic.deck`: PREM without its ocean, an elastic lid (50 km) over Maxwell asthenosphere, upper and lower mantles (1e19, 1e20 and 1e22 Pa s), isotropic where they relax; prints the layers' Maxwell times. Its defaults write the deck `examples/data` holds | `model.deck`; the post-seismic configs, `ExampleSeismic` |
 | `make_lateral_model.py` | `<deck>_<field>_<kind>.nc` (`s40rts` in place of the `tomography` kind, as `earth_custom_viscosity_s40rts.nc`): a 3D viscosity or lateral moduli on a deck's own body, an analytic pattern, S40RTS or a Gaussian random field; from S40RTS the viscosity by sl3d's conversion chain (optionally renormalised to the deck's mean, with a lid), the moduli from the shear speed and a scaled P speed (`--vp-scaling`) | `model.viscosity.file`, `model.moduli.file` |
-| `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `ocean.ice` and `ocean.topography` (the state), a `thickness` term of `forcing.ice_change` (the history) |
+| `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `ocean.ice`, `ocean.topography` and, from ICE-xG, `ocean.land` (the state), a `thickness` term of `forcing.ice_change` (the history) |
 | `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term (`forcing.load`) |
 | `make_load_coefficients.py` | `<file>_lm.txt`: a load field's coefficient table, in the exchange table's harmonics | a `coefficients` load term (`forcing.load`) |
 | `make_megathrust.py` | `megathrust.nc`: a planetmodel fault file, a curved megathrust off the synthetic South America swept from a small-circle trench, a thrust tapered from 12 m. It needs planetmodel's fault module (after 1.5.1; until a release carries it, `PYTHONPATH=<planetmodel checkout>/src`), and without it says so and writes nothing | a `fault_file` seismic term (`forcing.seismic`); `sea_level_static_megathrust.json` |
@@ -357,8 +358,10 @@ poetry run python make_load_coefficients.py data/load_cap.nc
 uses pyslfp's `export_ice_history`: ICE-7G's stored slices
 from 26 ka to the present (every kiloyear to 21 ka, then every half
 kiloyear), `ice_thickness` and `topography` on the dataset's grid, in
-metres. The first run downloads pyslfp's ICE-7G archive from Zenodo (about
-24 MB) into pyslfp's data directory (`~/.pyslfp_data`, or `$PYSLFP_DATA`);
+metres, and a static `land`, one over the present-day landlocked
+depressions (`ocean.land`) and zero elsewhere. The first run downloads
+pyslfp's ICE-7G archive from Zenodo (about 24 MB) into pyslfp's data
+directory (`~/.pyslfp_data`, or `$PYSLFP_DATA`);
 later runs reuse it. `--version ICE6G` or `ICE5G` writes those models
 instead (`data/ice6g.nc`, `data/ice5g.nc`).
 

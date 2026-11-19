@@ -114,9 +114,8 @@ class Example:
 def map_axes(fig, rows, cols, index, central_longitude=0.0,
              coastlines=True):
     """An axes ready for a world map: cartopy Robinson when available,
-    centred on the prime meridian by default (pyslfp's convention), with
-    the real coastlines unless told otherwise (a synthetic Earth draws its
-    own)."""
+    centred on the prime meridian by default, with the real coastlines
+    unless told otherwise (a synthetic Earth draws its own)."""
     if HAVE_CARTOPY:
         ax = fig.add_subplot(
             rows, cols, index,

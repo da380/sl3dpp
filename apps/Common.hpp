@@ -691,8 +691,8 @@ void StartFromIceHistory(const Run& run, const GRDSolver& solver,
 /// Calibrates the world's initial sea level against the state's sea level
 /// at the window's end (`"at": "end"`), by an evolution the caller built
 /// to stream nothing, and adopts it as the world's background. The start
-/// is pyslfp's: the run's ice at the window's start, the target sea level
-/// as the guess (StartFromIceHistory), so the sea level's file is read at
+/// is the run's ice at the window's start, the target sea level as the
+/// guess (StartFromIceHistory), so the sea level's file is read at
 /// the end alone. Refused when the calibration runs out of iterations.
 /// Returns the misfits before and after (SI metres) and the runs taken.
 struct CalibrationSummary {

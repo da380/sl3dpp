@@ -1404,8 +1404,8 @@ void StartFromIceHistory(const Run& run, const GRDSolver& solver,
 
 namespace {
 
-/// The calibration's start, pyslfp's construction: the run's ice at the
-/// window's start under the target sea level, as the guess.
+/// The calibration's start: the run's ice at the window's start under the
+/// target sea level, as the guess.
 std::vector<double> PrepareCalibration(const Run& run, const Json& top,
                                        const GRDSolver& solver,
                                        Loaded& world) {

@@ -6,7 +6,7 @@
 // about a migrating trajectory against central differences while no
 // flotation cell flips, the second derivatives of the scheme weights
 // against differences of the first, and the second-order run as the
-// derivative of the first-order one — pyslfp's test_tangent_linear.py.
+// derivative of the first-order one.
 
 #include <gtest/gtest.h>
 

@@ -3,9 +3,8 @@
 /**
  * @file Evolution.hpp
  * @brief Forward GIA: ice history in, sea level, displacement, potential
- * and rotation histories out. Corresponds to pyslfp's
- * `viscoelastic.evolution.SeaLevelEvolution`: each implicit step is opened
- * before its end-time loads are known, its memory responses and inertia
+ * and rotation histories out. Each implicit step is opened before its
+ * end-time loads are known, its memory responses and inertia
  * moment enter the sea level equation through the generalised response
  * channels, the SLE closes the step's equilibrium with the matching
  * per-(scheme, dt) effective Love numbers, and the step finishes under the
@@ -16,16 +15,17 @@
  * alone.
  *
  * Internal component, non-dimensional: the radial operator works in the
- * material's scheme and the sea level solver in its own, with the unit
- * ratios carried here exactly as pyslfp does. Times and the ice-load
- * callable are in the SLE solver's units; the returned fields likewise.
+ * material's scheme and the sea level solver in its own, and what passes
+ * between them is converted by the ratios of the two schemes' unit
+ * factors, formed once here. Times and the ice-load callable are in the
+ * SLE solver's units; the returned fields likewise.
  *
- * Two shoreline treatments, as pyslfp's `run_ice_history`: `Run` solves
- * the linear (frozen shoreline) equation with the background state's ocean
- * function, for a given non-ocean load; `RunMigrating` solves the
- * nonlinear equation each step, for a given ice thickness history, the
- * ocean function following the flotation condition and every snapshot
- * recording it (the C(t) an adjoint about the trajectory reads back).
+ * Two shoreline treatments: `Run` solves the linear (frozen shoreline)
+ * equation with the background state's ocean function, for a given
+ * non-ocean load; `RunMigrating` solves the nonlinear equation each step,
+ * for a given ice thickness history, the ocean function following the
+ * flotation condition and every snapshot recording it (the C(t) an
+ * adjoint about the trajectory reads back).
  *
  * On an operator without gravity (ViscoelasticOperator::Options::
  * gravitating = false) there is no sea level equation, no potential and
@@ -188,7 +188,7 @@ class Evolution {
     double rtol = 1e-9;
     int anderson_memory = 5;
     /// The most passes of each step's nonlinear sea level solve under
-    /// migrating shorelines (pyslfp's default).
+    /// migrating shorelines.
     int max_nonlinear_iterations = 50;
     /// Keep every stride-th node's internal state on its snapshot (and
     /// the last; 0 keeps none); the per-node load and centrifugal
@@ -362,12 +362,12 @@ class Evolution {
       const Checkpoint& from, std::span<const double> times,
       const std::function<std::vector<double>(double)>& directLoad);
 
-  /// Integrates under migrating shorelines (pyslfp's `run_ice_history`
-  /// with shorelines="migrating"): `iceThickness(t)` is the ice thickness
-  /// at t on the SLE grid, solver units, and the background state is the
-  /// state at times[0], so its ice thickness must be iceThickness(times[0])
-  /// and its ocean function the flotation one (a prescribed ocean function
-  /// is refused: the shorelines follow flotation from the first node).
+  /// Integrates under migrating shorelines: `iceThickness(t)` is the ice
+  /// thickness at t on the SLE grid, solver units, and the background
+  /// state is the state at times[0], so its ice thickness must be
+  /// iceThickness(times[0]) and its ocean function the flotation one (a
+  /// prescribed ocean function is refused: the shorelines follow
+  /// flotation from the first node).
   /// Each step solves the nonlinear sea level equation from the background
   /// state with the step's memory channels, and finishes under the
   /// converged state's grounded-ice and ocean load relative to the
@@ -479,7 +479,9 @@ class Evolution {
   std::vector<std::complex<double>> psi_;
   // A restored checkpoint's toroidal state, for a resumed run.
   std::optional<ToroidalViscoelastic::State> restoredToroidal_;
-  // Unit ratios, material <-> SLE schemes (pyslfp's names).
+  // Unit ratios between the material and SLE schemes: toNd* takes a
+  // material-unit value to SLE units, toMat* an SLE-unit value to material
+  // units.
   double toNdLength_ = 1.0, toNdPotential_ = 1.0, toNdMoment_ = 1.0;
   double toMatDensity_ = 1.0, toMatPotential_ = 1.0, toMatTime_ = 1.0;
 };

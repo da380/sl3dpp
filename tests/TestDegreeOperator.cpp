@@ -1,6 +1,6 @@
 // DegreeOperator and the Love-number driver: structural identities and
 // closed forms (Kelvin's fluid number, degree-0 mass conservation); the
-// pyslfp fixture comparison is in TestFixtures.
+// comparison with pyslfp's Love numbers is in TestFixtures.
 
 #include <gtest/gtest.h>
 
@@ -141,7 +141,7 @@ TEST(DegreeOperator, ReciprocityAndSigns) {
   auto material = CoreMantleMaterial(16);
   auto ln = ComputeLoveNumbers(material, 16);
   // The bilinear form is symmetric; the identities should hold to
-  // round-off (pyslfp sees ~1e-14).
+  // round-off.
   EXPECT_LT(ln.ReciprocityResidual(), 1e-11);
   // A surface load depresses the surface and lowers the potential there.
   for (int l : {2, 8, 16}) {

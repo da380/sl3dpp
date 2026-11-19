@@ -17,7 +17,8 @@
 //   love_numbers <deck> <lmax> <out.txt>
 //
 // The deck is the elastic cross-code format (r rho vpv vsv vph vsh eta,
-// SI, no header) and the mesh the uniform lmax rule shared with pyslfp.
+// SI, no header) and the mesh the uniform lmax rule (elements no wider
+// than 0.1 a / (lmax + 1)).
 
 #include <chrono>
 #include <cmath>

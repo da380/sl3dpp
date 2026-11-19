@@ -5,12 +5,13 @@ or a hand-made one from numpy arrays.
 --model ICE7G (or ICE6G, ICE5G): pyslfp's export_ice_history writes the
 model's stored slices (for ICE-7G every kiloyear from 26 to 21 ka, then
 every half kiloyear to the present), `ice_thickness` and `topography` in
-metres on the data set's grid, to data/ice7g.nc (data/ice6g.nc,
-data/ice5g.nc). The file holds the present day too, so it is both the
-state, the ice (`ocean.ice`) and the sea level as topography
-(`ocean.topography`) at one date, and the ice history, a `thickness` term
-of the ice change (`forcing.ice_change`), of an sl3d config:
-configs/*_ice7g.json read data/ice7g.nc. pyslfp keeps
+metres on the data set's grid, and `land`, a static field that is one
+over the present-day landlocked depressions (`ocean.land`) and zero
+elsewhere, to data/ice7g.nc (data/ice6g.nc, data/ice5g.nc). The file
+holds the present day too, so it is both the state, the ice (`ocean.ice`)
+and the sea level as topography (`ocean.topography`) at one date, and the
+ice history, a `thickness` term of the ice change (`forcing.ice_change`),
+of an sl3d config: configs/*_ice7g.json read data/ice7g.nc. pyslfp keeps
 the data in ~/.pyslfp_data (or $PYSLFP_DATA); if they are not there the
 script says what it would download and stops, unless --download is given.
 

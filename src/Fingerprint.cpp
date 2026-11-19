@@ -22,9 +22,10 @@ void Fingerprint::SetState(std::span<const double> iceThickness,
 }
 
 void Fingerprint::SetAnalyticTestState(double date) {
-  // pyslfp's AnalyticalIceModel, verbatim: smooth super-Gaussian features
-  // in SI metres, with the ice masked onto land by a sigmoid of the
-  // topography and thresholded at a millimetre.
+  // The state the tests' pyslfp reference fixtures are computed on,
+  // feature for feature: smooth super-Gaussian features in SI metres,
+  // with the ice masked onto land by a sigmoid of the topography and
+  // thresholded at a millimetre.
   auto feature = [](double theta, double phi, double peak, double colat0,
                     double lon0, double width, int power) {
     const double cosDistance =

@@ -34,7 +34,7 @@ def data_dir(description: str | None) -> pathlib.Path:
 
 def provenance(*packages: str) -> str:
     """The installed versions of the packages and today's date, as a
-    fixture's header records them: 'pyslfp 2.2.2, planetmodel 1.3.2,
-    2026-10-23'."""
+    fixture's header records them: 'pyslfp <version>, planetmodel
+    <version>, <YYYY-MM-DD>'."""
     versions = [f"{p} {importlib.metadata.version(p)}" for p in packages]
     return ", ".join(versions + [datetime.date.today().isoformat()])

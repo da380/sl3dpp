@@ -175,8 +175,9 @@ struct EarthState {
 };
 
 /// Reads the state from a surface file holding `ice_thickness` and
-/// `topography` (the synthetic Earth, or pyslfp's export of ICE-xG) at a
-/// date in kyr before present, resampled onto the grid.
+/// `topography` (the synthetic Earth, or ICE-xG as pyslfp's
+/// `export_ice_history` writes it) at a date in kyr before present,
+/// resampled onto the grid.
 inline EarthState LoadEarthState(const sl3dpp::SurfaceGrid& grid,
                                  const std::filesystem::path& path,
                                  double dateKyrBp = 0.0) {

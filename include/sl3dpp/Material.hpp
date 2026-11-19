@@ -3,8 +3,7 @@
 /**
  * @file Material.hpp
  * @brief What the per-degree radial solver needs of a model on a mesh, as
- * nodal arrays: pyslfp's `love_numbers.material`, non-dimensional like
- * every internal component.
+ * nodal arrays, non-dimensional like every internal component.
  *
  * `NodalModuli` holds the transversely isotropic moduli A, C, F, L, N at
  * the mesh nodes, per element, so a shared node carries both one-sided

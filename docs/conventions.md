@@ -4,9 +4,9 @@ The code style and the testing conventions. The physics conventions are in
 [design.md](design.md): the formulation and its signs (§2), the radial mesh
 (§3), the harmonic basis (§4), degree one and the gauge (§8), units (§9),
 parallelism (§12) and the dependencies and their pins (§13). AdGIA supplies
-the *naming and layering* conventions and pyslfp the formulation; the C++
-itself is modern C++23 throughout — AdGIA's sometimes old-fashioned idiom
-is MFEM's doing, not a model to copy.
+the *naming and layering* conventions; the C++ itself is modern C++23
+throughout — AdGIA's sometimes old-fashioned idiom is MFEM's doing, not
+a model to copy.
 
 ## Code style
 
@@ -19,7 +19,7 @@ is MFEM's doing, not a model to copy.
   `RadialMesh.cpp`), one principal class per header, under `include/sl3dpp/`
   with non-template implementation in `src/`.
 - Doxygen comments on every public entity, citing equations by source —
-  `pyslfp_theory.tex §7`, A&T 2014 eq. D76 — rather than restating
+  Yu et al. 2025 eq. 80, A&T 2014 eq. D76 — rather than restating
   derivations. Comments state constraints and ownership, not narration.
 - **Threading.** OpenMP within a process; optional MPI over radial
   segments ([radial-partitioning.md](radial-partitioning.md)), the library
@@ -83,8 +83,7 @@ is MFEM's doing, not a model to copy.
   provenance header: generating script, the computing libraries'
   versions (or commits), date. Fixtures are committed; tests never invoke
   Python.
-- Adjoint code is gated by dot-product tests at 1e-8 relative,
-  following pyslfp.
+- Adjoint code is gated by dot-product tests at 1e-8 relative.
 - **Cost.** Tests run mostly at small degree (lmax <= 8) and few steps,
   each on one thread (`tests/CMakeLists.txt`): the gates are identities,
   convergence orders and fixture comparisons, which small problems pin as

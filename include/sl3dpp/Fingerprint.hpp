@@ -3,7 +3,7 @@
 /**
  * @file Fingerprint.hpp
  * @brief Elastic sea-level fingerprints: the public, SI face of the sea
- * level engine, pyslfp-shaped.
+ * level engine.
  *
  * An elastic earth responds instantaneously, so a fingerprint is one
  * equilibrium solve of the sea level equation against a fixed background
@@ -53,10 +53,10 @@ class Fingerprint {
                 std::span<const double> seaLevel,
                 std::span<const char> forcedLand = {});
 
-  /// pyslfp's analytical testing state (`AnalyticalIceModel`): smooth
-  /// super-Gaussian continents and ice caps, solvable at low degree
-  /// without coastline aliasing. `date` in kiloyears before present (0 the
-  /// present day, 21 the glacial maximum).
+  /// An analytical testing state: smooth super-Gaussian continents and
+  /// ice caps, solvable at low degree without coastline aliasing, and the
+  /// state the tests' pyslfp reference fixtures are computed on. `date` in
+  /// kiloyears before present (0 the present day, 21 the glacial maximum).
   void SetAnalyticTestState(double date = 0.0);
 
   /// The state's ocean function (1 over oceans) and the background fields,

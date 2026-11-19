@@ -7,8 +7,7 @@
  * the ice history, the initial sea level and the laterally varying
  * inverse relaxation times, about a recorded trajectory, and the
  * second-order run along two such directions. The 3D form of
- * TangentLinear.hpp (pyslfp has no 3D counterpart); see
- * docs/adjoints.md.
+ * TangentLinear.hpp; see docs/adjoints.md.
  *
  * With the ocean functions held the coupled step is linear in its loads
  * and its memory, so the tangent-linear step is the forward step once

@@ -1,10 +1,14 @@
 """Generalised Love numbers of a PREM deck, from pyslfp.
 
-Samples PREM (no ocean) to an elastic deck, reads that file back with
-planetmodel, and records pyslfp's Love numbers on the uniform lmax mesh
-rule — the same rule sl3dpp's RadialMesh implements — so both codes solve
-the identical discrete problem and agreement is expected near machine
-precision. tests/TestFixtures.cpp holds the C++ to it, and the sea-level
+Samples PREM (no ocean) to an elastic deck, eight knots a layer, reads
+that file back with planetmodel, and records pyslfp's Love numbers
+(`love_numbers`, `fluid_tidal_number`) on the uniform lmax mesh rule —
+the same rule sl3dpp's RadialMesh implements — so both codes solve the
+identical discrete problem and agreement is expected near machine
+precision. The table holds, in SI, the radius and surface gravity, the
+axial numbers h_c, k_c, m_u, m_phi and m_c, the degree-2 fluid tidal
+number and the twelve generalised Love numbers h_u to k_t at degrees 0
+to 32. tests/TestFixtures.cpp holds the C++ to it, and the sea-level
 fixtures use the table as their Love numbers.
 
 Run in this directory's environment (pyproject.toml):
