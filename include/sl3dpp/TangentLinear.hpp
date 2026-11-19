@@ -176,13 +176,14 @@ class TangentLinearSolver {
     /// Discrete (the default, as AdjointSolver's): the forward mode of
     /// the stepped map; or Continuous (FirstOrderDrive). A second-order
     /// sweep about the run takes the same method as the run. About an
-    /// evolution under Sdirk2 the discrete run steps the tangent state by
-    /// the scheme's two stages, each driven by the weights' derivatives at
-    /// the stage's length about the forward stage's states; the continuous
-    /// drive of a direction in the relaxation times is not built there and
-    /// is refused (a direction in the forcing or the moduli is the same
-    /// run by either method: the moduli move with the relaxation times,
-    /// and so the step's weights, held).
+    /// evolution under Sdirk2 the run steps the tangent state by the
+    /// scheme's two stages, each driven about the forward stage's states at
+    /// the stage's length: by the backward Euler weight's derivative
+    /// (Discrete) or by backward Euler's continuous drive (Continuous),
+    /// which are one drive, so that the two methods give one run, to
+    /// rounding (docs/adjoints.md §1a). Along the forcing or the moduli
+    /// (which hold the relaxation times, and so the step's weights) the
+    /// two are one run under every scheme.
     AdjointMethod method = AdjointMethod::Discrete;
     double rtol = 1e-9;
     int anderson_memory = 5;
@@ -191,6 +192,16 @@ class TangentLinearSolver {
     /// multi-stage scheme, each inner stage's too (Evolution::Snapshot::
     /// stages, with the stage's state).
     bool record = false;
+    /// RunSecondOrder about an evolution whose background state is marked
+    /// calibrated under migrating shorelines (Evolution::Calibrated) holds
+    /// the initial sea level: it gives the second derivative with the
+    /// calibrated initial sea level held, where the calibrated run's own
+    /// (the initial sea level calibrated again along both directions) is
+    /// not built. It is refused there unless this states that the held one
+    /// is wanted. Run holds the initial sea level about any run, and
+    /// ComputeCalibratedTangent forms the calibrated run's first derivative
+    /// from it (InitialSeaLevel.hpp).
+    bool initial_sea_level_held = false;
     /// Called at the start of each step, with the node it steps to.
     std::function<void(std::size_t node)> on_node{};
   };
@@ -233,7 +244,10 @@ class TangentLinearSolver {
   /// drive, which carries the mixed moduli–relaxation-time term) and of
   /// v's on u's, the start's alike (docs/adjoints.md §15). Symmetric
   /// in u and v. pyslfp's `second_order_tangent_linear_ice_history` under
-  /// the sharp flotation rule, extended to the moduli.
+  /// the sharp flotation rule, extended to the moduli. The two runs are by
+  /// this solver's method (Options::method), and a run of the other is
+  /// refused; about a calibrated migrating run the initial sea level is
+  /// held, and refused unless Options::initial_sea_level_held.
   [[nodiscard]] std::vector<Evolution::Snapshot> RunSecondOrder(
       std::span<const double> times,
       std::span<const Evolution::Snapshot> tangentU,
@@ -247,7 +261,10 @@ class TangentLinearSolver {
   /// relaxation times at the memory points, bilinear in the two: the
   /// forward mode of the scheme's weights (Discrete), or the continuous
   /// drive q_k = (d - m_k) delta itau_k / itau_k discretised by the scheme
-  /// (Continuous). pyslfp's `_first_order_drive`.
+  /// (Continuous). `scheme` is a one-stage scheme (a stage's family under
+  /// a multi-stage one, `dt` the stage's length); under backward Euler the
+  /// two drives are one and `prev`'s strain is not read. pyslfp's
+  /// `_first_order_drive`.
   [[nodiscard]] static std::map<int, std::vector<double>> FirstOrderDrive(
       const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
       double dt, const ViscoelasticState& prev, const ViscoelasticState& next,

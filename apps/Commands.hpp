@@ -20,7 +20,9 @@
  * loads, the tide and the sources with the rotational feedback as asked.
  * `kernel` gives the adjoint sensitivity kernels of measurements of the
  * same problems, read from the same config, its `kernels` block naming
- * the measurements and the kernels written. `tangent` gives the
+ * the measurements and the kernels written, and, with `second_order`, the
+ * kernels' derivatives along the config's `perturbation` block beside
+ * them. `tangent` gives the
  * tangent-linear run of the same problems along a direction in their
  * inputs, the config's `perturbation` block (Perturbation.hpp), written as
  * `solve`'s files, their fields first-order changes, where its `tangent`
@@ -213,6 +215,12 @@ struct KernelsBlock {
   bool total = true;
   int calibration_iterations = 20;
   double calibration_rtol = 1e-8;
+  /// `second_order`: beside each kernel, its second-order kernel, the
+  /// kernel's derivative along the direction of the config's top-level
+  /// `perturbation` block (the action of the measurement's Hessian on the
+  /// direction), by `method`; false by default, the first-order kernels
+  /// alone whatever else the config holds.
+  bool second_order = false;
 
   [[nodiscard]] bool Writes(KernelParameter parameter) const;
 };
@@ -258,9 +266,18 @@ struct CalibratedDerivative {
 /// iteration's members beside "partial"). The recording's members,
 /// `record_stride` and `trajectory`, are refused, naming the top-level
 /// `trajectory` block's. The block is refused without gravity, which has
-/// no kernels.
+/// no kernels. `second_order` (true or false) is held to the run: the
+/// second-order kernels are refused, each by name, of a calibrated
+/// run under migrating shorelines as total derivatives (the partial ones,
+/// `calibration.derivative` "partial", are built), and of a `decay_time`
+/// measurement (the fit's second derivative is not built).
 [[nodiscard]] KernelsBlock ReadKernelsBlock(
     const Json& block, const Run& run, const std::filesystem::path& directory);
+
+/// Refuses, at `kernels.second_order`, the second-order kernels of a config
+/// with no top-level `perturbation` block, the direction they are along.
+/// Every command reading the `kernels` block calls it.
+void CheckSecondOrderDirection(const Json& top, const KernelsBlock& block);
 
 /// The config of `sl3d kernel`: a run, read as `solve` reads it (the
 /// static problem or the quasi-static one, with an ocean or without,
@@ -272,6 +289,9 @@ struct KernelInput {
   Run run;
   KernelsBlock kernels;
   TrajectoryBlock trajectory;
+  /// The direction of the second-order kernels (`kernels.second_order`),
+  /// the top-level `perturbation` block; absent without them.
+  std::optional<PerturbationBlock> perturbation;
 };
 
 /// Reads a kernel config, relative paths against its directory: the run,
@@ -279,7 +299,9 @@ struct KernelInput {
 /// `checkpoint` and `restart` checked where given (ReadSolveMembers) and
 /// left unused. The members of the `kernels` block given at the top level
 /// are refused, naming it, and so is a run without gravity (`gravity`:
-/// "none"), which has no kernels.
+/// "none"), which has no kernels. With `kernels.second_order` the
+/// `perturbation` block is read (ReadPerturbationBlock) as the direction
+/// of the second-order kernels; without, it is checked and left unused.
 [[nodiscard]] KernelInput ReadKernelInput(const std::filesystem::path& config);
 
 /// Runs a kernel config and returns the summary line.
@@ -298,8 +320,9 @@ struct KernelInput {
 /// the run of the linearised equations stepped by the scheme, whose drive
 /// along a change of the relaxation times is the continuous equations'
 /// (TangentLinearSolver::Options::method). The two differ along a
-/// direction in the viscosity alone; along the forcing, the state's sea
-/// level and the moduli they are one run. `measurements` is a list as
+/// direction in the viscosity under the exponential trapezoid alone;
+/// along the forcing, the state's sea level and the moduli, and along
+/// every direction under Sdirk2, they are one run. `measurements` is a list as
 /// `kernels.measurements`, the measurements whose first-order changes the
 /// run tabulates: the config's `kernels.measurements` where the block
 /// gives none (TangentInput::measurements).
@@ -341,17 +364,9 @@ struct TangentInput {
 /// block where given (ReadKernelsBlock, the whole block held to the run as
 /// `kernel` holds it), and `output`, `checkpoint` and `restart` checked
 /// where given (ReadSolveMembers) and left unused. A run without gravity
-/// is refused, and so is the continuous method along a direction in the
-/// viscosity under a multi-stage scheme (CheckTangentMethod).
+/// is refused.
 [[nodiscard]] TangentInput ReadTangentInput(
     const std::filesystem::path& config);
-
-/// Refuses, at `tangent.method`, the one tangent-linear run the library
-/// has not built: the continuous method along a direction in the viscosity
-/// under a multi-stage scheme (Sdirk2), naming the two cures (the
-/// exponential trapezoid in `solver.scheme`, or the discrete method).
-void CheckTangentMethod(const Json& tangent, const TangentBlock& block,
-                        const PerturbationBlock& perturbation, const Run& run);
 
 /// Runs a tangent config and returns the summary line.
 [[nodiscard]] std::string RunTangent(const std::filesystem::path& config);

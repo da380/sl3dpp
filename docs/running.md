@@ -102,7 +102,11 @@ nodes.
   time nodes holds about `N/n + n` of them during the sweep, fewest near
   `n = √N` (`trajectory.record_stride`). With `trajectory.directory` the
   kept states live on disk and the sweep reads each back as it reaches it
-  (Long runs, below).
+  (Long runs, below). Second-order kernels (`kernels.second_order`) need
+  the tangent-linear run along their direction too, held in memory at
+  every node beside the kept forward states: in 3D, `N` more states'
+  internal variables whatever the stride, `2N` under Sdirk2, whose
+  tangent-linear recording keeps each step's first stage too.
 - **Huge pages.** Fresh memory is faulted in one 4 KB page at a time by the
   allocating thread. Where transparent huge pages are on request only
   (`/sys/kernel/mm/transparent_hugepage/enabled` reads `[madvise]`), glibc
@@ -136,7 +140,8 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
 - **What is distributed.** A 3D run, split over radius, one contiguous
   radial segment per rank with its threads inside: the static problem on
   lateral moduli, the runs through time, the kernels about them, by
-  either sweep, and the tangent-linear runs. A 1D run is the first rank's
+  either sweep, their second-order kernels, and the tangent-linear runs. A
+  1D run is the first rank's
   alone, the other ranks
   returning at once, and `love-numbers` refuses several ranks. `kernel`
   refuses on several ranks the 3D kernels its sweeps form on one process:
@@ -304,7 +309,10 @@ that layer controls.
 1. Read the ratio `solve` states for the run, and where τ_min is.
 2. Take the discrete adjoint for kernels (the default). It carries the
    forward run's accuracy and nothing else, at any ratio and under either
-   scheme.
+   scheme, and its second-order kernels are their exact derivatives under
+   either. The continuous method's second-order kernels are the exact
+   derivatives of its kernels under `"sdirk2"` (not under the trapezoid),
+   and converge to the discrete ones at second order (adjoints.md §1a).
 3. Keep the default, `"sdirk2"`, where the ratio is well above one or
    the forcing changes abruptly: at twice the cost of a step it was more
    accurate than the trapezoid at half the step on every case measured

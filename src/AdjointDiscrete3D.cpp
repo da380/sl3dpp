@@ -1740,6 +1740,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     derivatives.ice.solidSurfaceChangeKernels = std::move(dLayerKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
+    derivatives.ice.baseline = std::move(views.baseline);
+    derivatives.ice.rate = std::move(views.rate);
     derivatives.itauKernel3D = std::move(dItauKernel);
     derivatives.ice.momentKernels = std::move(dMomentKernels);
     derivatives.itauKernelSpherical.assign(K, std::vector<double>(nodeCount, 0.0));

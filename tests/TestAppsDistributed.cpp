@@ -18,7 +18,8 @@
 // what kernel refuses on several ranks, and tangent's 3-D runs (along the
 // ice, the viscosity and the moduli; the total derivative of a calibrated
 // run, its linearised calibration collective) over the ranks against one
-// process, a 1-D one being the first rank's alone. Rank 0 writes
+// process, a 1-D one being the first rank's alone, and kernel's
+// second-order kernels of a 3-D run against one process. Rank 0 writes
 // the outputs and compares them; every rank's verdict is reduced to rank
 // 0, which alone prints.
 
@@ -1870,6 +1871,88 @@ TEST_F(AppsOverRanks, RadialTangentIsTheFirstRanksAlone) {
             pm::ReadSurfaceFile(dir_ / "out" / "one_tangent.nc")
                 .variables.at("displacement")
                 .values);
+}
+
+TEST_F(AppsOverRanks, SecondOrderKernelsMatchOneProcess) {
+  // kernel's second-order kernels of a 3-D run over the ranks
+  // (`kernels.second_order`): about a run under a lateral viscosity and
+  // lateral moduli, along a direction in the ice, ln viscosity and the
+  // moduli at once (each rank holding the Earth's part of the direction over
+  // its own radial segment), the tangent-linear run and the second-order
+  // sweep collective. The second-order files (the ice's, the fields of the
+  // viscosity's and the moduli's) and the first-order files beside them are
+  // the one-process run's to the substructured solves' round-off, by
+  // either `kernels.method` under Sdirk2, the default scheme.
+  WriteToyModuli(dir_);
+  if (Rank() == 0) test::WriteToyChange(dir_ / "d_ice.nc", true, 0.02);
+  Barrier();
+  WriteModelFields(
+      dir_ / "d_earth.nc",
+      {{"ln_viscosity",
+        [](double r, double theta, double phi) {
+          return 0.5 + (r / 6368000.0) * std::sin(theta) * std::cos(phi);
+        }},
+       {"mu",
+        [](double, double theta, double phi) {
+          return 2e9 * std::sin(theta) * std::sin(phi);
+        }},
+       {"kappa",
+        [](double, double theta, double) { return 3e9 * std::cos(theta); }}});
+  auto body = Body();
+  const auto viscosity = std::string{"/viscosity_log.nc\"}"};
+  body.replace(body.find(viscosity), viscosity.size(),
+               viscosity + R"(, "moduli": {"file": "moduli.nc"})");
+  const auto config = [&](const std::string& name, const std::string& method) {
+    return Write(name + ".json", "{" + body + R"(,
+      "kernels": {"parameters": ["ice", "viscosity", "moduli"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+           "longitude": 10.0, "width_deg": 25.0},
+          {"type": "displacement_point", "name": "uplift", "latitude": 55.0,
+           "longitude": 10.0, "date_kyr_bp": 0.0}],
+        "output": "out/)" + name + R"(_kernels", "second_order": true,
+        "method": ")" + method + R"("},
+      "perturbation": {
+        "forcing": {"ice_change": [{"change": {"file": "d_ice.nc"}}]},
+        "model": {"viscosity": {"file": "d_earth.nc"},
+                  "moduli": {"file": "d_earth.nc"}}}})");
+  };
+  for (const std::string method : {"discrete", "continuous"}) {
+    const auto one = config("one_" + method, method);
+    const auto over = config("over_" + method, method);
+    OneProcess([&] { static_cast<void>(app::RunKernel(one)); });
+    const auto summary = app::RunKernel(over);
+    Barrier();
+    if (Rank() != 0) continue;
+    EXPECT_NE(summary.find("; and their second-order kernels along the "
+                           "perturbation's ice_change, viscosity, moduli)"),
+              std::string::npos)
+        << summary;
+    const auto mine = dir_ / "out" / ("over_" + method + "_kernels");
+    const auto theirs = dir_ / "out" / ("one_" + method + "_kernels");
+    auto second = 0.0, first = 0.0;
+    for (const auto* m : {"site", "uplift"}) {
+      const auto name = std::string{m};
+      for (const auto* suffix : {"", "_second_order"}) {
+        const auto ice = name + "_ice_kernels" + suffix + ".nc";
+        const auto eta = name + "_viscosity_kernels" + suffix + ".nc";
+        const auto moduli = name + "_moduli_kernels" + suffix + ".nc";
+        auto& worst = std::string_view{suffix}.empty() ? first : second;
+        worst = std::max({worst, SurfaceKernelDeparture(mine / ice, theirs / ice),
+                          KernelFileDeparture(mine / eta, theirs / eta),
+                          KernelFileDeparture(mine / moduli, theirs / moduli)});
+      }
+    }
+    std::cout << std::format(
+        "[second-order kernels, over the ranks, {}] second order {:.1e}, first "
+        "order {:.1e} from the one-process run\n",
+        method, second, first);
+    // measured on two and three ranks, discrete: 8.8e-11 and 3.3e-10
+    // (second order), 7.5e-10 and 3.8e-10 (first order); continuous: 4.2e-10
+    // and 2.5e-10, 2.1e-9 and 9.6e-10
+    EXPECT_LT(second, kOverRanks) << method;
+    EXPECT_LT(first, kOverRanks) << method;
+  }
 }
 
 }  // namespace

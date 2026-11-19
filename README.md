@@ -56,7 +56,9 @@ of mantle viscosity using deglacial sea level observations;
   tangent-linear runs along a direction in any input, given as the
   inputs are (`sl3d tangent`), the forward mode whose transpose the
   discrete kernels are, of a calibrated run the total derivative too;
-  and second-order adjoints (Hessian-vector products). None is taken in
+  and second-order adjoints (Hessian-vector products), which `sl3d
+  kernel` writes as the kernels' derivatives along such a direction.
+  None is taken in
   the density
   ([docs/adjoints.md](docs/adjoints.md) §13l).
 - **At scale.** OpenMP threads; a trajectory store on disk, from which the

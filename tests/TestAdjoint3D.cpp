@@ -753,12 +753,13 @@ TEST(Adjoint3D, Sdirk2LateralLogViscosityKernelAgainstFiniteDifferences) {
   EXPECT_LT(errors[1], 0.35 * errors[0]);
 }
 
-TEST(Adjoint3D, Sdirk2RefusesWhatIsNotBuilt) {
-  // About a 3D run under Sdirk2 the derivatives of the stepped map are
-  // built (TestSdirk2Derivatives). What is not, each refused by name: the
-  // continuous second-order sweep, the continuous drive of a tangent-linear
-  // run along the viscosity, and a trajectory that does not give the steps'
-  // first-stage closures.
+TEST(Adjoint3D, Sdirk2TakesBothMethodsAndRefusesATrajectoryWithoutItsStages) {
+  // About a 3D run under Sdirk2 the derivatives are built by either method
+  // (TestSdirk2Derivatives, TestSdirk2Continuous): here the continuous
+  // tangent-linear run along a change of ln viscosity is the discrete one
+  // to the coupled iteration's tolerance, and the continuous second-order
+  // sweep carries the continuous first-order kernels. What is refused, by
+  // name: a trajectory that does not give the steps' first-stage closures.
   auto scene = Scene::Make(1e21);
   const auto kyr = 1000.0 * 3.15576e7 / scene.solver.SolverScales().Time();
   const auto times = std::vector<double>{0.0, kyr, 2.0 * kyr, 3.0 * kyr};
@@ -786,33 +787,55 @@ TEST(Adjoint3D, Sdirk2RefusesWhatIsNotBuilt) {
   };
   Evolution3D evolution(
       op, scene.solver, scene.state,
-      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .coupled_rtol = 1e-12,
+       .record_stride = 1});
   const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-  // the discrete sweep and the discrete tangent-linear run are built
+  // the discrete sweep is built
   EXPECT_FALSE(AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete})
                    .FirstOrderKernels(times, measurements, &trajectory)
                    .itauKernel3D.empty());
   TangentPerturbation3D alongViscosity;
   alongViscosity.logViscosity.assign(op.Coupling().GridValueCount(), 0.1);
-  const TangentLinearSolver3D recorded(
-      evolution, {.method = AdjointMethod::Discrete, .record = true});
-  const auto tangent = recorded.Run(times, alongViscosity, &trajectory);
-  named(
-      [&] {
-        const AdjointSolver3D adjoint(evolution,
-                                      {.method = AdjointMethod::Continuous});
-        static_cast<void>(adjoint.SecondOrderKernels(
-            times, measurements, tangent, {}, trajectory));
-      },
-      "the continuous second-order sweep");
-  named(
-      [&] {
-        const TangentLinearSolver3D continuous(
-            evolution, {.method = AdjointMethod::Continuous});
-        static_cast<void>(continuous.Run(times, alongViscosity, &trajectory));
-      },
-      "the continuous tangent-linear run along the viscosity");
+  auto runs = std::map<AdjointMethod, std::vector<Evolution3D::Snapshot>>{};
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    runs[method] = TangentLinearSolver3D(evolution, {.method = method,
+                                                     .rtol = 1e-12,
+                                                     .coupled_rtol = 1e-12,
+                                                     .record = true})
+                       .Run(times, alongViscosity, &trajectory);
+  }
+  // the continuous tangent-linear run is the discrete one
+  auto diff = 0.0, size = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    const auto& a = runs[AdjointMethod::Discrete][n].relativeSeaLevelChange;
+    const auto& b = runs[AdjointMethod::Continuous][n].relativeSeaLevelChange;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
+      diff = std::max(diff, std::abs(a[i] - b[i]));
+      size = std::max(size, std::abs(a[i]));
+    }
+  }
+  EXPECT_GT(size, 0.0);
+  EXPECT_LT(diff, 1e-10 * size);
+  // the continuous second-order sweep carries the continuous kernels
+  const AdjointSolver3D continuousSweep(
+      evolution,
+      {.method = AdjointMethod::Continuous, .rtol = 1e-12, .coupled_rtol = 1e-12});
+  const auto [carried, derivatives] = continuousSweep.SecondOrderKernels(
+      times, measurements, runs[AdjointMethod::Continuous],
+      TangentLinearSolver3D::ItauOfLogViscosity(op, alongViscosity.logViscosity),
+      trajectory);
+  const auto first = continuousSweep.FirstOrderKernels(times, measurements, &trajectory);
+  auto kernelScale = 0.0, kernelGap = 0.0, derivativeScale = 0.0;
+  for (auto i = std::size_t{0}; i < first.itauKernel3D[0].size(); ++i) {
+    kernelScale = std::max(kernelScale, std::abs(first.itauKernel3D[0][i]));
+    kernelGap = std::max(kernelGap, std::abs(carried.itauKernel3D[0][i] -
+                                             first.itauKernel3D[0][i]));
+    derivativeScale =
+        std::max(derivativeScale, std::abs(derivatives.itauKernel3D[0][i]));
+  }
+  EXPECT_LT(kernelGap, 1e-10 * kernelScale);
+  EXPECT_GT(derivativeScale, 0.0);
   auto bare = trajectory;
   bare.stages.clear();
   named(

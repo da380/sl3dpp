@@ -7,8 +7,11 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <functional>
 #include <map>
+#include <memory>
 #include <random>
+#include <string>
 #include <vector>
 
 #include "KernelScene.hpp"
@@ -323,7 +326,9 @@ TEST(SecondOrderAdjoint, HessianIsSymmetricAndAdjointToTheSecondOrderRun) {
   }
 }
 
-TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
+namespace {
+
+void ContinuousConvergesToDiscrete(Scheme scheme) {
   // On a slowly relaxing mantle, along directions smooth in time in the
   // thickness, the relaxation times AND the moduli, the continuous
   // second-order adjoint's derivatives tend to the discrete ones at the
@@ -382,10 +387,8 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                                {.scheme = Scheme::ExponentialTrapezoid,
+                                {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
@@ -460,6 +463,15 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     EXPECT_LT((*gaps)[0], 0.1) << (*gaps)[0] << " " << (*gaps)[1];
     EXPECT_GT((*gaps)[0] / (*gaps)[1], 3.0) << (*gaps)[0] << " " << (*gaps)[1];
   }
+}
+
+}  // namespace
+
+TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
+  ContinuousConvergesToDiscrete(Evolution::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint, ContinuousConvergesToDiscreteUnderTheTrapezoid) {
+  ContinuousConvergesToDiscrete(Scheme::ExponentialTrapezoid);
 }
 
 TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
@@ -844,7 +856,9 @@ TEST(SecondOrderAdjoint, HessianAboutASourceDrivenRun) {
   }
 }
 
-TEST(SecondOrderAdjoint, ContinuousRowsConvergeAboutASourceDrivenRun) {
+namespace {
+
+void ContinuousRowsConvergeAboutASourceDrivenRun(Scheme scheme) {
   // The continuous second-order sweep about a run under a point source,
   // with the rotational feedback and the displacement, the potential and
   // the toroidal potential measured: its rows in the inverse relaxation
@@ -922,10 +936,8 @@ TEST(SecondOrderAdjoint, ContinuousRowsConvergeAboutASourceDrivenRun) {
     for (const auto nodes : {5, 9, 17}) {
       auto times = std::vector<double>{};
       for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-      // the exponential trapezoid stated: the continuous second order is built
-      // for the one-stage schemes
       Evolution evolution(op, setup.solver, setup.state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .record_stride = 1});
@@ -1031,7 +1043,18 @@ TEST(SecondOrderAdjoint, ContinuousRowsConvergeAboutASourceDrivenRun) {
   }
 }
 
-TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
+}  // namespace
+
+TEST(SecondOrderAdjoint, ContinuousRowsConvergeAboutASourceDrivenRun) {
+  ContinuousRowsConvergeAboutASourceDrivenRun(Evolution::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint, ContinuousRowsConvergeAboutASourceDrivenRunUnderTheTrapezoid) {
+  ContinuousRowsConvergeAboutASourceDrivenRun(Scheme::ExponentialTrapezoid);
+}
+
+namespace {
+
+void HessianAcrossAnOnset(Scheme scheme) {
   // About a run with an earthquake at a repeated node (its left limit
   // without the source, Evolution::Forcing::sourcesBefore), with
   // directions in the inverse relaxation times, the moduli and the
@@ -1117,10 +1140,8 @@ TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
     measured[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
     measured[3].displacementDual = setup.Smooth(rng, 0.9);
     measured[3].toroidalPotentialDual = setup.Smooth(rng, 0.5);
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
+                        {.scheme = scheme,
                          .rotation = RotationalFeedback::Full,
                          .rtol = 1e-12,
                          .record_stride = 1});
@@ -1196,7 +1217,7 @@ TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
       const auto times = OnsetGrid(steps, span, steps / 2);
       const auto right = static_cast<std::size_t>(steps / 2 + 1);
       Evolution evolution(slowOp, slow.solver, slow.state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .record_stride = 1});
@@ -1273,7 +1294,18 @@ TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
   }
 }
 
-TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
+}  // namespace
+
+TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
+  HessianAcrossAnOnset(Evolution::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint, HessianAcrossAnOnsetUnderTheTrapezoid) {
+  HessianAcrossAnOnset(Scheme::ExponentialTrapezoid);
+}
+
+namespace {
+
+void HessianAcrossALoadJump(Scheme scheme) {
   // About a run with a step load at a repeated node (its left limit
   // without the step, Evolution::Forcing::directLoadBefore), recorded at
   // every second node, with directions in the inverse relaxation times and
@@ -1333,10 +1365,8 @@ TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
     measured[2].potentialDual = setup.Smooth(rng, 0.7);
     measured[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
     measured[3].displacementDual = setup.Smooth(rng, 0.9);
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
+                        {.scheme = scheme,
                          .rotation = RotationalFeedback::Full,
                          .rtol = 1e-12,
                          .record_stride = 2});
@@ -1395,7 +1425,7 @@ TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
     const auto times = OnsetGrid(steps, span, steps / 2);
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
     Evolution evolution(slowOp, slow.solver, slow.state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
+                        {.scheme = scheme,
                          .rotation = RotationalFeedback::Full,
                          .rtol = 1e-12,
                          .record_stride = 1});
@@ -1439,4 +1469,135 @@ TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
     EXPECT_LT(g[2], 0.05) << what;
     EXPECT_GT(g[1] / g[2], 3.0) << what << ": " << g[1] << " " << g[2];
   }
+}
+
+}  // namespace
+
+TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
+  HessianAcrossALoadJump(Evolution::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint, HessianAcrossALoadJumpUnderTheTrapezoid) {
+  HessianAcrossALoadJump(Scheme::ExponentialTrapezoid);
+}
+
+TEST(SecondOrderAdjoint, ATangentRunOfTheOtherMethodIsRefused) {
+  // A tangent-linear run carries the method that made it on its snapshots,
+  // and the second-order sweep and the second-order run read one of their
+  // own method alone, refusing the other by name: each is the derivative of
+  // its own method's first sweep or run. Under the exponential trapezoid,
+  // where both methods are built; and on a grid of one node, which has no
+  // step, the continuous second order is taken under Sdirk2 too.
+  auto setup = Scene::Make(1e21);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  std::mt19937 rng(5);
+  Evolution* made = nullptr;
+  const auto base = MakeBase(setup, op, rng, false,
+                             Scheme::ExponentialTrapezoid, &made, nullptr);
+  const auto evolution = std::unique_ptr<Evolution>(made);
+  const auto measurements = Measurements(setup, rng, base.times.size() - 1);
+  const auto v = Direction(setup, rng, base.times.size(), false,
+                           [](double r) { return 0.3 + 0.7 * r * r; });
+  const auto word = [](AdjointMethod m) {
+    return std::string{m == AdjointMethod::Discrete
+                           ? "AdjointMethod::Discrete"
+                           : "AdjointMethod::Continuous"};
+  };
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto other = method == AdjointMethod::Discrete
+                           ? AdjointMethod::Continuous
+                           : AdjointMethod::Discrete;
+    const auto run =
+        TangentLinearSolver(*evolution,
+                            {.method = method, .rtol = 1e-12, .record = true})
+            .Run(base.times, v, &base.trajectory);
+    for (const auto& snapshot : run) {
+      ASSERT_TRUE(snapshot.tangentMethod.has_value());
+      EXPECT_EQ(*snapshot.tangentMethod, method);
+    }
+    const auto refused = [&](const std::function<void()>& call,
+                             const std::string& reader) {
+      try {
+        call();
+        ADD_FAILURE() << reader << " read a tangent-linear run by "
+                      << word(method);
+      } catch (const std::invalid_argument& error) {
+        const auto what = std::string{error.what()};
+        EXPECT_NE(what.find("the tangent-linear run is by " + word(method) +
+                            " and " + reader + " by " + word(other)),
+                  std::string::npos)
+            << what;
+      }
+    };
+    refused(
+        [&] {
+          static_cast<void>(
+              AdjointSolver(*evolution, {.method = other, .rtol = 1e-12})
+                  .SecondOrderKernels(base.times, measurements, run, v.itau,
+                                      base.trajectory));
+        },
+        "the second-order sweep (AdjointSolver::SecondOrderKernels)");
+    refused(
+        [&] {
+          static_cast<void>(
+              TangentLinearSolver(*evolution, {.method = other, .rtol = 1e-12})
+                  .RunSecondOrder(base.times, run, run,
+                                  {.itauU = v.itau, .itauV = v.itau},
+                                  &base.trajectory));
+        },
+        "the second-order run (TangentLinearSolver::RunSecondOrder)");
+    // of its own method, both read it
+    const auto [kernels, along] =
+        AdjointSolver(*evolution, {.method = method, .rtol = 1e-12})
+            .SecondOrderKernels(base.times, measurements, run, v.itau,
+                                base.trajectory);
+    EXPECT_GT(MaxAbs(along.itauKernel[0]), 0.0);
+  }
+  // a forward run's snapshots carry no method
+  const auto forward = evolution->Run(
+      base.times, [&](double) { return setup.Smooth(rng, 1.0); });
+  EXPECT_FALSE(forward.front().tangentMethod.has_value());
+
+  // one node under Sdirk2: the continuous second-order sweep and run are
+  // the discrete's, there being no step
+  Evolution once(op, setup.solver, setup.state,
+                 {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
+  const auto times = std::vector<double>{0.0};
+  const auto load = setup.Smooth(rng, 100.0 * setup.Sigma());
+  const auto trajectory = ForwardTrajectory::FromSnapshots(
+      once.Run(times, [&](double) { return load; }));
+  auto measured = std::map<std::size_t, Measurement>{};
+  measured[0].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  TangentPerturbation w;
+  w.iceThickness = {setup.Smooth(rng, 20.0 * setup.Metre())};
+  const auto& mesh = setup.material.Mesh();
+  // a hundredth of the shear modulus at the memory points (none in the
+  // fluid)
+  const auto shear = op.UnrelaxedShearAtPoints();
+  w.material.mu.assign(shear.begin(), shear.end());
+  for (auto& x : w.material.mu) x *= 0.01;
+  auto byMethod = std::map<AdjointMethod, double>{};
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto run =
+        TangentLinearSolver(once, {.method = method, .rtol = 1e-12, .record = true})
+            .Run(times, w, &trajectory);
+    const auto [kernels, along] =
+        AdjointSolver(once, {.method = method,
+                             .rtol = 1e-12,
+                             .material_kernels = true})
+            .SecondOrderKernels(times, measured, run, {}, trajectory, {},
+                                w.material);
+    byMethod[method] = VolumePairing(op.Points(), mesh, along.muKernel,
+                                     w.material.mu) +
+                       setup.Surface(along.thickness[0], w.iceThickness[0]);
+    const auto second =
+        TangentLinearSolver(once, {.method = method, .rtol = 1e-12})
+            .RunSecondOrder(times, run, run,
+                            {.materialU = w.material, .materialV = w.material},
+                            &trajectory);
+    EXPECT_EQ(second.size(), 1u);
+  }
+  EXPECT_NE(byMethod[AdjointMethod::Discrete], 0.0);
+  EXPECT_NEAR(byMethod[AdjointMethod::Continuous],
+              byMethod[AdjointMethod::Discrete],
+              1e-10 * std::abs(byMethod[AdjointMethod::Discrete]));
 }

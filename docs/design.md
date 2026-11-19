@@ -332,8 +332,9 @@ longer free, an unphysical effect.
   relaxation time or below and both are converged.
   Its derivatives are built as the one-stage schemes' are: the
   tangent-linear runs, the discrete adjoint and the discrete second-order
-  sweeps take each step stage by stage, and the continuous adjoint steps
-  by the same stages (adjoints.md §1a). Choosing between the schemes for
+  sweeps take each step stage by stage, the continuous adjoint steps by
+  the same stages, and the continuous second-order sweep steps the
+  adjoint state and its derivative together by them (adjoints.md §1a). Choosing between the schemes for
   a run and its kernels is in running.md, "Choosing a step and scheme".
 - **The recipe layer.** A step of any scheme is a list of stages, each a
   one-stage step (`StartStep` with the stage's family and length) from a
@@ -618,8 +619,9 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   `Options::method` default) and the continuous adjoint, with one result
   type; `sl3d kernel` takes the discrete by default too
   (`kernels.method`), and the tangent-linear solvers' `Options::method`
-  defaults alike, so that a second-order sweep and the tangent run it
-  reads agree unless both are stated. Both
+  defaults alike; a tangent-linear run carries its method on its
+  snapshots, and a second-order sweep or run refuses one of the other
+  method by name. Both
   converge to the same kernels at second order in the step. The discrete
   gradient is exact for the discretised problem, its error the forward
   run's own at any step; the continuous kernel is accurate once the
@@ -712,7 +714,8 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   rounding. Continuous: the second-order adjoint equations with the ocean
   functions held, the derivative state stepped with the continuous drive
   of the adjoint trajectory. A Hessian-vector product costs the forward
-  run, v's tangent-linear run and the second-order sweep. With
+  run, v's tangent-linear run and the second-order sweep; `sl3d kernel`
+  writes them as second-order kernels (`kernels.second_order`). With
   `Options::material_kernels` the material kernels and their derivatives
   along v are carried too (`KernelDerivatives::kappaKernel/muKernel`), and
   v may have a part in the moduli (`SecondOrderKernels(..., material)`),
@@ -962,14 +965,22 @@ Beyond the fixtures:
   transposes to rounding, the discrete Hessian symmetric and the
   derivative of the gradient, 1D and 3D, about frozen and migrating
   shorelines, across jumps of the forcing, under interior sources and
-  from recordings with gaps; and what is not built for it (the continuous
-  second-order sweep and its runs) refused by name. The default: the
+  from recordings with gaps. The continuous derivatives
+  (`TestSdirk2Continuous`, adjoints.md §1a): the continuous tangent-linear
+  runs, first and second order, the discrete ones to rounding (1D) and to
+  the coupled tolerance (3D); the continuous Hessian the exact derivative
+  of the continuous kernels (central differences of them at second order,
+  Richardson to 2e-8 in 1D and 7e-10 in 3D), and converging to the
+  discrete Hessian at second order as the steps halve (ratios 3.84 to
+  4.01, 1D and 3D), at first order about shorelines that move inside the
+  steps. The default: the
   drivers' options, the operator's step and the app's `solver.scheme`
   resolve Sdirk2 where none is stated, and a run that states none is the
   run that states it (`Evolution.TheDefaultSchemeIsSdirk2`, `TestApps`);
   the tests whose references are the exponential trapezoid's (the pyslfp
-  fixtures, the operator stepped by it, the continuous second order)
-  state that scheme.
+  fixtures, the operator stepped by it, the convergence of the continuous
+  tangent-linear runs to the discrete) state that scheme, and the
+  continuous derivatives' other gates run under both.
 - **Tangent-linear runs.** Linear in the loads (the run along a load
   perturbation equals the difference of two forward runs at 1e-8); the
   discrete run and the discrete adjoint exact transposes (the pairing

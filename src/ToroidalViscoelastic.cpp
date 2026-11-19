@@ -668,7 +668,9 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::FirstOrderDrive(
     const auto& deg = Deg(l);
     const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
-    const auto& d0 = prev.strain.at(l);
+    // (a backward Euler step reads no start strain: a combined stage start
+    // or a state just jumped need carry none)
+    const auto* d0Of = implicit ? nullptr : &prev.strain.at(l);
     const auto& d1 = next.strain.at(l);
     const auto& mNext = next.m.at(l);
     auto extra = std::vector<double>(mPrev.size(), 0.0);
@@ -690,7 +692,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::FirstOrderDrive(
                 extra[at + c] =
                     implicit ? dw.e[full] * dh * (mPrev[at + c] - d1[sn + c])
                              : dh * (dw.e[full] * mPrev[at + c] +
-                                     dw.alpha[full] * d0[sn + c] +
+                                     dw.alpha[full] * (*d0Of)[sn + c] +
                                      dw.beta[full] * d1[sn + c]);
               }
             } else {
@@ -698,10 +700,13 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::FirstOrderDrive(
               if (itau <= 0.0) continue;
               const auto ratio = delta / itau;
               for (auto c = 0; c < ncols; ++c) {
-                const auto q0 = (d0[sn + c] - mPrev[at + c]) * ratio;
                 const auto q1 = (d1[sn + c] - mNext[at + c]) * ratio;
-                extra[at + c] = implicit ? (1.0 - w.e[full]) * q1
-                                         : w.alpha[full] * q0 + w.beta[full] * q1;
+                if (implicit) {
+                  extra[at + c] = (1.0 - w.e[full]) * q1;
+                } else {
+                  const auto q0 = ((*d0Of)[sn + c] - mPrev[at + c]) * ratio;
+                  extra[at + c] = w.alpha[full] * q0 + w.beta[full] * q1;
+                }
               }
             }
           }

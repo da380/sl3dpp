@@ -84,17 +84,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
       !options_.initial_sea_level_held) {
     RefuseCalibratedSecondOrderKernels();
   }
-  if (IsMultiStage(evolution_->options_.scheme) &&
-      options_.method != AdjointMethod::Discrete) {
-    throw std::invalid_argument(
-        "the continuous second-order adjoint (Options::method AdjointMethod::"
-        "Continuous) is not built for Sdirk2: its derivative state's drive "
-        "is a one-stage step's. The discrete second-order adjoint "
-        "(AdjointMethod::Discrete, the default method) is the derivative of "
-        "the two-stage step's exact transpose; or state a one-stage scheme, "
-        "Scheme::ExponentialTrapezoid, in the evolution's Options::scheme, "
-        "whose default is Sdirk2");
-  }
   const auto& op = *evolution_->op_;
   const auto K = op.GetRheology().BranchCount();
   const auto values = op.Coupling().GridValueCount();
@@ -117,6 +106,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
           "strain (TangentLinearSolver3D::Options::record)");
     }
   }
+  detail::CheckTangentMethod(
+      tangent, options_.method,
+      "the second-order sweep (AdjointSolver3D::SecondOrderKernels)");
   auto ditau = itau;
   if (ditau.empty()) {
     ditau.assign(K, std::vector<double>(values, 0.0));
@@ -165,15 +157,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const auto& grid = solver.Grid();
   const auto& coupling = op.Coupling();
   const auto scheme = ev.options_.scheme;
-  if (second && IsMultiStage(scheme)) {
-    throw std::invalid_argument(
-        "the continuous second-order adjoint is not built for Sdirk2: its "
-        "derivative state's drive is a one-stage step's. The discrete "
-        "second-order adjoint (AdjointMethod::Discrete, the default method) "
-        "is built; or state a one-stage scheme, "
-        "Scheme::ExponentialTrapezoid, in the evolution's Options::scheme, "
-        "whose default is Sdirk2");
-  }
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
   const std::span<const std::vector<double>> oceanFunctions =
@@ -1342,27 +1325,38 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   // t_to+1 - c dt, where the run did not solve, between the run's
   // shorelines either side (detail::OceanFunctionWithinStep). Returns its
   // last stage's sea level (the late density at the node stepped to). A
-  // drive, a material source or a record (the second-order sweep's) is a
-  // one-stage step's.
+  // drive, a material source or a record is a one-stage step's (a
+  // zero-length step's, at an equilibrium): the second-order sweep steps
+  // the two states of a step together (jointStep, below).
+  auto stageOcean = [&](const StepRecipe& recipe, const RecipeStage& stage,
+                        std::size_t index, std::size_t to) {
+    return oceanFunctions.empty() || index + 1 == recipe.stages.size()
+               ? overrideAt(to)
+               : detail::OceanFunctionWithinStep(
+                     recipe, 1.0 - stage.c, oceanFunctions[to],
+                     theOceanFunctions.stages.at(to + 1),
+                     oceanFunctions[to + 1]);
+  };
   auto reversedStep = [&](Carried& carried, double dt, std::size_t to,
                           const std::vector<GridCoupling::TensorField>* drive,
                           const MaterialSource* source,
                           MaterialSource* record) {
     auto density = std::vector<double>{};
     const auto recipe = RecipeOf(scheme, dt);
+    if (recipe.stages.size() > 1 &&
+        (drive != nullptr || source != nullptr || record != nullptr)) {
+      throw std::logic_error(
+          "a reversed step's drive, material source or record is a "
+          "one-stage step's: the second-order sweep takes its steps "
+          "together, stage by stage");
+    }
     auto next = StepByRecipe(
         recipe, dt, carried.state,
         [&](const Viscoelastic3D::State& from, const RecipeStage& stage,
             double length, std::size_t index) {
-          const auto ocean =
-              oceanFunctions.empty() || index + 1 == recipe.stages.size()
-                  ? overrideAt(to)
-                  : detail::OceanFunctionWithinStep(
-                        recipe, 1.0 - stage.c, oceanFunctions[to],
-                        theOceanFunctions.stages.at(to + 1),
-                        oceanFunctions[to + 1]);
-          return reversedStage(carried, from, length, stage.family, to, ocean,
-                               drive, source, record, density);
+          return reversedStage(carried, from, length, stage.family, to,
+                               stageOcean(recipe, stage, index, to), drive,
+                               source, record, density);
         },
         [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
                 terms,
@@ -1374,6 +1368,69 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       record->full = fullOf(carried);
     }
     return density;
+  };
+  // The second-order sweep's reversed step to node `to`: the adjoint state
+  // and its derivative along v taken together stage by stage, the scheme
+  // applied to the pair. At each stage the derivative state's drive is the
+  // continuous first-order drive of the adjoint stage's own states and its
+  // material source the adjoint stage's end strain, full solution and
+  // decayed memory; both close under the same ocean function. Leaves the
+  // last stages' sea levels in `density` and `dDensity`.
+  auto jointStep = [&](double dt, std::size_t to, std::vector<double>& density,
+                       std::vector<double>& dDensity) {
+    const auto recipe = RecipeOf(scheme, dt);
+    // a trapezoid stage's drive reads the adjoint state's start strain (a
+    // backward Euler stage's none)
+    const bool readsStart = std::ranges::any_of(
+        recipe.stages, [](const RecipeStage& stage) {
+          return stage.family != Scheme::BackwardEuler;
+        });
+    if (readsStart) {
+      op.PrimeStrain(vs.state, ev.Columns(vs.sigma, ev.toMatDensity_),
+                     ev.Columns(vs.psi, ev.toMatPotential_));
+    }
+    auto combine =
+        [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
+                terms) { return op.StageState(terms); };
+    auto dEnds = std::vector<Viscoelastic3D::State>{};
+    auto next = StepByRecipe(
+        recipe, dt, vs.state,
+        [&](const Viscoelastic3D::State& from, const RecipeStage& stage,
+            double length, std::size_t index) {
+          const auto ocean = stageOcean(recipe, stage, index, to);
+          auto record = MaterialSource{};
+          auto end = reversedStage(vs, from, length, stage.family, to, ocean,
+                                   nullptr, nullptr,
+                                   hasMaterialV ? &record : nullptr, density);
+          if (hasMaterialV) {
+            record.strain = *end.strain;
+            record.full = op.SolveElastic(
+                end, ev.Columns(vs.sigma, ev.toMatDensity_),
+                ev.Columns(vs.psi, ev.toMatPotential_));
+          }
+          const auto drive = TangentLinearSolver3D::FirstOrderDrive(
+              op, AdjointMethod::Continuous, stage.family, length, from, end,
+              *ditau);
+          auto held = Viscoelastic3D::State{};
+          const auto& dFrom = StageStart(
+              stage, dt, ds.state,
+              std::span<const Viscoelastic3D::State>(dEnds), combine, held);
+          dEnds.push_back(reversedStage(ds, dFrom, length, stage.family, to,
+                                        ocean, &drive,
+                                        hasMaterialV ? &record : nullptr,
+                                        nullptr, dDensity));
+          op.Recycle(std::move(held));
+          return end;
+        },
+        [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
+                terms,
+            const RecipeStage&) { return combine(terms); },
+        [&](Viscoelastic3D::State&& spent) { op.Recycle(std::move(spent)); });
+    op.Recycle(std::exchange(vs.state, std::move(next)));
+    auto dNext = std::move(dEnds.back());
+    dEnds.pop_back();
+    for (auto& spent : dEnds) op.Recycle(std::move(spent));
+    op.Recycle(std::exchange(ds.state, std::move(dNext)));
   };
 
   // Under lateral moduli an instantaneous response is a coupled fixed
@@ -1690,22 +1747,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
-    auto before = Viscoelastic3D::State{};
     if (second) {
-      op.PrimeStrain(vs.state, ev.Columns(vs.sigma, ev.toMatDensity_),
-                     ev.Columns(vs.psi, ev.toMatPotential_));
-      before = vs.state;
+      jointStep(dt, n - 1, densityLate[n - 1], dDensityLate[n - 1]);
+    } else {
+      densityLate[n - 1] = reversedStep(vs, dt, n - 1, nullptr, nullptr, nullptr);
     }
-    MaterialSource record;
-    densityLate[n - 1] =
-        reversedStep(vs, dt, n - 1, nullptr, nullptr, hasMaterialV ? &record : nullptr);
     outside.late[n - 1] = lessShift(densityLate[n - 1], vs.shift);
     layer.late[n - 1] = minusLoad(vs.sigma);
     if (second) {
-      const auto drive = TangentLinearSolver3D::FirstOrderDrive(
-          op, AdjointMethod::Continuous, scheme, dt, before, vs.state, *ditau);
-      dDensityLate[n - 1] = reversedStep(ds, dt, n - 1, &drive,
-                                         hasMaterialV ? &record : nullptr, nullptr);
       dOutside.late[n - 1] = lessShift(dDensityLate[n - 1], ds.shift);
       dLayer.late[n - 1] = minusLoad(ds.sigma);
     }
@@ -1788,6 +1837,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   }
   KernelDerivatives3D derivatives;
   if (second) {
+    // the inner stages' shares grounded by their own shorelines, as the
+    // kernels' (the shorelines held)
+    const auto dStageLoads =
+        detail::ContinuousStageLoads(scheme, times, dDensityLate, dDensityEarly,
+                                     perTime, theOceanFunctions);
     std::vector<std::vector<double>> dloadDuals, dDensityLoad;
     assemble(dDensityLate, dDensityEarly, dlumps, dloadDuals, dDensityLoad);
     assemble(dOutside.late, dOutside.early, dOutside.lumps,
@@ -1796,13 +1850,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
              derivatives.ice.solidSurfaceChangeKernels, unusedDensity);
     auto views = detail::AssembleIceViews(
         C, solver.IceDensity(), times, std::move(dloadDuals),
-        std::move(dDensityLoad), {}, oceanFunctions, rhoW);
+        std::move(dDensityLoad), {}, oceanFunctions, rhoW, dStageLoads);
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
     for (auto& kernel : dTideKernels) ZeroBelowTideDegrees(kernel);
     derivatives.ice.tideKernels = std::move(dTideKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
+    derivatives.ice.baseline = std::move(views.baseline);
+    derivatives.ice.rate = std::move(views.rate);
     derivatives.ice.momentKernels = std::move(dMomentKernels);
     derivatives.itauKernel3D = std::move(dItauKernel);
     derivatives.itauKernelSpherical = spherical(derivatives.itauKernel3D);

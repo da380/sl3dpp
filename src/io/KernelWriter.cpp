@@ -173,6 +173,7 @@ std::expected<void, IoError> WriteNodeFields(
     if (!options.name.empty()) file.SetName(options.name);
     file.SetMeta("code", "sl3dpp");
     for (const auto& [key, value] : options.meta) file.SetMeta(key, value);
+    for (const auto& [key, value] : options.text) file.SetMeta(key, value);
 
     // The coupling's lmax grid, poleless Gauss-Legendre.
     const auto fileGrid = planetmodel::AngularGrid(

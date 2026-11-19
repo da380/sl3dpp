@@ -297,7 +297,8 @@ cap the band cuts off. The caps here: 8° at lmax 24 (`kernel1d`, at
 least 7.5°), 15° at lmax 12 (`kernel`, `kernel1d_lateral`, at least
 15°), 6° and 8° at lmax 32 (`kernel_static_moduli` and
 `sea_level_1d_calibrated`, at least 5.6°) and 12° at
-lmax 16 (the time-step study and `tangent1d`, at least 11.25°; 15° at
+lmax 16 (the time-step study, `tangent1d` and `kernel_second_order`,
+at least 11.25°; 15° at
 lmax 12 in `tangent3d`); the drivers'
 (`ExampleViscosityKernels3D`, `ExampleModelViscosity`,
 `ExampleSeismic`) follow the same rule at their default degrees
@@ -391,6 +392,19 @@ lmax 12 in `tangent3d`); the drivers'
   and of the present sea level over Hudson Bay, the one measurement of
   its `tangent.measurements` (a tangent config needs no `kernels` block):
   `out/tangent3d/`.
+- **`kernel_second_order.json`** (`sl3d kernel`) — the second-order
+  kernels of that deglaciation on the radial Earth (at lmax 16 and 22
+  nodes, `tangent1d`'s run) along the weak zone in the upper mantle
+  (`../data/synthetic_weak_zone.nc`, the `perturbation` block's one
+  member here): `"second_order": true` in the `kernels` block writes,
+  beside the ice and viscosity kernels of the present sea level over
+  Hudson Bay, the far-field sea level at 10 ka and the length of day,
+  each kernel's derivative along that change of ln viscosity
+  (`out/kernel_second_order/<name>_ice_kernels_second_order.nc`,
+  `<name>_viscosity_kernel_second_order.txt`): the Hessian of each
+  measurement applied to the weak zone, in the ice history and in the
+  viscosity. A `decay_time`, whose Hessian holds the second derivative of
+  its fit, is not among them.
 - **`no_ocean.json`** — the instantaneous elastic response of the
   synthetic 3D elastic Earth (`../data/synthetic_moduli.nc`, written by the
   build: the PREM-like moduli with a stiff craton and a soft ridge in the

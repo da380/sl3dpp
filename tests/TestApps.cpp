@@ -596,7 +596,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 74);
+  EXPECT_EQ(read, 75);
   // the tangent configs: tangent1d.json and tangent3d.json
   EXPECT_EQ(tangents, 2);
   // a config that states no scheme runs the default, Sdirk2; one that

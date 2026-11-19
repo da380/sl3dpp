@@ -649,7 +649,9 @@ double Cap(double theta, double phi, double colat0, double lon0, double width) {
 
 }  // namespace
 
-TEST(Distributed, DerivativesMatchTheOneProcess) {
+namespace {
+
+void DerivativesMatchTheOneProcess(Scheme scheme) {
   // The derivative machinery under mpiexec against the one process on
   // the same cuts (TestRadialRanks makes the same comparison with threads
   // for ranks): the 3D tangent-linear runs (both methods) along loads,
@@ -729,9 +731,7 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
       .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = share.cuts};
   const auto evolutionOptions =
-      // the exponential trapezoid stated: the continuous second order is built
-      // for the one-stage schemes
-      Evolution3D::Options{.scheme = Scheme::ExponentialTrapezoid,
+      Evolution3D::Options{.scheme = scheme,
                            .rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
@@ -844,6 +844,15 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
     EXPECT_LT(MaxOverRanks(worstField), 1e-9) << label;
     EXPECT_LT(MaxOverRanks(worstSecond), 1e-9) << label;
   }
+}
+
+}  // namespace
+
+TEST(Distributed, DerivativesMatchTheOneProcess) {
+  DerivativesMatchTheOneProcess(Evolution3D::Options{}.scheme);
+}
+TEST(Distributed, DerivativesMatchTheOneProcessUnderTheTrapezoid) {
+  DerivativesMatchTheOneProcess(Scheme::ExponentialTrapezoid);
 }
 
 TEST(Distributed, AcrossAJumpTheRunAndItsSweepsMatchTheOneProcess) {

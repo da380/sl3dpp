@@ -285,14 +285,17 @@ TEST(TrajectoryCursor, FirstOrderKernelsAreTheFullRecordingsAtAnyStride) {
   }
 }
 
-TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStride) {
+namespace {
+
+void SecondOrderSweepsAreTheFullRecordingsAtAnyStride(Scheme scheme) {
   // Along a direction in the thickness, the relaxation times and the
   // moduli: the tangent-linear run about each recording (the cursor
   // served forwards) and the second-order sweep about it (backwards), by
   // each method, the kernel derivatives at each stride against the full
   // recording's, and the second-order tangent run's objective along the
   // direction twice (measured: within 1.5e-11 discrete, 9.2e-11
-  // continuous; the relaxation-time kernel's derivative the farthest).
+  // continuous under the trapezoid, 1.7e-11 and 7.7e-11 under Sdirk2; the
+  // relaxation-time kernel's derivative the farthest).
   const WeakLayer weak;
   const auto& setup = weak.setup;
   std::mt19937 rng(73);
@@ -307,16 +310,14 @@ TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStride) {
   direction.material = MaterialAlong(setup, weak.op);
 
   auto run = [&](int stride) {
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution evolution(weak.op, setup.solver, setup.state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
+                        {.scheme = scheme,
                          .rtol = 1e-12, .record_stride = stride});
     return ForwardTrajectory::FromSnapshots(evolution.Run(times, forced.forcing));
   };
   const auto full = run(1);
   Evolution evolution(weak.op, setup.solver, setup.state,
-                      {.scheme = Scheme::ExponentialTrapezoid,
+                      {.scheme = scheme,
                        .rtol = 1e-12});
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     const TangentLinearSolver tangent(
@@ -362,6 +363,15 @@ TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStride) {
       }
     }
   }
+}
+
+}  // namespace
+
+TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStride) {
+  SecondOrderSweepsAreTheFullRecordingsAtAnyStride(Evolution::Options{}.scheme);
+}
+TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStrideUnderTheTrapezoid) {
+  SecondOrderSweepsAreTheFullRecordingsAtAnyStride(Scheme::ExponentialTrapezoid);
 }
 
 namespace {

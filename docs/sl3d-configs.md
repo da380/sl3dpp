@@ -945,7 +945,8 @@ record is 86 MB, 655 MiB in all. The summaries give each store's size.
 ### The perturbation block
 
 A direction in a run's inputs: what `tangent` takes the tangent-linear run
-along, and what `kernel`'s kernels pair with. The block MIRRORS THE
+along, what `kernel`'s kernels pair with, and what `kernel`'s second-order
+kernels are along (`kernels.second_order`). The block MIRRORS THE
 INPUTS. Its members are the config's own, under the same names, in the
 same file forms and units, and are read by the readers of the things they
 perturb; each gives a CHANGE of what its counterpart in the config gives.
@@ -3078,6 +3079,10 @@ run and the continuous adjoint stepped by the same stages, which damp
 its relaxation ([running.md](running.md), "Choosing a step and
 scheme").
 
+With `kernels.second_order` the program writes beside each kernel its
+second-order kernel, the kernel's derivative along the direction the
+config's `perturbation` block gives (Second-order kernels, below).
+
 With the state at the window's start the initial sea level is the
 state's; with it at the end (`"at": "end"`) it is calibrated first, as
 `solve` calibrates it. A calibrated run's initial sea level is not an
@@ -3099,6 +3104,7 @@ ones instead, the calibrated initial sea level held.
 | `kernels.calibration.derivative` | word | `"total"` | `"total"`: the initial sea level calibrated again as the parameter changes; `"partial"`: the calibrated initial sea level held |
 | `kernels.calibration.iterations` | integer >= 1 | 20 | the most sweeps for the calibration's multiplier, per measurement; running out is an error; refused beside `"partial"` |
 | `kernels.calibration.rtol` | number > 0 | 1e-8 | the multiplier's convergence: its largest change between two sweeps below this times its largest value; refused beside `"partial"` |
+| `kernels.second_order` | boolean | false | true: beside every kernel, its second-order kernel, the kernel's derivative along the top-level `perturbation` block (Second-order kernels, below); false: the first-order kernels alone, whatever else the config holds |
 
 The members of the block given at the top level (`adjoint`,
 `measurements`, `parameters`, `method`) are refused, naming the block's
@@ -3511,6 +3517,152 @@ refused then, naming the member.
   positive, or below 1e-2 of the window's inverse span). Each is the
   run's error (exit status 1), not naming the member.
 
+### Second-order kernels
+
+`"second_order": true` in the `kernels` block asks, beside every kernel
+the block names, for its SECOND-ORDER KERNEL: its derivative along the
+direction v of the config's top-level `perturbation` block (The
+perturbation block, above). A kernel is a part of the gradient of a
+measurement J in a parameter of the run (the forcing at the nodes, the
+state's sea level, the viscosity, the moduli), in that parameter's own
+units and pairing, and its second-order kernel is its derivative at
+p + epsilon v: the action of J's Hessian on v, in the kernel's parameter,
+paired as the kernel pairs. A kernel run with the block's members added to
+its inputs, epsilon times, writes the kernel files plus epsilon times the
+second-order files, to first order in epsilon: that is what the files
+mean, and what the tests hold them to, member by member (`TestAppsSecondOrder`).
+The member is false by default: a config shared with `tangent` writes the
+first-order kernels alone, its `perturbation` block checked and unused.
+
+The direction is the block's, read as `tangent` reads it: every member
+(`forcing`'s terms, `model.viscosity`'s `ln_viscosity` and
+`ln_viscosity_branch_<b>` on every rheology, `model.moduli`, `ocean`),
+1D and 3D, in the static problem and through time, with frozen or
+migrating shorelines, each member refused where `tangent` refuses it
+(The perturbation block, above). The program runs v's tangent-linear run
+about the forward run by `kernels.method` (`tangent.method` is
+`tangent`'s alone), recorded at every node, and then, per measurement,
+one second-order sweep (docs/adjoints.md §9, §11, §14), which carries the
+kernels and their derivatives along v together; the first-order files are
+written from it (the first-order sweep's to rounding). Per measurement it
+costs about two first-order sweeps, and the tangent-linear run once. That
+run's states are held in memory at every node, a 3D run's beside the
+forward run's kept states (which the trajectory store may hold on disk),
+the sweep reading them as it passes.
+
+**The files.** Beside each kernel file `<name>_<kind>.<ext>` (The kernels,
+above) is `<name>_<kind>_second_order.<ext>`, in the same format, on the
+same grid and nodes, with the same fields or columns under the same names
+and units, each holding the derivative along the direction of the field or
+column of its name:
+
+| File | What it holds |
+| --- | --- |
+| `<name>_ice_kernels_second_order.nc` | the derivatives of `thickness_dual` (with its `_before` and `jump_dual` at a jump), `rate_dual`, `thickness_baseline_dual` and `initial_sea_level_dual` (a calibrated run's total kernels: `target_sea_level_dual`, below); not `instantaneous_dual`, the distributional view's deltas, of which the sweep forms no derivative |
+| `<name>_load_kernels_second_order.nc` | the derivatives of its three fields (and their `_before` companions) |
+| `<name>_tide_kernels_second_order.txt`, `<name>_moment_kernels_second_order.txt` | the derivatives of the `dJ_` columns, the other columns as in the kernel table |
+| `<name>_viscosity_kernel_second_order.txt`, `<name>_moduli_kernel_second_order.txt` | the derivatives of `K_branch_<b>`, of `K_kappa` and `K_mu`; `r_m`, `W_m3` and the model's moduli (`kappa_Pa`, `mu_Pa`) as in the kernel table |
+| `<name>_viscosity_kernels_second_order.nc`, `<name>_moduli_kernels_second_order.nc` | the derivatives of `K_ln_eta_<b>`, `K_kappa` and `K_mu`; the metadata's pairings are these paired with the run's own lateral structure and with a uniform change of ln eta, as the kernels' are |
+
+Each kernel is in its own parameter, and its derivative is that kernel's,
+the parameter held as the kernel holds it. The radial viscosity kernel is
+in eta_b, K = -(itau_b^2 / mu_b) K_itau with K_itau the kernel in the
+branch's inverse relaxation time: along a change of the relaxation times
+(delta itau_b) or of the moduli (which moves mu_b, and eta_b with it, the
+relaxation times held) its derivative is -(itau_b^2 / mu_b) dK_itau -
+(2 itau_b delta itau_b / mu_b) K_itau + (itau_b^2 delta mu_b / mu_b^2)
+K_itau, what two kernel files a step apart along v differ by. The field
+kernels in ln eta_b are -itau_b K_itau, their derivative -(delta itau_b
+K_itau + itau_b dK_itau). By the discrete method the second-order kernels
+are the exact derivative of the discrete kernels, and the Hessian they
+give is symmetric to the solves' rounding: the second-order kernels along
+a paired with b, as the kernel files pair, are those along b paired with
+a (the tests: a tide and a change of ln eta, 1D and 3D, and two changes of
+ln eta about a calibrated run, to 2e-11). The one parameter a direction
+moves beside its own is the radial viscosity kernel's eta, which a change
+of the moduli moves with mu: that kernel's second-order kernel along a
+change of the moduli, paired with a change of ln eta, holds beside the
+Hessian's term the first-order kernel paired with -(delta mu / mu) delta
+ln eta.
+
+**The method.** By the discrete method (the default) the second-order
+kernels are the derivatives of the discrete kernels under every scheme. By
+the continuous method they are the continuous second-order sweep's (the
+second-order adjoint equations, the ocean functions held): under
+`"sdirk2"`, the default scheme, the exact derivatives of the continuous
+kernels at the run's steps, converging to the discrete method's at second
+order as the steps shorten (first order where the shorelines move inside
+the steps); under `"exponential_trapezoid"` they converge to the discrete
+method's at second order too, but are not the continuous kernels' exact
+derivatives (docs/adjoints.md §1a, §9). The static problem has no step,
+and there the two methods' second-order kernels agree to rounding.
+
+**Calibrated runs.** Of a calibrated run under migrating shorelines the
+derivatives of the total kernels, with the derivative of the
+calibration's multiplier in them, are not built, and are refused at
+`kernels.second_order`; with `"calibration": {"derivative": "partial"}`
+the second-order kernels are those of the partial kernels, the calibrated
+initial sea level held (the block's `ocean` member then a change of that
+initial sea level). Under frozen shorelines the multiplier is zero at
+every parameter and the total kernels are the partial ones: their
+second-order kernels are taken with either word, `target_sea_level_dual`'s
+zero.
+
+**Measurements.** Every measurement but `decay_time` is a linear function
+of the run's fields, and its Hessian is its kernels' derivative. A decay
+time is a nonlinear function of the run's series (the fit's), and its
+Hessian has the second derivative of the fit in it, which is not built: a
+`decay_time` beside `second_order` is refused at its `type`.
+
+**Refused**, each naming what is not built: `second_order` without a
+`perturbation` block (at `kernels.second_order`); `"lateral": true
+about a radial run (at `kernels.lateral`: the radial sweeps' lateral
+kernels have no second-order sweep; a model with lateral structure gives
+its fields' second-order kernels by its 3D sweep); the total kernels'
+second order of a calibrated migrating run; a `decay_time`. Every command
+reading the `kernels` block refuses them, so one config serves all. What a
+direction cannot be is refused at its member, as `tangent` refuses it.
+
+**Recording and ranks.** The member and the `perturbation` block are out
+of the run's hash: a run recorded into the trajectory store serves the
+second-order kernels along any direction, read back as the first-order
+sweeps read it. Over MPI ranks a 1D run is the first rank's alone; a 3D
+run's tangent-linear run and second-order sweeps are distributed as the
+first-order sweeps are, every rank holding the direction's part on its own
+radial segment, with the first-order sweeps' refusals on several ranks.
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "earth.deck"},
+  "discretisation": {"lmax": 32},
+  "times": {"start_kyr_bp": 20.0, "nodes": 41},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
+  "perturbation": {
+    "model": {"viscosity": {"file": "weak_upper_mantle.nc"}}
+  },
+  "kernels": {
+    "parameters": ["ice", "viscosity"],
+    "second_order": true,
+    "measurements": [
+      {"type": "relative_sea_level_point", "name": "fremantle",
+       "latitude": -32.05, "longitude": 115.74}
+    ],
+    "output": "kernels"
+  }
+}
+```
+
+The ice and viscosity kernels of the sea level at Fremantle
+(`fremantle_ice_kernels.nc`, `fremantle_viscosity_kernel.txt`) and their
+derivatives along a change of ln viscosity
+(`fremantle_ice_kernels_second_order.nc`,
+`fremantle_viscosity_kernel_second_order.txt`): the Hessian of the
+measurement applied to that change, in the ice history and in the
+viscosity.
+
 ### Output
 
 In `kernels.output`:
@@ -3547,6 +3699,16 @@ In `kernels.output`:
   sweeps its multiplier took, 0 under frozen shorelines) and
   `calibration_multiplier_update` (the last sweep's relative change).
   A run that does not calibrate has none of these.
+- With `kernels.second_order`, the second-order files (Second-order
+  kernels, above), each saying what it holds and along what: a surface
+  file's `second_order` (what its fields are) and `perturbation_<member>`
+  for each member of the block, described as `tangent`'s files describe
+  them, every field's `long_name` beginning "the derivative along the
+  perturbation of:", its title "second-order ..."; a table's header lines
+  `# second order: ...` and `# perturbation <member> <description>`; a
+  field file's text metadata `second_order` and `perturbation_<member>`,
+  its name "second-order ...". `measurements.txt`'s header then has a line
+  `# second_order ...` and the `# perturbation` lines.
 
 The shortest relaxation time is of the model as the run builds it: every
 branch's time (a Burgers body's faster, a prony deck's shortest) at
@@ -3561,8 +3723,10 @@ closing parenthesis with `kernels.lateral` true; before that, of a
 calibrated run, `; total derivatives, the initial sea level calibrated
 again[, the multiplier in at most <n> sweeps]`, the sweeps the most a
 measurement took and given under migrating shorelines, or `; partial
-derivatives, the calibrated initial sea level held`), the first two as in
-`solve`'s summary; for a continuous kernel through time `<method>
+derivatives, the calibrated initial sea level held`; and last, with
+`kernels.second_order`, `; and their second-order kernels along the
+perturbation's <members>`, the members the block's by name as `tangent`'s
+summary gives them), the first two as in `solve`'s summary; for a continuous kernel through time `<method>
 adjoint` is followed by `, its longest step <r> times the shortest
 relaxation time (<t> <unit>, [branch <b>, ]at <d> km depth in layer <l>,
 <top> to <bottom> km deep[, at latitude <lat>, longitude <lon>])`, the
@@ -3772,7 +3936,8 @@ of which `kernel`'s discrete adjoint is the transpose (docs/adjoints.md
 method, `"discrete"`) paired with the perturbation are the change the
 tangent-linear run gives it, to the solves' rounding. With `"continuous"`
 the run is the continuous one (The method, below), which differs from it
-along a direction in the viscosity alone. With the shorelines held, the run is exact
+along a direction in the viscosity alone, and under the exponential
+trapezoid alone. With the shorelines held, the run is exact
 while no cell's flotation flips between the run and the run moved along
 the direction; a direction in the forcing of a run under frozen
 shorelines is exact at any size, the problem being linear in it.
@@ -3886,21 +4051,21 @@ config are a check of each other, and the tests hold them to rounding.
   the continuous equations, by the memory's relaxation rate over the step
   ((d - m_b) delta itau_b / itau_b, stepped by the scheme), where the
   discrete run differentiates the step's own weights in the relaxation
-  time. It converges to the discrete run, and both to the derivative of
-  the continuous problem, as the steps shorten against the relaxation
-  times, at the order of the step (second, under the exponential
-  trapezoid); at a finite step it is neither the derivative of the stepped
-  run nor the exact transpose of `kernel`'s continuous kernels.
+  time. Under `"sdirk2"`, whose stages are backward Euler steps, the two
+  drives are one (docs/adjoints.md §1a) and the continuous run is the
+  discrete run, to rounding, along every direction. Under
+  `"exponential_trapezoid"` it converges to the discrete run, and both to
+  the derivative of the continuous problem, as the steps shorten against
+  the relaxation times, at the order of the step (second); at a finite
+  step it is then neither the derivative of the stepped run nor the exact
+  transpose of `kernel`'s continuous kernels.
 
 The two differ along a direction in the viscosity
-(`perturbation.model.viscosity`) alone. Along the forcing, the state's
-sea level and the moduli (whose change holds the relaxation times, and
-with them the step's weights) the two are one run, and `"continuous"`
-gives the discrete run's files to rounding. The continuous run along a
-direction in the viscosity is built for the one-stage scheme and is
-refused at `tangent.method` under `"sdirk2"`, the default scheme: state
-`"scheme": "exponential_trapezoid"` in the `solver` block, or take the
-discrete method.
+(`perturbation.model.viscosity`) under the exponential trapezoid alone.
+Along the forcing, the state's sea level and the moduli (whose change
+holds the relaxation times, and with them the step's weights), and along
+every direction under `"sdirk2"`, the two are one run, and
+`"continuous"` gives the discrete run's files to rounding.
 
 ### Calibrated runs
 
@@ -3964,15 +4129,13 @@ measurements' first-order changes in <table>: <name> <change> <unit>,
 Named where they are refused: the tangent-linear run of a run without
 gravity; a direction of the state's ice (`perturbation.ocean.ice`); a
 direction in the parameters a prony or burgers deck or `model.burgers`
-states (the branches' viscosities are the directions built); the
-continuous run along a direction in the viscosity under the two-stage
-scheme; a lateral direction of the viscosity or the moduli about
-a radial run; a change of the moduli in an elastic element a 3D run
+states (the branches' viscosities are the directions built); a lateral
+direction of the viscosity or the moduli about a radial run; a change of the moduli in an elastic element a 3D run
 carries no lateral structure in; a direction that jumps where the run's
 forcing does not; exchange tables and the response inside the body of a
 tangent-linear run. The second-order kernels (a kernel's change along a
-direction) are written by no command; the library has them
-(docs/adjoints.md §9, §11, §14).
+direction) are `kernel`'s, along the same block (kernel, Second-order
+kernels).
 
 ### Examples
 

@@ -76,6 +76,9 @@ run kernel kernel_static_moduli.json
 run kernel tangent1d.json
 run tangent tangent1d.json
 run tangent tangent3d.json
+# the second-order kernels: beside each kernel of the deglaciation on the
+# radial Earth, its derivative along the weak zone of the upper mantle
+run kernel kernel_second_order.json
 # solve records the post-seismic run into its trajectory store (a store a
 # former run_all.sh left complete is the run's, and kept), and kernel sweeps
 # from the store without running it again

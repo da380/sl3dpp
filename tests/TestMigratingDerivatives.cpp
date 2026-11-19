@@ -127,7 +127,9 @@ std::vector<std::vector<double>> Thinning(const MarineCap& cap,
 
 // -- an ice change at the first node, 1D ------------------------------------
 
-TEST(MigratingDerivatives, AStartWithAnIceChange) {
+namespace {
+
+void AStartWithAnIceChange(Scheme scheme) {
   // The marine cap's background state, and an ice history at 85% of its
   // cap at the first node, thinning to 35% by the end, with no other
   // forcing: the run's start is the nonlinear solve under the ice change
@@ -173,9 +175,7 @@ TEST(MigratingDerivatives, AStartWithAnIceChange) {
   rising[0].assign(rising[0].size(), 0.0);
   const auto deltaSea = setup.Smooth(rng, 0.1 * setup.Metre());
   const auto ditau = setup.DeltaItau(0.1);
-  // the exponential trapezoid stated: the continuous tangent-linear run along
-  // the relaxation times taken here is built for the one-stage schemes
-  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
+  const Evolution::Options options{.scheme = scheme,
                                    
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
 
@@ -306,6 +306,15 @@ TEST(MigratingDerivatives, AStartWithAnIceChange) {
   EXPECT_NEAR(fd.richardson, discrete, 1e-6 * std::abs(discrete));
   EXPECT_NEAR(paired, discrete, 1e-8 * std::abs(discrete));
   EXPECT_LT(Gap(continuous, discrete), 0.2);
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, AStartWithAnIceChange) {
+  AStartWithAnIceChange(Evolution::Options{}.scheme);
+}
+TEST(MigratingDerivatives, AStartWithAnIceChangeUnderTheTrapezoid) {
+  AStartWithAnIceChange(Scheme::ExponentialTrapezoid);
 }
 
 TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange) {
@@ -550,7 +559,9 @@ std::vector<std::vector<double>> Thinning3D(const std::vector<double>& ice0,
 
 }  // namespace
 
-TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
+namespace {
+
+void AStartWithAnIceChange3D(Scheme scheme) {
   // The 1D solved-start gate under lateral viscosity: a wider marine cap
   // at 85% at the first node, thinning to 55%, no other forcing, four
   // nodes over 10 kyr. The 3D tangent along a thickness direction non-zero at
@@ -582,9 +593,7 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
   auto rising = deltaIce;
   rising[0].assign(rising[0].size(), 0.0);
   const auto deltaSea = scene.Smooth(rng, 0.1 * scene.Metre());
-  // the exponential trapezoid stated: the continuous tangent-linear run along
-  // the log viscosity taken here is built for the one-stage schemes
-  const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
+  const Evolution3D::Options options{.scheme = scheme,
                                      .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .max_nonlinear_iterations = 200,
@@ -724,6 +733,15 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
   EXPECT_NEAR(fd.richardson, discrete, 1e-6 * std::abs(discrete));
   EXPECT_NEAR(discreteKernels[4], discrete, 1e-8 * std::abs(discrete));
   EXPECT_LT(Gap(continuous, discrete), 0.2);
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
+  AStartWithAnIceChange3D(Evolution3D::Options{}.scheme);
+}
+TEST(MigratingDerivatives, AStartWithAnIceChange3DUnderTheTrapezoid) {
+  AStartWithAnIceChange3D(Scheme::ExponentialTrapezoid);
 }
 
 namespace {
@@ -997,8 +1015,10 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
   measurements[1].displacementDual = setup.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[nodes - 1].tangentialPotentialDual = setup.Smooth(rng, 0.6);
-  // the exponential trapezoid stated: the continuous tangent-linear run along
-  // the relaxation times taken here is built for the one-stage schemes
+  // the exponential trapezoid stated: the difference steps here flip no
+  // cell of this run under it, while under Sdirk2 the run moved along the
+  // relaxation times by 0.004 flips one at node 1 (the differences then a
+  // Richardson gap of 0.28 from the discrete tangent)
   const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
                                    
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
@@ -1191,9 +1211,13 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun) {
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].tangentialPotentialDual = gTangential;
-    // the exponential trapezoid stated: the continuous second-order sweep taken
-    // here, and the continuous tangent-linear run along the relaxation times it
-    // reads, are built for the one-stage schemes
+    // the exponential trapezoid stated: its two sweeps sample the run's
+    // shorelines alike, at the nodes. Under Sdirk2 the continuous sweep's
+    // inner stages fall between the run's solves, cells flip inside steps
+    // here, and the gaps fall erratically (docs/adjoints.md §1a): the
+    // first-order moment kernel's 2.6e-3, 2.8e-3, 5.8e-4, 3.7e-4, 2.6e-4 and
+    // 4.6e-5 at 5 to 129 nodes, the second-order derivatives' 6.1e-3,
+    // 1.6e-3, 4.3e-4, 1.0e-4, 8.3e-5 and 1.5e-5
     Evolution evolution(op, setup.solver, state,
                         {.scheme = Scheme::ExponentialTrapezoid,
                          .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
@@ -1368,7 +1392,9 @@ const auto kRadial = [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::
 
 }  // namespace
 
-TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
+namespace {
+
+void TheViscosityAndTheModuliAboutAForcedRun3D(Scheme scheme) {
   // The 1D forced gate under lateral viscosity, four nodes over 10 kyr, a
   // wide marine cap melting from the background's to 55%: the discrete 3D
   // tangent along a lateral log-viscosity direction and a lateral
@@ -1398,9 +1424,7 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
   measurements[1].displacementDual = scene.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
-  // the exponential trapezoid stated: the continuous tangent-linear run along
-  // the log viscosity taken here is built for the one-stage schemes
-  const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
+  const Evolution3D::Options options{.scheme = scheme,
                                      .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .max_nonlinear_iterations = 200,
@@ -1547,7 +1571,18 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
   EXPECT_NEAR(uw + uvTerm, forward, 1e-8 * std::abs(forward));
 }
 
-TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
+}  // namespace
+
+TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
+  TheViscosityAndTheModuliAboutAForcedRun3D(Evolution3D::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3DUnderTheTrapezoid) {
+  TheViscosityAndTheModuliAboutAForcedRun3D(Scheme::ExponentialTrapezoid);
+}
+
+namespace {
+
+void TheContinuousSweepsAboutAForcedRun3D(Scheme scheme) {
   // The 1D continuous forced gate under lateral viscosity (1e22 Pa s
   // mantle), one problem at 4 and 7 nodes over the 10 kyr: the continuous
   // 3D sweep's kernels of every forcing, its log-viscosity and moduli
@@ -1587,11 +1622,8 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].displacementDual = gDisp;
-    // the exponential trapezoid stated: the continuous second-order sweep taken
-    // here, and the continuous tangent-linear run along the relaxation times it
-    // reads, are built for the one-stage schemes
     Evolution3D evolution(op, scene.solver, state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .max_nonlinear_iterations = 200,
@@ -1684,6 +1716,15 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
     EXPECT_LT(coarse[q], q == kHessian ? 0.5 : 0.2) << names[q];
     EXPECT_GT(coarse[q] / fine[q], 2.0) << names[q];
   }
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
+  TheContinuousSweepsAboutAForcedRun3D(Evolution3D::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3DUnderTheTrapezoid) {
+  TheContinuousSweepsAboutAForcedRun3D(Scheme::ExponentialTrapezoid);
 }
 
 // -- a tide about a migrating run ---------------------------------------------
@@ -1975,7 +2016,9 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRunUnderTheTrapezoid) {
   TheTideAboutAForcedRun(Scheme::ExponentialTrapezoid);
 }
 
-TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
+namespace {
+
+void TheContinuousTideKernelsAboutAForcedRun(Scheme scheme) {
   // About the forced migrating run with a tide (1e22 Pa s mantle), at 5
   // and 9 nodes over the 10 kyr: the continuous sweep's tide kernels, and
   // the continuous second-order sweep's derivatives of them along the
@@ -2016,11 +2059,8 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
-    // the exponential trapezoid stated: the continuous second-order sweep taken
-    // here, and the continuous tangent-linear run along the relaxation times it
-    // reads, are built for the one-stage schemes
     Evolution evolution(op, setup.solver, state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
+                        {.scheme = scheme,
                          .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     auto forcing = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
     forcing.tide = TideField(times, tides);
@@ -2059,6 +2099,15 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
   EXPECT_GT(coarse.first / fine.first, 2.0);
   EXPECT_LT(coarse.second, 0.2);
   EXPECT_GT(coarse.second / fine.second, 2.0);
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
+  TheContinuousTideKernelsAboutAForcedRun(Evolution::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRunUnderTheTrapezoid) {
+  TheContinuousTideKernelsAboutAForcedRun(Scheme::ExponentialTrapezoid);
 }
 
 namespace {
@@ -2251,7 +2300,9 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3DUnderTheTrapezoid) {
   TheTideAboutAForcedRun3D(Scheme::ExponentialTrapezoid);
 }
 
-TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
+namespace {
+
+void TheContinuousTideKernelsAboutAForcedRun3D(Scheme scheme) {
   // The 1D continuous tide gate under lateral viscosity (1e22 Pa s
   // mantle), at 4 and 7 nodes over the 10 kyr, on one process: the
   // continuous 3D sweep's tide kernels, and the continuous 3D second-order
@@ -2288,11 +2339,8 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].displacementDual = gDisp;
-    // the exponential trapezoid stated: the continuous second-order sweep taken
-    // here, and the continuous tangent-linear run along the relaxation times it
-    // reads, are built for the one-stage schemes
     Evolution3D evolution(op, scene.solver, state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .max_nonlinear_iterations = 200,
@@ -2339,6 +2387,15 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
   EXPECT_GT(coarse.first / fine.first, 2.0);
   EXPECT_LT(coarse.second, 0.5);
   EXPECT_GT(coarse.second / fine.second, 2.0);
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
+  TheContinuousTideKernelsAboutAForcedRun3D(Evolution3D::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3DUnderTheTrapezoid) {
+  TheContinuousTideKernelsAboutAForcedRun3D(Scheme::ExponentialTrapezoid);
 }
 
 namespace {

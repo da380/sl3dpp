@@ -2301,14 +2301,16 @@ TEST_F(TangentTest, OneConfigServesSolveKernelAndTangent) {
     ExpectRefused(run, bad, "perturbation.model.deck",
                   "is not a perturbation's member");
   }
-  // the continuous run along the viscosity is not built for the two-stage
-  // scheme the config steps by, whichever command reads the blocks
-  const auto badTangent = config({.name = "bad_tangent", .perturbation = both,
+  // the continuous run along the viscosity under the two-stage scheme the
+  // config steps by: every command reads the blocks, and the tangent-linear
+  // run is taken by that method
+  const auto continuous = config({.name = "continuous", .perturbation = both,
                                   .tangent = R"(, "method": "continuous")"});
   for (const auto& run : {app::RunSolve, app::RunKernel, app::RunTangent}) {
-    ExpectRefused(run, badTangent, "tangent.method",
-                  "is not built for the two-stage scheme");
+    static_cast<void>(run(continuous));
   }
+  EXPECT_EQ(std::get<std::string>(Out("continuous_tangent").meta.at("tangent_method")),
+            "continuous");
 }
 
 TEST_F(TangentTest, TheStaticProblemOnLateralModuli) {
@@ -2606,15 +2608,16 @@ TEST_F(TangentTest, RefusesWhatItCannotDo) {
                "method": "exact"})",
            .blocks = false},
           "tangent.method", "exact");
-  // the continuous run along the viscosity under the default scheme
-  refused({.name = "continuous_sdirk2",
-           .perturbation = of(R"("model": {"viscosity": {"file": "d_radial.nc"}})"),
-           .tangent = R"("tangent": {"output": {"surface": "out/x_tangent.nc"},
+  // the continuous run along the viscosity under the default scheme is
+  // built, and taken
+  EXPECT_NE(app::RunTangent(config(
+                {.name = "continuous_sdirk2",
+                 .perturbation = of(R"("model": {"viscosity": {"file": "d_radial.nc"}})"),
+                 .tangent = R"("tangent": {"output": {"surface": "out/x_tangent.nc"},
                "method": "continuous"})",
-           .blocks = false},
-          "tangent.method",
-          "state the one-stage scheme in the `solver` block (`scheme`: "
-          "\"exponential_trapezoid\"), or take the discrete method");
+                 .blocks = false}))
+                .find("(the continuous tangent-linear run along "),
+            std::string::npos);
   refused({.name = "other_member",
            .perturbation = of(R"("ocean": {"sea_level": {"file": "static.nc"}})")},
           "perturbation.ocean.sea_level",
@@ -3283,9 +3286,10 @@ TEST_F(TangentTest, TheContinuousMethodIsTheDiscreteButAlongTheViscosity) {
   // the continuous equations' run and converges to the discrete one at the
   // scheme's second order: their gap falls by about four as the steps
   // halve (250, 125 and 62.5 yr against the ball's relaxation time of 190
-  // yr). Under Sdirk2 it is refused (RefusesWhatItCannotDo). The
-  // measurements are the `kernels` block's where the `tangent` block
-  // lists none, and its own where it does.
+  // yr). Under Sdirk2, whose stages are backward Euler's, it is the
+  // discrete run along the viscosity too, to rounding, at a step and its
+  // halving (500 and 250 yr). The measurements are the `kernels` block's
+  // where the `tangent` block lists none, and its own where it does.
   const auto deck = Write("ball.deck", BallDeck());
   const auto model = ModelOf(deck);
   WriteToyHistory(dir_ / "history.nc");
@@ -3365,6 +3369,23 @@ TEST_F(TangentTest, TheContinuousMethodIsTheDiscreteButAlongTheViscosity) {
     }
   }
 
+  // -- the viscosity under Sdirk2: one run by either method
+  for (const auto nodes : {5, 9}) {
+    const auto tag = std::format("eta_sdirk2_{}", nodes);
+    const auto discrete = ran({.name = tag + "_d", .perturbation = kViscosity,
+                               .method = "discrete", .nodes = nodes});
+    const auto continuous = ran({.name = tag + "_c", .perturbation = kViscosity,
+                                 .method = "continuous", .nodes = nodes});
+    const auto apart = DepartureOf(discrete, continuous);
+    std::cout << std::format(
+        "[tangent, continuous against discrete, ln viscosity, sdirk2, {} "
+        "nodes] {:.3e} apart\n",
+        nodes, apart);
+    RecordProperty(tag + "_gap", std::format("{:.3e}", apart));
+    EXPECT_GT(MaxAbs(discrete.variables.at("displacement").values), 0.0);
+    EXPECT_LT(apart, 1e-9) << tag;
+  }
+
   // -- the viscosity under the trapezoid: converging with the step
   auto gaps = std::vector<double>{};
   for (const auto nodes : {9, 17, 33}) {
@@ -3429,9 +3450,11 @@ TEST_F(TangentTest, In3DTheContinuousMethodIsTheDiscreteButAlongTheViscosity) {
   // lateral viscosity and lateral moduli, frozen shorelines, as the 1-D
   // run's above: along the ice and the moduli (lateral changes of each)
   // the continuous run is the discrete one under both schemes, to
-  // rounding; along a lateral change of ln viscosity, under the
-  // exponential trapezoid, it converges to the discrete one at the
-  // scheme's second order as the steps halve (250, 125 and 62.5 yr).
+  // rounding; along a lateral change of ln viscosity, under Sdirk2, too,
+  // to the coupled iteration's tolerance, at a step and its halving (500
+  // and 250 yr), and under the exponential trapezoid it converges to the
+  // discrete one at the scheme's second order as the steps halve (250, 125
+  // and 62.5 yr).
   const auto deck = Write("ball.deck", BallDeck());
   const auto model = ModelOf(deck);
   WriteToyHistory(dir_ / "history.nc");
@@ -3508,6 +3531,25 @@ TEST_F(TangentTest, In3DTheContinuousMethodIsTheDiscreteButAlongTheViscosity) {
       EXPECT_GT(MaxAbs(discrete.variables.at("displacement").values), 0.0);
       EXPECT_LT(apart, 1e-12) << tag;
     }
+  }
+
+  // -- the viscosity under Sdirk2: one run by either method
+  for (const auto nodes : {5, 9}) {
+    const auto tag = std::format("eta_sdirk2_{}", nodes);
+    const auto discrete =
+        ran({.name = tag + "_d", .perturbation = kViscosity,
+             .method = "discrete", .scheme = "sdirk2", .nodes = nodes});
+    const auto continuous =
+        ran({.name = tag + "_c", .perturbation = kViscosity,
+             .method = "continuous", .scheme = "sdirk2", .nodes = nodes});
+    const auto apart = DepartureOf(discrete, continuous);
+    std::cout << std::format(
+        "[tangent, 3-D, continuous against discrete, ln viscosity, sdirk2, "
+        "{} nodes] {:.3e} apart\n",
+        nodes, apart);
+    RecordProperty(tag + "_gap", std::format("{:.3e}", apart));
+    EXPECT_GT(MaxAbs(discrete.variables.at("displacement").values), 0.0);
+    EXPECT_LT(apart, 1e-9) << tag;
   }
 
   // -- the viscosity under the trapezoid: converging with the step

@@ -76,6 +76,15 @@ enum class Scheme {
   Sdirk2
 };
 
+/// The two methods of a stepped run's derivatives (Adjoint.hpp,
+/// TangentLinear.hpp): Discrete, the derivatives of the stepped map itself,
+/// the scheme's weights differentiated in the relaxation times; and
+/// Continuous, the continuous equations' derivatives stepped by the scheme.
+/// A tangent-linear run's snapshots carry the method that made it
+/// (Evolution::Snapshot::tangentMethod), so that what reads it is of the
+/// same method.
+enum class AdjointMethod { Continuous, Discrete };
+
 /// The (e, alpha, beta) of one node and branch; also carries the
 /// h-derivatives when asked for them.
 struct TrapezoidWeights {

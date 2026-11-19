@@ -66,6 +66,8 @@ struct KernelFileOptions {
   std::string name = {};
   /// Numeric meta_<key> attributes, for a reader's cross-checks.
   std::map<std::string, double> meta = {};
+  /// Text meta_<key> attributes, what the fields are said beside them.
+  std::map<std::string, std::string> text = {};
 };
 
 /// Any scalar field over the memory nodes to write: a value per grid

@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/detail/StepStages3D.hpp"
@@ -271,7 +272,10 @@ std::vector<GridCoupling::TensorField> TangentLinearSolver3D::FirstOrderDrive(
   const auto& coupling = op.Coupling();
   const auto values = coupling.GridValueCount();
   const auto K = prev.m.size();
-  const auto& d0 = StrainOf(prev, "the trajectory's states");
+  // (a backward Euler step reads no start strain: a combined stage start
+  // or a state just jumped need carry none)
+  const auto* d0Of =
+      implicit ? nullptr : &StrainOf(prev, "the trajectory's states");
   const auto& d1 = StrainOf(next, "the trajectory's states");
   auto out = std::vector<GridCoupling::TensorField>{};
   for (auto k = std::size_t{0}; k < K; ++k) {
@@ -292,6 +296,7 @@ std::vector<GridCoupling::TensorField> TangentLinearSolver3D::FirstOrderDrive(
           }
           extra.r[i] = f * (mPrev.r[i] - d1.r[i]);
         } else {
+          const auto& d0 = *d0Of;
           const auto dw = ExponentialTrapezoidWeightDerivatives(h);
           for (auto c = 0; c < 2; ++c) {
             extra.c[c][i] = dh * (dw.e * mPrev.c[c][i] + dw.alpha * d0.c[c][i] +
@@ -310,6 +315,7 @@ std::vector<GridCoupling::TensorField> TangentLinearSolver3D::FirstOrderDrive(
           }
           extra.r[i] = f * (d1.r[i] - mNext.r[i]);
         } else {
+          const auto& d0 = *d0Of;
           const auto w = ExponentialTrapezoidWeights(h);
           for (auto c = 0; c < 2; ++c) {
             extra.c[c][i] = ratio * (w.alpha * (d0.c[c][i] - mPrev.c[c][i]) +
@@ -940,17 +946,6 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (!ditau.empty()) CheckTrajectory(trajectory, nodes);
   const bool hasMaterial = !direction.material.Empty();
   if (hasMaterial) CheckTrajectory(trajectory, nodes);
-  if (IsMultiStage(scheme) && options_.method == AdjointMethod::Continuous &&
-      !ditau.empty()) {
-    throw std::invalid_argument(
-        "the continuous tangent-linear drive of a direction in the "
-        "relaxation times (Options::method AdjointMethod::Continuous) is "
-        "not built for Sdirk2: it serves the continuous second-order sweep, "
-        "which is not built for it either. The discrete run (AdjointMethod::"
-        "Discrete, the default method) steps by the scheme's stages; or "
-        "state a one-stage scheme, Scheme::ExponentialTrapezoid, in the "
-        "evolution's Options::scheme, whose default is Sdirk2");
-  }
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();
@@ -1071,15 +1066,17 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
   const auto K = op.GetRheology().BranchCount();
   const auto values = op.Coupling().GridValueCount();
 
+  // about a state calibrated under migrating shorelines the run holds the
+  // initial sea level, which the calibrated run's own does not
+  if (ev.Calibrated() && !oceanFunctions.nodes.empty() &&
+      !options_.initial_sea_level_held) {
+    RefuseCalibratedSecondOrderRun();
+  }
   CheckTimes(times);
-  if (IsMultiStage(scheme) && !discrete) {
-    throw std::invalid_argument(
-        "the continuous second-order tangent-linear run (Options::method "
-        "AdjointMethod::Continuous) is not built for Sdirk2: its drive is a "
-        "one-stage step's. The discrete run (AdjointMethod::Discrete, the "
-        "default method) steps by the scheme's stages; or state a one-stage "
-        "scheme, Scheme::ExponentialTrapezoid, in the evolution's "
-        "Options::scheme, whose default is Sdirk2");
+  for (const auto run : {tangentU, tangentV}) {
+    detail::CheckTangentMethod(
+        run, options_.method,
+        "the second-order run (TangentLinearSolver3D::RunSecondOrder)");
   }
   // the tangent runs recorded at every node with their strains and, under
   // a multi-stage scheme, at every inner stage
@@ -1559,6 +1556,9 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     record(node, response, info);
   }
   op.ReleaseScratch();
+  // the method the run is by, which a second-order sweep or run reading it
+  // must share (detail::CheckTangentMethod)
+  for (auto& snapshot : snapshots) snapshot.tangentMethod = options_.method;
   return snapshots;
 }
 

@@ -323,10 +323,10 @@ double Pairing(const Scene& scene, const GridCoupling& coupling,
 }  // namespace
 
 /// With delta = 0 at the GLL points the 3D second-order sweep's kernels
-/// and derivatives are the 1D second-order sweep's by the same method: the
-/// thickness views and the spherical reductions of the itau kernel and
-/// its derivative, along a direction angle-uniform in itau.
-void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
+/// and derivatives are the 1D second-order sweep's by the same method and
+/// scheme: the thickness views and the spherical reductions of the itau
+/// kernel and its derivative, along a direction angle-uniform in itau.
+void ZeroLateralMatchesThe1D(AdjointMethod method, double tol, Scheme scheme) {
   auto scene = Scene::Make(1e21);
   std::mt19937 rng(3);
   auto times = std::vector<double>{};
@@ -366,11 +366,6 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
   // 1D.
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
-  // the continuous second order is built for the one-stage schemes: the
-  // exponential trapezoid stated for it, the default scheme for the discrete
-  const auto scheme = method == AdjointMethod::Continuous
-                          ? Scheme::ExponentialTrapezoid
-                          : Evolution::Options{}.scheme;
   Evolution evolution1(op1, scene.solver, scene.state,
                        {.scheme = scheme,
                         .rotation = RotationalFeedback::None,
@@ -485,11 +480,14 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
 }
 
 TEST(SecondOrderAdjoint3D, ZeroLateralMatchesThe1DSweep) {
-  ZeroLateralMatchesThe1D(AdjointMethod::Continuous, 1e-6);
+  ZeroLateralMatchesThe1D(AdjointMethod::Continuous, 1e-6, Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, ZeroLateralMatchesThe1DSweepUnderTheTrapezoid) {
+  ZeroLateralMatchesThe1D(AdjointMethod::Continuous, 1e-6, Scheme::ExponentialTrapezoid);
 }
 
 TEST(SecondOrderAdjoint3D, DiscreteZeroLateralMatchesThe1DDiscreteSweep) {
-  ZeroLateralMatchesThe1D(AdjointMethod::Discrete, 1e-7);
+  ZeroLateralMatchesThe1D(AdjointMethod::Discrete, 1e-7, Evolution3D::Options{}.scheme);
 }
 
 TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRun) {
@@ -541,8 +539,13 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
                                   [&, eps](double r, double theta, double phi) {
                                     return baseDelta(r, theta, phi) + eps * p(theta, phi);
                                   });
-      // the exponential trapezoid stated: the continuous second order is built
-      // for the one-stage schemes
+      // the exponential trapezoid stated: its continuous Hessian differs
+      // from the derivative of the continuous kernels at second order in
+      // the step, the gap the differences below hold to fall with it. Under
+      // Sdirk2 the Hessian is that derivative, and the gap is the
+      // difference step's own error, 8.3e-5 and 9.0e-5 at 9 and 17 nodes
+      // (the asymmetry 1.3e-3 and 3.0e-4, the gap to the second-order run
+      // 1.8e-2 and 4.5e-3); TestSdirk2Continuous gates it there
       *evOut = new Evolution3D(
           **opOut, scene.solver, scene.state,
           {.scheme = Scheme::ExponentialTrapezoid,
@@ -940,7 +943,9 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderRotation) {
   DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback::Full);
 }
 
-TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
+namespace {
+
+void ContinuousMaterialHessianConverges(Scheme scheme) {
   // With lateral structure on and lateral directions in the thickness,
   // the log viscosity and the moduli in both u and w, the continuous
   // second-order sweep's derivatives (the material kernels' included)
@@ -993,11 +998,9 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = Scheme::ExponentialTrapezoid,
+        {.scheme = scheme,
          .rotation = RotationalFeedback::Full,
          .rtol = 1e-12,
          .coupled_rtol = 1e-12,
@@ -1086,6 +1089,15 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
     EXPECT_LT((*gaps)[1], (*gaps)[0]) << (*gaps)[0] << " " << (*gaps)[1];
     std::cout << "gap " << (*gaps)[0] << " -> " << (*gaps)[1] << '\n';
   }
+}
+
+}  // namespace
+
+TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
+  ContinuousMaterialHessianConverges(Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderTheTrapezoid) {
+  ContinuousMaterialHessianConverges(Scheme::ExponentialTrapezoid);
 }
 
 /// The combined fixed points' tolerance under lateral moduli: their
@@ -1264,7 +1276,9 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactOnABallViscousToItsCent
                                                    true);
 }
 
-TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli) {
+namespace {
+
+void ContinuousMaterialHessianConvergesUnderLateralModuli(Scheme scheme) {
   // The continuous second-order sweep at a laterally heterogeneous
   // elastic background: its derivatives tend to the discrete ones block
   // by block as the steps are halved, and so does its mismatch with the
@@ -1324,11 +1338,9 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = Scheme::ExponentialTrapezoid,
+        {.scheme = scheme,
          .rotation = RotationalFeedback::None,
          .rtol = 1e-12,
          .coupled_rtol = kModuliCoupledRtol,
@@ -1420,6 +1432,15 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
             << iceGaps[1] << ", viscosity " << viscosityGaps[0] << " -> " << viscosityGaps[1]
             << ", material " << materialGaps[0] << " -> " << materialGaps[1]
             << ", mismatch " << mismatches[0] << " -> " << mismatches[1] << '\n';
+}
+
+}  // namespace
+
+TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli) {
+  ContinuousMaterialHessianConvergesUnderLateralModuli(Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuliUnderTheTrapezoid) {
+  ContinuousMaterialHessianConvergesUnderLateralModuli(Scheme::ExponentialTrapezoid);
 }
 
 TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenRun) {
@@ -1613,7 +1634,9 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
   }
 }
 
-TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation) {
+namespace {
+
+void ContinuousHessianRowsConvergeUnderSourcesAndRotation(Scheme scheme) {
   // The continuous second-order sweep with lateral viscosity and the
   // rotational feedback, the displacement and the toroidal potential
   // measured: its rows in the viscosity, the bulk modulus and the shear
@@ -1700,11 +1723,9 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation)
           return std::vector<PointSource>{at};
         };
       }
-      // the exponential trapezoid stated: the continuous second order is built
-      // for the one-stage schemes
       Evolution3D evolution(
           op, scene.solver, scene.state,
-          {.scheme = Scheme::ExponentialTrapezoid,
+          {.scheme = scheme,
            .rotation = rotationOn ? RotationalFeedback::Full : RotationalFeedback::None, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
       const auto trajectory =
           ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
@@ -1809,7 +1830,18 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation)
   }
 }
 
-TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
+}  // namespace
+
+TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation) {
+  ContinuousHessianRowsConvergeUnderSourcesAndRotation(Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotationUnderTheTrapezoid) {
+  ContinuousHessianRowsConvergeUnderSourcesAndRotation(Scheme::ExponentialTrapezoid);
+}
+
+namespace {
+
+void ContinuousForcingRowsConverge(Scheme scheme) {
   // The surface forcings' rows of the Hessian about a tide-driven run
   // with lateral viscosity and the rotational feedback: the continuous
   // sweep's, along a direction in the viscosity and the moduli and
@@ -1870,10 +1902,8 @@ TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[times.size() / 2].relativeSeaLevelDual = gSea;
     measurements[times.size() - 1].displacementDual = gU;
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
@@ -1943,6 +1973,15 @@ TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
   }
 }
 
+}  // namespace
+
+TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
+  ContinuousForcingRowsConverge(Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConvergeUnderTheTrapezoid) {
+  ContinuousForcingRowsConverge(Scheme::ExponentialTrapezoid);
+}
+
 TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
   // One time node, the elastic problem, with and without lateral moduli
   // in the background, an ocean and the rotational feedback: the
@@ -1998,11 +2037,8 @@ TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
         },
         options);
     const auto& coupling = op.Coupling();
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
-                           .rotation = RotationalFeedback::Full,
+                          {.rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .coupled_rtol = kModuliCoupledRtol,
                            .record_stride = 1});
@@ -2195,10 +2231,7 @@ TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
   };
   for (const auto rotation : {RotationalFeedback::Axial, RotationalFeedback::Full}) {
     const auto name = std::string(rotation == RotationalFeedback::Full ? "full" : "axial");
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     const auto evolutionOptions = Evolution3D::Options{
-        .scheme = Scheme::ExponentialTrapezoid,
         .rotation = rotation, .rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol,
         .record_stride = 1};
     auto runOf = [&](Evolution3D& evolution, const std::vector<double>& f) {
@@ -2279,7 +2312,9 @@ TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
   }
 }
 
-TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
+namespace {
+
+void HessianAcrossAnOnset(Scheme scheme) {
   // About a run under lateral viscosity with an earthquake at a repeated
   // node (its left limit without the sources, Evolution3D::Forcing::
   // sourcesBefore): along directions in the sources' moments (at every
@@ -2389,11 +2424,9 @@ TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
     const auto times = onsetGrid(6);
     const auto right = std::size_t{4};
     const auto acting = tensors(1, 1.0).front();
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = Scheme::ExponentialTrapezoid,
+        {.scheme = scheme,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, baseRun(times, right, acting)));
@@ -2506,7 +2539,7 @@ TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
     const auto times = onsetGrid(steps);
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
@@ -2572,7 +2605,18 @@ TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
   }
 }
 
-TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
+}  // namespace
+
+TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
+  HessianAcrossAnOnset(Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, HessianAcrossAnOnsetUnderTheTrapezoid) {
+  HessianAcrossAnOnset(Scheme::ExponentialTrapezoid);
+}
+
+namespace {
+
+void HessianAcrossALoadJump(Scheme scheme) {
   // About a run under lateral viscosity with a step load at a repeated
   // node (its left limit without the step, Evolution3D::Forcing::
   // directLoadBefore), recorded at every second node: along directions in
@@ -2650,11 +2694,9 @@ TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
   {
     const auto times = onsetGrid(6);
     const auto right = std::size_t{4};
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = Scheme::ExponentialTrapezoid,
+        {.scheme = scheme,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 2});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, loadsOn(times[right])));
@@ -2718,7 +2760,7 @@ TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = Scheme::ExponentialTrapezoid,
+        {.scheme = scheme,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, loadsOn(times[right])));
@@ -2751,4 +2793,131 @@ TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
   // measured 1.7e-1, 4.9e-2, 1.3e-2
   EXPECT_LT(gaps[2], 0.05);
   EXPECT_GT(gaps[1] / gaps[2], 3.0) << gaps[1] << " " << gaps[2];
+}
+
+}  // namespace
+
+TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
+  HessianAcrossALoadJump(Evolution3D::Options{}.scheme);
+}
+TEST(SecondOrderAdjoint3D, HessianAcrossALoadJumpUnderTheTrapezoid) {
+  HessianAcrossALoadJump(Scheme::ExponentialTrapezoid);
+}
+
+TEST(SecondOrderAdjoint3D, ATangentRunOfTheOtherMethodOrAboutACalibratedRunIsRefused) {
+  // A 3D tangent-linear run carries the method that made it, and the 3D
+  // second-order sweep and run refuse one of the other method by name (the
+  // exponential trapezoid stated, where both are built); and the
+  // second-order run about a state marked calibrated under migrating
+  // shorelines, given ocean functions, is refused by name as the sweep is,
+  // unless its options state that the initial sea level held is wanted.
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(17);
+  const Viscoelastic3D op(scene.rheology, kLmax,
+                          [](double, double theta, double phi) {
+                            return 0.4 * std::sin(theta) * std::cos(phi);
+                          });
+  Evolution3D evolution(op, scene.solver, scene.state,
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12,
+                         .coupled_rtol = 1e-12,
+                         .record_stride = 1});
+  const auto span = 10.0 * scene.Kyr();
+  const auto times = std::vector<double>{0.0, 0.5 * span, span};
+  const auto field = scene.Smooth(rng, 100.0 * scene.Metre());
+  const auto thickness = std::vector<std::vector<double>>{
+      field, std::vector<double>(field.size(), 0.0),
+      std::vector<double>(field.size(), 0.0)};
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(
+      evolution.Run(times, FrozenLoad(scene, times, thickness)));
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[2].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  TangentPerturbation3D v;
+  v.logViscosity = OnCoupling(op.Coupling(), [](double theta, double) {
+    return 0.5 + std::cos(theta);
+  });
+  const auto itau = TangentLinearSolver3D::ItauOfLogViscosity(op, v.logViscosity);
+  const auto word = [](AdjointMethod m) {
+    return std::string{m == AdjointMethod::Discrete
+                           ? "AdjointMethod::Discrete"
+                           : "AdjointMethod::Continuous"};
+  };
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto other = method == AdjointMethod::Discrete
+                           ? AdjointMethod::Continuous
+                           : AdjointMethod::Discrete;
+    const auto run =
+        TangentLinearSolver3D(evolution, {.method = method,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12,
+                                          .record = true})
+            .Run(times, v, &trajectory);
+    for (const auto& snapshot : run) {
+      ASSERT_TRUE(snapshot.tangentMethod.has_value());
+      EXPECT_EQ(*snapshot.tangentMethod, method);
+    }
+    const auto refused = [&](const std::function<void()>& call,
+                             const std::string& reader) {
+      try {
+        call();
+        ADD_FAILURE() << reader << " read a tangent-linear run by "
+                      << word(method);
+      } catch (const std::invalid_argument& error) {
+        const auto what = std::string{error.what()};
+        EXPECT_NE(what.find("the tangent-linear run is by " + word(method) +
+                            " and " + reader + " by " + word(other)),
+                  std::string::npos)
+            << what;
+      }
+    };
+    refused(
+        [&] {
+          static_cast<void>(
+              AdjointSolver3D(evolution, {.method = other,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12})
+                  .SecondOrderKernels(times, measurements, run, itau,
+                                      trajectory));
+        },
+        "the second-order sweep (AdjointSolver3D::SecondOrderKernels)");
+    refused(
+        [&] {
+          static_cast<void>(
+              TangentLinearSolver3D(evolution, {.method = other,
+                                                .rtol = 1e-12,
+                                                .coupled_rtol = 1e-12})
+                  .RunSecondOrder(times, run, run,
+                                  {.itauU = itau, .itauV = itau}, &trajectory));
+        },
+        "the second-order run (TangentLinearSolver3D::RunSecondOrder)");
+  }
+
+  // marked calibrated: the second-order run refused unless the held one is
+  // stated (checked before anything else is read; the ocean functions need
+  // only be given)
+  evolution.MarkCalibrated();
+  const auto oceans = OceanFunctions{.nodes = {scene.state.oceanFunction,
+                                               scene.state.oceanFunction,
+                                               scene.state.oceanFunction},
+                                     .stages = {}};
+  const auto message = [&](bool held) {
+    try {
+      static_cast<void>(
+          TangentLinearSolver3D(evolution, {.rtol = 1e-12,
+                                            .coupled_rtol = 1e-12,
+                                            .initial_sea_level_held = held})
+              .RunSecondOrder(times, {}, {}, {}, &trajectory, oceans));
+    } catch (const std::logic_error& error) {
+      return std::string{error.what()};
+    }
+    return std::string{};
+  };
+  const auto what = message(false);
+  EXPECT_NE(what.find("the second-order tangent-linear run of a calibrated "
+                      "run under migrating shorelines"),
+            std::string::npos)
+      << what;
+  EXPECT_NE(what.find("not built"), std::string::npos) << what;
+  EXPECT_NE(what.find("initial_sea_level_held"), std::string::npos) << what;
+  EXPECT_EQ(message(true).find("calibrated run"), std::string::npos);
 }

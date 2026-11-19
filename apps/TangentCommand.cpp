@@ -101,39 +101,20 @@ TangentBlock ReadTangentBlock(const Json& block, const Run& run,
   return out;
 }
 
-void CheckTangentMethod(const Json& tangent, const TangentBlock& block,
-                        const PerturbationBlock& perturbation, const Run& run) {
-  if (block.method != AdjointMethod::Continuous || !run.times ||
-      !IsMultiStage(run.solver.scheme) || perturbation.viscosity.empty()) {
-    return;
-  }
-  Fail(tangent.At("method"),
-       "is \"continuous\", and the continuous tangent-linear run along a "
-       "direction in the viscosity (`perturbation.model.viscosity`) is not "
-       "built for the two-stage scheme the run steps by, \"sdirk2\": state "
-       "the one-stage scheme in the `solver` block (`scheme`: "
-       "\"exponential_trapezoid\"), or take the discrete method (`method`: "
-       "\"discrete\", the default), the derivative of the stepped run under "
-       "every scheme");
-}
-
 void CheckOtherBlocks(const Json& top, const Run& run,
                       const std::filesystem::path& directory,
                       std::string_view command) {
   if (command != "kernel" && Has(top, "kernels")) {
-    static_cast<void>(ReadKernelsBlock(top.At("kernels"), run, directory));
+    const auto kernels = ReadKernelsBlock(top.At("kernels"), run, directory);
+    CheckSecondOrderDirection(top, kernels);
   }
   if (command == "tangent") return;
-  auto perturbation = std::optional<PerturbationBlock>{};
   if (Has(top, "perturbation")) {
-    perturbation =
-        ReadPerturbationBlock(top.At("perturbation"), run, directory);
+    static_cast<void>(
+        ReadPerturbationBlock(top.At("perturbation"), run, directory));
   }
   if (Has(top, "tangent")) {
-    const auto tangent = ReadTangentBlock(top.At("tangent"), run, directory);
-    if (perturbation) {
-      CheckTangentMethod(top.At("tangent"), tangent, *perturbation, run);
-    }
+    static_cast<void>(ReadTangentBlock(top.At("tangent"), run, directory));
   }
 }
 
@@ -172,8 +153,6 @@ TangentInput ReadTangentInput(const std::filesystem::path& config) {
   out.perturbation =
       ReadPerturbationBlock(top.At("perturbation"), out.run, directory);
   out.tangent = ReadTangentBlock(top.At("tangent"), out.run, directory);
-  CheckTangentMethod(top.At("tangent"), out.tangent, out.perturbation,
-                     out.run);
   // the measurements: the block's own list, or the `kernels` block's
   // where it has none; a `kernels` block is held to the run either way
   auto kernels = std::optional<KernelsBlock>{};

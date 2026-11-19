@@ -111,6 +111,11 @@ class Evolution3D {
     /// under a one-stage scheme, at the first node and at the second node
     /// of a repeated pair.
     std::vector<Stage> stages;
+    /// The method of the tangent-linear run whose node this is
+    /// (TangentLinearSolver3D::Options::method), on every snapshot that
+    /// solver returns; absent on a forward run's. A second-order sweep or
+    /// run refuses a tangent-linear run of the other method.
+    std::optional<AdjointMethod> tangentMethod;
   };
 
   /// The recurrence at one node, enough to resume a run there: the

@@ -649,6 +649,32 @@ void AddEarthDirection(TangentPerturbation& direction,
   }
 }
 
+std::vector<double> ShearChangeAtNodes(const PerturbationBlock& perturbation,
+                                       const Recorded1D& recorded,
+                                       const Json& block) {
+  if (perturbation.moduli.empty()) return {};
+  const auto& member = block.At("model").At("moduli");
+  const auto fields = ModuliFieldsOf(perturbation, *recorded.earth, member);
+  if (!fields.mu) return {};
+  RefuseLateral(fields.mu->IsRadial(), member, "shear modulus",
+                "model.moduli");
+  const auto& material = recorded.rheology->BaseMaterial();
+  const auto& mesh = material.Mesh();
+  const auto pa = material.ModelScales().Factor(ModulusDimensions);
+  const auto ngll = mesh.NGll();
+  auto out = std::vector<double>(
+      static_cast<std::size_t>(mesh.ElementCount()) * ngll, 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    const auto layer = static_cast<std::size_t>(mesh.LayerOf(e));
+    for (auto q = 0; q < ngll; ++q) {
+      out[static_cast<std::size_t>(e) * ngll + q] =
+          fields.mu->ValueIn(layer, mesh.Radius(e, q)) / pa;
+    }
+  }
+  return out;
+}
+
 void AddEarthDirection(TangentPerturbation3D& direction,
                        const PerturbationBlock& perturbation,
                        const Recorded3D& recorded, const Json& block) {

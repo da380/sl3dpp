@@ -1332,7 +1332,9 @@ TEST(TangentLinear, TheContinuousSweepFormsTheKernelsOfEveryLoad) {
   }
 }
 
-TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
+namespace {
+
+void TheContinuousSecondOrderSweepFormsTheForcingRows(Scheme scheme) {
   // The surface forcings' rows of the Hessian from the continuous
   // second-order sweep: about a tide-driven run, the derivatives of the
   // kernels in the tide, in a direct load inside the water budget and
@@ -1418,11 +1420,9 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
         tideOnly.solidSurfaceChange.push_back(scaled(layer0));
       }
       ViscoelasticOperator op(setup.rheology, kLmax);
-      // the exponential trapezoid stated: the continuous second order is built
-      // for the one-stage schemes
       Evolution evolution(
           op, setup.solver, *background,
-          {.scheme = Scheme::ExponentialTrapezoid,
+          {.scheme = scheme,
            .rotation = rotation, .rtol = 1e-12, .record_stride = 1});
       const auto snapshots = evolution.Run(
           times, Evolution::Forcing{.tide = [&](double t) {
@@ -1505,6 +1505,15 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
           << " " << (*gaps)[2];
     }
   }
+}
+
+}  // namespace
+
+TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
+  TheContinuousSecondOrderSweepFormsTheForcingRows(Evolution::Options{}.scheme);
+}
+TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRowsUnderTheTrapezoid) {
+  TheContinuousSecondOrderSweepFormsTheForcingRows(Scheme::ExponentialTrapezoid);
 }
 
 TEST(TangentLinear, AForcedMigratingRunWhereNoShorelineMoves) {
@@ -1750,8 +1759,10 @@ TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
   for (const auto nodes : {5, 9}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
+    // the exponential trapezoid stated: under Sdirk2, whose stages are
+    // backward Euler's, the continuous run along the relaxation times is the
+    // discrete one (gaps 4.0e-15 and 3.4e-13 at 5 and 9 nodes, rounding),
+    // and there is no approach to gate (TestSdirk2Continuous)
     Evolution evolution(op, setup.solver, setup.state,
                                 {.scheme = Scheme::ExponentialTrapezoid,
                                  .rtol = 1e-12, .record_stride = 1});
@@ -2450,8 +2461,10 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
   for (const auto nodes : {17, 33}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
+    // the exponential trapezoid stated: under Sdirk2, whose stages are
+    // backward Euler's, the continuous second-order run is the discrete one
+    // (gaps 1.8e-11 and 9.5e-12 at 17 and 33 nodes, rounding), and there is
+    // no approach to gate (TestSdirk2Continuous)
     Evolution evolution(op, setup.solver, setup.state,
                                 {.scheme = Scheme::ExponentialTrapezoid,
                                  .rtol = 1e-12, .record_stride = 1});

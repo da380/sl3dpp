@@ -98,11 +98,8 @@ TEST(StaticDerivatives, OneNodeIsTheElasticProblemInEveryClass) {
                         RotationalFeedback::Full}) {
     const auto label = "rotation " + std::to_string(static_cast<int>(rotation));
     ViscoelasticOperator op(setup.rheology, kLmax);
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
-                         .rotation = rotation, .rtol = 1e-12, .record_stride = 1});
+                        {.rotation = rotation, .rtol = 1e-12, .record_stride = 1});
     Evolution::Forcing forcing;
     forcing.directLoad = [&](double) { return load; };
     forcing.sources = [&](double) { return sourceOf(0.9, -0.2, 0.3); };
@@ -185,11 +182,8 @@ TEST(StaticDerivatives, AnElasticBodyWithNoRelaxingLayer) {
     measurements[0].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
     measurements[0].displacementDual = setup.Smooth(rng, 0.5);
     ViscoelasticOperator op(*elastic, kLmax);
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
-                         .rtol = 1e-12, .record_stride = 1});
+                        {.rtol = 1e-12, .record_stride = 1});
     const auto run = evolution.Run(times, [&](double) { return load; });
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
     TangentPerturbation u, w;

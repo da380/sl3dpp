@@ -1282,3 +1282,49 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose3D) {
   EXPECT_NEAR(along, predicted, 1e-7 * std::abs(predicted));
   EXPECT_GT(Gap(held, predicted), 1e-2);
 }
+
+TEST(CalibratedKernels, TheSecondOrderRunOfACalibratedRunIsRefused) {
+  // The second-order tangent-linear run about a state the calibration
+  // marked (migrating shorelines) holds the initial sea level, where the
+  // calibrated run's own second derivative is not built: refused by name,
+  // as the second-order kernels are, unless the solver's
+  // Options::initial_sea_level_held says the held one is wanted, when it
+  // runs.
+  const auto scene = Marine1D(1e21, 6, Scheme::Sdirk2);
+  const auto& setup = scene.setup;
+  const auto& times = scene.cap.times;
+  std::mt19937 rng(233);
+  Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
+  const auto base = scene.Calibrate(evolution, {}, 0.0, scene.target,
+                                    Shorelines::Migrating);
+  ASSERT_TRUE(evolution.Calibrated());
+  const auto oceans = OceanFunctions::Of(base.snapshots);
+  const auto trajectory = ForwardTrajectory::FromSnapshots(base.snapshots);
+  TangentPerturbation u;
+  u.initialSeaLevel = setup.Smooth(rng, 0.1 * setup.Metre());
+  u.itau = setup.DeltaItau(0.1, [](double r) { return 0.3 + 0.7 * r * r; });
+  const auto run =
+      TangentLinearSolver(evolution, {.rtol = 1e-12, .record = true})
+          .Run(times, u, &trajectory, oceans);
+  const auto second = [&](bool held) {
+    return TangentLinearSolver(
+               evolution, {.rtol = 1e-12, .initial_sea_level_held = held})
+        .RunSecondOrder(times, run, run, {.itauU = u.itau, .itauV = u.itau},
+                        &trajectory, oceans);
+  };
+  try {
+    static_cast<void>(second(false));
+    ADD_FAILURE() << "the second-order run about a calibrated state ran";
+  } catch (const std::logic_error& error) {
+    const auto what = std::string{error.what()};
+    EXPECT_NE(what.find("the second-order tangent-linear run of a calibrated "
+                        "run under migrating shorelines"),
+              std::string::npos)
+        << what;
+    EXPECT_NE(what.find("not built"), std::string::npos) << what;
+    EXPECT_NE(what.find("initial_sea_level_held"), std::string::npos) << what;
+  }
+  const auto held = second(true);
+  ASSERT_EQ(held.size(), times.size());
+  EXPECT_GT(MaxAbs(held.back().relativeSeaLevelChange), 0.0);
+}

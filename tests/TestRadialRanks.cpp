@@ -647,7 +647,9 @@ double Cap(double theta, double phi, double colat0, double lon0, double width) {
 
 }  // namespace
 
-TEST(RadialRanks, DerivativesMatchTheOneProcess) {
+namespace {
+
+void DerivativesMatchTheOneProcess(Scheme scheme) {
   // The derivative machinery on three ranks against the one process on
   // the same cuts: the 3D tangent-linear runs (both methods) along loads,
   // a lateral log viscosity and lateral moduli; the first-order sweeps
@@ -714,9 +716,7 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
       .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = cuts};
   const auto evolutionOptions =
-      // the exponential trapezoid stated: the continuous second order is built
-      // for the one-stage schemes
-      Evolution3D::Options{.scheme = Scheme::ExponentialTrapezoid,
+      Evolution3D::Options{.scheme = scheme,
                            .rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
@@ -834,6 +834,15 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
     EXPECT_LT(worstField, 1e-9) << label;
     EXPECT_LT(worstSecond, 1e-9) << label;
   }
+}
+
+}  // namespace
+
+TEST(RadialRanks, DerivativesMatchTheOneProcess) {
+  DerivativesMatchTheOneProcess(Evolution3D::Options{}.scheme);
+}
+TEST(RadialRanks, DerivativesMatchTheOneProcessUnderTheTrapezoid) {
+  DerivativesMatchTheOneProcess(Scheme::ExponentialTrapezoid);
 }
 
 // -- lateral moduli over the ranks --------------------------------------------

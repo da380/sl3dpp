@@ -320,10 +320,11 @@ struct AdjointSolver::MaterialTools {
     return deg.DualFromScalars(weighted, ncols);
   }
 
-  /// v's force on a full solution and a decayed memory under the dt
-  /// flavour: -(dK_eff) x plus the memory force's variation.
-  [[nodiscard]] Fields Force(double dt, const Fields& full, const Fields& mem) {
-    const auto scheme = ev->options_.scheme;
+  /// v's force on a full solution and a decayed memory of a stage (its
+  /// one-stage scheme and length; a one-stage scheme's step is its one
+  /// stage): -(dK_eff) x plus the memory force's variation.
+  [[nodiscard]] Fields Force(Scheme scheme, double dt, const Fields& full,
+                             const Fields& mem) {
     const auto flavour = op->FlavourOf(scheme, dt);
     auto out = Fields{};
     for (const auto& [l, x] : full) {

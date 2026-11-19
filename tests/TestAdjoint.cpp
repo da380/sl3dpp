@@ -1437,16 +1437,16 @@ TEST(Adjoint, Sdirk2MomentKernelsAgainstTheForwardRun) {
   }
 }
 
-TEST(Adjoint, Sdirk2RefusesWhatIsNotBuilt) {
-  // About a run under Sdirk2 the derivatives of the stepped map are built
-  // (the discrete sweep, the discrete tangent-linear run, the discrete
-  // second-order sweep: TestSdirk2Derivatives). What is not, each refused
-  // by name: the continuous second-order sweep and the continuous drive of
-  // a tangent-linear run along the relaxation times; and a trajectory that
-  // does not give the steps' first-stage closures, which the discrete
-  // sweep and the rebuild of a gap repeat each stage under. A recording
-  // with gaps that gives them serves the continuous sweep as the whole
-  // one does.
+TEST(Adjoint, Sdirk2TakesBothMethodsAndRefusesATrajectoryWithoutItsStages) {
+  // About a run under Sdirk2 the derivatives are built by either method
+  // (TestSdirk2Derivatives, TestSdirk2Continuous): here the continuous
+  // tangent-linear run along the relaxation times is the discrete one to
+  // rounding, the continuous second-order sweep carries the continuous
+  // first-order kernels, and the continuous second-order run is the
+  // discrete one. What is refused, by name: a trajectory that does not
+  // give the steps' first-stage closures, which the discrete sweep and the
+  // rebuild of a gap repeat each stage under. A recording with gaps that
+  // gives them serves the continuous sweep as the whole one does.
   const auto scene = RampScene::Make();
   const ViscoelasticOperator op(scene.rheology, RampScene::lmax);
   const auto times = scene.Times(4);
@@ -1465,40 +1465,63 @@ TEST(Adjoint, Sdirk2RefusesWhatIsNotBuilt) {
       {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
   const auto snapshots = evolution.Run(times, scene.Direct());
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
-  // the discrete sweep and the discrete tangent-linear run are built
+  // the discrete sweep is built
   EXPECT_FALSE(AdjointSolver(evolution, {.method = AdjointMethod::Discrete})
                    .FirstOrderKernels(times, measurements, &trajectory)
                    .itauKernel.empty());
+  // a uniform change of ln viscosity, as the relaxation times take it
   TangentPerturbation alongItau;
-  alongItau.itau.assign(
-      scene.rheology.BranchCount(),
-      std::vector<double>(scene.rheology.BranchAt(0).itau.size(), 0.0));
-  const TangentLinearSolver recorded(
-      evolution, {.method = AdjointMethod::Discrete, .record = true});
-  const auto tangent = recorded.Run(times, alongItau, &trajectory);
-  named(
-      [&] {
-        const AdjointSolver adjoint(evolution,
-                                    {.method = AdjointMethod::Continuous});
-        static_cast<void>(adjoint.SecondOrderKernels(
-            times, measurements, tangent, {}, trajectory));
-      },
-      "the continuous second-order sweep");
-  named(
-      [&] {
-        const TangentLinearSolver continuous(
-            evolution, {.method = AdjointMethod::Continuous});
-        static_cast<void>(continuous.Run(times, alongItau, &trajectory));
-      },
-      "the continuous tangent-linear run along the relaxation times");
-  named(
-      [&] {
-        const TangentLinearSolver continuous(
-            evolution, {.method = AdjointMethod::Continuous});
-        static_cast<void>(continuous.RunSecondOrder(
-            times, tangent, tangent, SecondOrderDirection{}, &trajectory));
-      },
-      "the continuous second-order tangent-linear run");
+  for (auto k = std::size_t{0}; k < scene.rheology.BranchCount(); ++k) {
+    auto d = scene.rheology.BranchAt(k).itau;
+    for (auto& v : d) v *= -0.1;
+    alongItau.itau.push_back(std::move(d));
+  }
+  auto runs = std::map<AdjointMethod, std::vector<Evolution::Snapshot>>{};
+  auto seconds = std::map<AdjointMethod, std::vector<Evolution::Snapshot>>{};
+  SecondOrderDirection uv;
+  uv.itauU = alongItau.itau;
+  uv.itauV = alongItau.itau;
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const TangentLinearSolver tangent(
+        evolution, {.method = method, .rtol = 1e-12, .record = true});
+    runs[method] = tangent.Run(times, alongItau, &trajectory);
+    seconds[method] = tangent.RunSecondOrder(times, runs[method], runs[method], uv,
+                                             &trajectory);
+  }
+  auto gapOf = [](const std::vector<Evolution::Snapshot>& a,
+                  const std::vector<Evolution::Snapshot>& b) {
+    auto diff = 0.0, size = 0.0;
+    for (auto n = std::size_t{0}; n < a.size(); ++n) {
+      for (auto i = std::size_t{0}; i < a[n].relativeSeaLevelChange.size(); ++i) {
+        diff = std::max(diff, std::abs(a[n].relativeSeaLevelChange[i] -
+                                       b[n].relativeSeaLevelChange[i]));
+        size = std::max(size, std::abs(a[n].relativeSeaLevelChange[i]));
+      }
+    }
+    EXPECT_GT(size, 0.0);
+    return diff / size;
+  };
+  // the continuous tangent-linear runs, first and second order, are the
+  // discrete ones to rounding
+  EXPECT_LT(gapOf(runs[AdjointMethod::Discrete], runs[AdjointMethod::Continuous]),
+            1e-9);
+  EXPECT_LT(gapOf(seconds[AdjointMethod::Discrete], seconds[AdjointMethod::Continuous]),
+            1e-9);
+  // the continuous second-order sweep carries the continuous kernels
+  const AdjointSolver continuousSweep(
+      evolution, {.method = AdjointMethod::Continuous, .rtol = 1e-12});
+  const auto [carried, derivatives] = continuousSweep.SecondOrderKernels(
+      times, measurements, runs[AdjointMethod::Continuous], alongItau.itau, trajectory);
+  const auto first = continuousSweep.FirstOrderKernels(times, measurements, &trajectory);
+  auto kernelScale = 0.0, kernelGap = 0.0, derivativeScale = 0.0;
+  for (auto i = std::size_t{0}; i < first.itauKernel[0].size(); ++i) {
+    kernelScale = std::max(kernelScale, std::abs(first.itauKernel[0][i]));
+    kernelGap = std::max(kernelGap,
+                         std::abs(carried.itauKernel[0][i] - first.itauKernel[0][i]));
+    derivativeScale = std::max(derivativeScale, std::abs(derivatives.itauKernel[0][i]));
+  }
+  EXPECT_LT(kernelGap, 1e-10 * kernelScale);
+  EXPECT_GT(derivativeScale, 0.0);
   // a trajectory without the first stages' closures
   auto bare = trajectory;
   bare.stages.clear();

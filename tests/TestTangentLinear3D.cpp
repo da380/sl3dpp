@@ -217,7 +217,9 @@ double Objective(const Scene& scene, const std::vector<double>& g,
 
 }  // namespace
 
-TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
+namespace {
+
+void ZeroLateralMatchesThe1DRun(Scheme scheme) {
   // With delta = 0 and the memory nodes at the GLL points the 3D
   // tangent-linear run is the 1D one through the grid pipeline, along
   // loads and an angle-uniform itau perturbation, both methods.
@@ -235,10 +237,8 @@ TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
   // The 1D side: a smooth nodal itau perturbation of the branch.
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
-  // the exponential trapezoid stated: the continuous second order is built for
-  // the one-stage schemes
   Evolution evolution1(op1, scene.solver, scene.state,
-                               {.scheme = Scheme::ExponentialTrapezoid,
+                               {.scheme = scheme,
                                 .rtol = 1e-12, .record_stride = 1});
   const auto trajectory1 =
       ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
@@ -263,7 +263,7 @@ TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
                      {.memory_points = MemoryPointSet::Gll});
   Evolution3D evolution3(
       op3, scene.solver, scene.state,
-      {.scheme = Scheme::ExponentialTrapezoid,
+      {.scheme = scheme,
        .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto trajectory3 =
       ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, directLoad));
@@ -306,6 +306,15 @@ TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
           << "node " << n;
     }
   }
+}
+
+}  // namespace
+
+TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
+  ZeroLateralMatchesThe1DRun(Evolution3D::Options{}.scheme);
+}
+TEST(TangentLinear3D, ZeroLateralMatchesThe1DRunUnderTheTrapezoid) {
+  ZeroLateralMatchesThe1DRun(Scheme::ExponentialTrapezoid);
 }
 
 TEST(TangentLinear3D, LinearInTheLoadsWithLateralStructure) {
@@ -419,7 +428,9 @@ TEST(TangentLinear3D, ATideAndTheTangentialDisplacementAreCarried) {
   }
 }
 
-TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
+namespace {
+
+void LateralDirectionIsTheDerivativeOfTheCoupledRun(Scheme scheme) {
   // Along a log-viscosity direction p with lateral structure on, the
   // discrete run is the exact derivative of the coupled forward: central
   // differences of a sea level functional, with the operator's delta
@@ -447,10 +458,8 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
                       [&](double r, double theta, double phi) {
                         return baseDelta(r, theta, phi) + eps * direction(theta, phi);
                       });
-    // the exponential trapezoid stated: the continuous second order is built
-    // for the one-stage schemes
     Evolution3D evolution(op, scene.solver, scene.state,
-                                  {.scheme = Scheme::ExponentialTrapezoid,
+                                  {.scheme = scheme,
                                    .rtol = 1e-12, .coupled_rtol = 1e-12});
     return Objective(scene, g, evolution.Run(times, directLoad).back().relativeSeaLevelChange);
   };
@@ -458,7 +467,7 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta);
   Evolution3D evolution(
       op, scene.solver, scene.state,
-      {.scheme = Scheme::ExponentialTrapezoid,
+      {.scheme = scheme,
        .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
@@ -496,6 +505,15 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
   EXPECT_LT(std::abs(paired - continuous), 0.1 * std::abs(continuous))
       << paired << " " << continuous << " discrete " << exact;
   EXPECT_LT(std::abs(exact - continuous), 0.1 * std::abs(exact));
+}
+
+}  // namespace
+
+TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
+  LateralDirectionIsTheDerivativeOfTheCoupledRun(Evolution3D::Options{}.scheme);
+}
+TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRunUnderTheTrapezoid) {
+  LateralDirectionIsTheDerivativeOfTheCoupledRun(Scheme::ExponentialTrapezoid);
 }
 
 TEST(TangentLinear3D, SecondOrderRunIsTheDerivativeOfTheFirst) {

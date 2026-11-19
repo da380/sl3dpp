@@ -678,4 +678,15 @@ void RefuseCalibratedSecondOrderKernels() {
       "Options::initial_sea_level_held says that is what is wanted");
 }
 
+void RefuseCalibratedSecondOrderRun() {
+  throw std::logic_error(
+      "the second-order tangent-linear run of a calibrated run under "
+      "migrating shorelines (its second derivative, the initial sea level "
+      "calibrated again along both directions) is not built; "
+      "RunSecondOrder about the calibrated state gives the second "
+      "derivative with the initial sea level held, when the tangent-linear "
+      "solver's Options::initial_sea_level_held says that is what is "
+      "wanted");
+}
+
 }  // namespace sl3dpp

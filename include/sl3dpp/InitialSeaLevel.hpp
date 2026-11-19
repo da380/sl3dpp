@@ -522,4 +522,19 @@ struct CalibratedTangent3D {
  */
 [[noreturn]] void RefuseCalibratedSecondOrderKernels();
 
+/**
+ * @brief The second-order tangent-linear run of a calibrated migrating run
+ * along two directions, with the initial sea level calibrated again along
+ * both: NOT BUILT, and refused (std::logic_error) naming what is, as the
+ * second-order kernels are (RefuseCalibratedSecondOrderKernels). What is
+ * built is the second-order run with the initial sea level held
+ * (TangentLinearSolver::RunSecondOrder, TangentLinearSolver3D::
+ * RunSecondOrder about the calibrated state), the pair of the partial
+ * kernels' derivatives. Those runs call this about an evolution marked
+ * calibrated (Evolution::Calibrated) and given ocean functions, unless
+ * their Options::initial_sea_level_held states that the held one is
+ * wanted.
+ */
+[[noreturn]] void RefuseCalibratedSecondOrderRun();
+
 }  // namespace sl3dpp

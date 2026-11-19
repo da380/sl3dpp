@@ -15,7 +15,11 @@
  * the `kernels` block names: in the ice history, in a surface load, in
  * the tidal potential, in the moment tensors of the run's seismic sources,
  * in the viscosity and in the elastic moduli, each written in SI with the
- * pairing it takes.
+ * pairing it takes. With `kernels.second_order` each kernel's derivative
+ * along the config's `perturbation` block is written beside it (the
+ * second-order sweeps, AdjointSolver::SecondOrderKernels and
+ * AdjointSolver3D::SecondOrderKernels, about v's tangent-linear run by the
+ * kernels' method), in the same file form, named `_second_order`.
  */
 #include <algorithm>
 #include <array>
@@ -45,6 +49,7 @@
 #include "Common.hpp"
 #include "Input.hpp"
 #include "Outputs.hpp"
+#include "Perturbation.hpp"
 #include "Ranks.hpp"
 #include "Recorded.hpp"
 #include "Trajectory.hpp"
@@ -55,6 +60,8 @@
 #include "sl3dpp/LateralKernels.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/TangentLinear.hpp"
+#include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/Version.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
@@ -399,6 +406,44 @@ std::vector<KernelParameter> ReadParameters(const Json& block, const Run& run) {
   return out;
 }
 
+/// The second-order kernels a block asks for (`second_order` true), held
+/// to the run: what is not built is refused, each by name.
+///
+/// - A calibrated run under migrating shorelines, its kernels the total
+///   derivatives (the default): their derivatives, with the derivative of
+///   the calibration's multiplier, are not built; the partial kernels'
+///   are (`calibration.derivative` "partial").
+/// - A `decay_time` measurement: the decay time is a nonlinear function of
+///   the run's series, and its Hessian has the fit's second derivative in
+///   it, which is not built.
+void CheckSecondOrder(const Json& block, const KernelsBlock& kernels,
+                      const Run& run) {
+  const auto& member = block.At("second_order");
+  if (run.Calibrating() && run.Migrating() && kernels.total) {
+    Fail(member,
+         "asks for the second-order kernels of a calibrated run under "
+         "migrating shorelines, its kernels the total derivatives (the "
+         "initial sea level calibrated again, the default of "
+         "`calibration.derivative`): their derivatives along a direction, "
+         "with the derivative of the calibration's multiplier, are not "
+         "built. The derivatives of the partial kernels, the calibrated "
+         "initial sea level held, are: give `\"calibration\": "
+         "{\"derivative\": \"partial\"}` in the `kernels` block");
+  }
+  const auto& items = block.At("measurements").AsArray();
+  for (auto k = std::size_t{0}; k < items.size(); ++k) {
+    if (kernels.measurements[k].type != Type::DecayTime) continue;
+    Fail(items[k].At("type"),
+         "is a decay time, and `kernels.second_order` asks for the "
+         "second-order kernels: a decay time is a nonlinear function of the "
+         "run's sea-level series (the fit's), and the second derivative of "
+         "the fit, which its Hessian holds beside the kernels' derivatives, "
+         "is not built. Measure the series' cap means at the window's nodes "
+         "(`relative_sea_level_cap`), whose second-order kernels are, or "
+         "drop `second_order`");
+  }
+}
+
 }  // namespace
 
 CalibratedDerivative ReadCalibratedDerivative(const Json& calibration,
@@ -481,7 +526,8 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
          "`measurements` and `output`");
   }
   Allow(block, {"method", "parameters", "lateral", "measurements",
-                "record_stride", "trajectory", "output", "calibration"});
+                "record_stride", "trajectory", "output", "calibration",
+                "second_order"});
   if (!run.gravitating) {
     Fail(block,
          "asks for kernels, which a run without gravity (`gravity`: "
@@ -527,7 +573,20 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
     out.calibration_iterations = read.iterations;
     out.calibration_rtol = read.rtol;
   }
+  if (Has(block, "second_order")) {
+    out.second_order = block.At("second_order").AsBool();
+  }
+  if (out.second_order) CheckSecondOrder(block, out, run);
   return out;
+}
+
+void CheckSecondOrderDirection(const Json& top, const KernelsBlock& block) {
+  if (!block.second_order || Has(top, "perturbation")) return;
+  Fail(top.At("kernels").At("second_order"),
+       "asks for the second-order kernels, the kernels' derivatives along a "
+       "direction in the run's inputs, and the config gives none: the "
+       "direction is the top-level `perturbation` block (its `forcing`, "
+       "`model` and `ocean` members, given as the inputs are)");
 }
 
 namespace {
@@ -608,7 +667,14 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
     static_cast<void>(ReadSolveMembers(top, out.run, directory, false));
   }
   out.kernels = ReadKernelsBlock(top.At("kernels"), out.run, directory);
-  // tangent's blocks, checked and left unused
+  // the direction of the second-order kernels, where they are asked for
+  CheckSecondOrderDirection(top, out.kernels);
+  if (out.kernels.second_order) {
+    out.perturbation =
+        ReadPerturbationBlock(top.At("perturbation"), out.run, directory);
+  }
+  // tangent's blocks, checked (the perturbation block too, where it is not
+  // the second-order kernels') and left unused
   CheckOtherBlocks(top, out.run, directory, "kernel");
   return out;
 }
@@ -683,12 +749,61 @@ struct Writing {
   /// derivatives (the initial sea level re-calibrated) or the partial ones
   /// (it held).
   std::optional<bool> total;
+  /// The second-order files' (`kernels.second_order`): every kernel in them
+  /// the derivative along the direction of the first-order kernel of its
+  /// name, the direction's members as described (DescribePerturbation).
+  bool second = false;
+  std::vector<std::pair<std::string, std::string>> along;
 
   /// The word for `total`, as `kernels.calibration.derivative` names it.
   [[nodiscard]] std::string_view Derivative() const {
     return *total ? "total" : "partial";
   }
+  /// A kernel file's path: the measurement's stem, the file's kind, and
+  /// for a second-order file `_second_order`, before its extension.
+  [[nodiscard]] std::filesystem::path Named(const std::filesystem::path& stem,
+                                            std::string_view kind,
+                                            std::string_view extension) const {
+    return std::filesystem::path(stem.string() + std::string{kind} +
+                                 (second ? "_second_order" : "") +
+                                 std::string{extension});
+  }
+  /// The members of the direction by name, for a summary.
+  [[nodiscard]] std::string Members() const {
+    auto out = std::string{};
+    for (const auto& [name, text] : along) {
+      out += (out.empty() ? "" : ", ") + name;
+    }
+    return out;
+  }
 };
+
+/// What a second-order file says of its fields, beside the first-order
+/// file's meaning of each.
+constexpr auto kSecondOrder =
+    "every kernel is the derivative along the perturbation (the "
+    "perturbation_<member> entries, the config's `perturbation` block) of "
+    "the first-order kernel of its name in the file without "
+    "`_second_order`: the action of the measurement's Hessian on the "
+    "perturbation, in that kernel's own parameter, paired as it pairs";
+
+/// Marks a surface file of kernels as a second-order file: what its fields
+/// are, the direction's members, and every field's meaning the derivative
+/// of the first-order field's.
+void MarkSecondOrder(planetmodel::SurfaceFile& file, const Writing& w) {
+  if (!w.second) return;
+  file.title = "second-order " + file.title.value_or("kernels");
+  file.meta.emplace("second_order", std::string{kSecondOrder});
+  for (const auto& [name, text] : w.along) {
+    file.meta.emplace("perturbation_" + name, text);
+  }
+  for (auto& [name, variable] : file.variables) {
+    const auto meaning = variable.Text("long_name").value_or(name);
+    variable.attributes.insert_or_assign(
+        "long_name",
+        std::string{"the derivative along the perturbation of: "} + meaning);
+  }
+}
 
 /// The calibration's multiplier for one measurement of a calibrated run
 /// whose kernels are the total derivatives (SolveCalibrationMultiplier):
@@ -724,12 +839,25 @@ struct WindowKernels {
 /// measurement with its type and unit.
 std::string TableHeader(const Writing& w, const MeasurementSpec& spec,
                         const Built& built) {
-  return std::format(
-             "# sl3d kernel (sl3dpp {})\n# config {}\n# measurement {} ({}), "
-             "J in {}\n",
-             Version(), w.config.string(), spec.name, spec.word, built.unit) +
-         (w.total ? std::format("# calibration {}\n", w.Derivative())
-                  : std::string{});
+  auto out =
+      std::format(
+          "# sl3d kernel (sl3dpp {})\n# config {}\n# measurement {} ({}), "
+          "J in {}\n",
+          Version(), w.config.string(), spec.name, spec.word, built.unit) +
+      (w.total ? std::format("# calibration {}\n", w.Derivative())
+               : std::string{});
+  if (w.second) {
+    out += "# second order: every kernel column is the derivative along the "
+           "perturbation of the first-order\n"
+           "# table's column of its name (the action of the measurement's "
+           "Hessian on the perturbation), paired as\n"
+           "# that column pairs; the other columns are the first-order "
+           "table's\n";
+    for (const auto& [name, text] : w.along) {
+      out += std::format("# perturbation {} {}\n", name, text);
+    }
+  }
+  return out;
 }
 
 /// A node's label in a kernel table: its date (kyr BP) in a dated run, its
@@ -934,8 +1062,10 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                 "view's, zero where the ice does not jump");
     }
     // the instants of the deltas: the measurement's, and the window's end
-    // for a total kernel, whose sweep the multiplier forces there
-    auto instantNodes = built.nodes;
+    // for a total kernel, whose sweep the multiplier forces there (the
+    // second-order sweep forms no derivative of the deltas, and its file
+    // holds none)
+    auto instantNodes = w.second ? std::vector<std::size_t>{} : built.nodes;
     if (multiplier && !std::ranges::contains(instantNodes, w.axis.size() - 1)) {
       instantNodes.push_back(w.axis.size() - 1);
     }
@@ -948,15 +1078,17 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
     }
     auto instants = std::vector<double>{};
     for (const auto node : instantNodes) instants.push_back(w.axis[node]);
-    file.instant = instants;
-    PutKernel(file, "instantaneous_dual", Laid(lumps, toKernel), "instant",
-              dims,
-              std::string{"the delta amplitude at each measurement instant "
-                          "of the thickness kernel's distributional view, "
-                          "per metre of ice thickness per m^2"} +
-                  (multiplier ? "; and at the window's end, where the "
-                                "calibration's multiplier acts"
-                              : ""));
+    if (!w.second) {
+      file.instant = instants;
+      PutKernel(file, "instantaneous_dual", Laid(lumps, toKernel), "instant",
+                dims,
+                std::string{"the delta amplitude at each measurement instant "
+                            "of the thickness kernel's distributional view, "
+                            "per metre of ice thickness per m^2"} +
+                    (multiplier ? "; and at the window's end, where the "
+                                  "calibration's multiplier acts"
+                                : ""));
+    }
   }
   PutKernel(file, "thickness_baseline_dual",
             Laid(std::span(&kernels.baseline, 1), toKernel), "static", dims,
@@ -965,19 +1097,26 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                    : "dJ per metre of the ice the run starts from per m^2, "
                      "the ice at every node held");
   if (multiplier) {
+    // a second-order file's is the multiplier's derivative, which is zero:
+    // second-order kernels of a total derivative are of a run under frozen
+    // shorelines alone, whose multiplier is zero at every parameter
+    const auto lambda =
+        w.second ? std::vector<double>(multiplier->lambda.size(), 0.0)
+                 : multiplier->lambda;
     PutKernel(file, "target_sea_level_dual",
-              Laid(std::span(&multiplier->lambda, 1), toKernel), "static",
-              dims,
+              Laid(std::span(&lambda, 1), toKernel), "static", dims,
               "dJ per metre of the sea level the run is calibrated to (the "
               "state's, at the window's end) per m^2, the ice held: the "
               "multiplier of the calibration's constraint (zero under frozen "
               "shorelines). Every field is a total derivative, the initial "
               "sea level calibrated again");
-    file.meta.emplace("calibration_multiplier_sweeps",
-                      std::vector<double>{
-                          static_cast<double>(multiplier->sweeps)});
-    file.meta.emplace("calibration_multiplier_update",
-                      std::vector<double>{multiplier->update});
+    if (!w.second) {
+      file.meta.emplace("calibration_multiplier_sweeps",
+                        std::vector<double>{
+                            static_cast<double>(multiplier->sweeps)});
+      file.meta.emplace("calibration_multiplier_update",
+                        std::vector<double>{multiplier->update});
+    }
   } else {
     PutKernel(file, "initial_sea_level_dual",
               Laid(std::span(&kernels.initialSeaLevel, 1), toKernel), "static",
@@ -988,6 +1127,7 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
               "change of its ice changes J by them and by this paired with "
               "the calibrated initial sea level's change");
   }
+  MarkSecondOrder(file, w);
   WriteFile(path, file);
 }
 
@@ -1051,6 +1191,7 @@ void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
               "dJ per kg m^-2 of surface load" + each + " per m^2");
     companion("load_dual", before.directLoad, perLoad, loadDims,
               "dJ per kg m^-2 of surface load");
+    MarkSecondOrder(file, w);
     WriteFile(path, file);
     return;
   }
@@ -1082,6 +1223,7 @@ void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
             "dJ per kg m^-2 of surface load outside the water budget");
   companion("solid_surface_change_dual", before.layer, perHeight, heightDims,
             "dJ per metre of the height of a layer laid on the solid surface");
+  MarkSecondOrder(file, w);
   WriteFile(path, file);
 }
 
@@ -1344,44 +1486,66 @@ void WriteSurfaceKernels(const std::filesystem::path& stem, const Writing& w,
   const auto window = OnTheWindow(library, w);
   const auto& kernels = window.kernels;
   const auto& before = window.before;
-  const auto named = [&stem](std::string_view suffix) {
-    return std::filesystem::path(stem.string() + std::string{suffix});
-  };
   if (block.Writes(KernelParameter::Ice)) {
-    WriteIceKernels(named("_ice_kernels.nc"), w, spec, kernels, before, built,
-                    multiplier);
+    WriteIceKernels(w.Named(stem, "_ice_kernels", ".nc"), w, spec, kernels,
+                    before, built, multiplier);
   }
   if (block.Writes(KernelParameter::Load)) {
-    WriteLoadKernels(named("_load_kernels.nc"), w, spec, kernels, before,
-                     built);
+    WriteLoadKernels(w.Named(stem, "_load_kernels", ".nc"), w, spec, kernels,
+                     before, built);
   }
   if (block.Writes(KernelParameter::Tide)) {
     if (kernels.tideKernels.empty()) {
       throw std::logic_error("the sweep formed no tide kernels");
     }
-    WriteTideKernels(named("_tide_kernels.txt"), w, spec, kernels, before,
-                     built);
+    WriteTideKernels(w.Named(stem, "_tide_kernels", ".txt"), w, spec, kernels,
+                     before, built);
   }
   if (block.Writes(KernelParameter::Moment)) {
     if (kernels.momentKernels.empty()) {
       throw std::logic_error("the sweep formed no moment kernels");
     }
-    WriteMomentKernels(named("_moment_kernels.txt"), w, spec, kernels, built);
+    WriteMomentKernels(w.Named(stem, "_moment_kernels", ".txt"), w, spec,
+                       kernels, built);
   }
 }
 
-/// The radial viscosity kernels of each Maxwell branch as a text table,
+/// The derivatives of a measurement's kernels along a direction
+/// (KernelDerivatives) as kernels, for the writers of the first-order
+/// files: each kernel its derivative, the distributional view's (the
+/// density and the deltas) none.
+Kernels AsKernels(const KernelDerivatives& d) {
+  auto out = Kernels{};
+  out.times = d.times;
+  out.directLoadKernels = d.directLoadKernels;
+  out.directLoadOutsideWaterBudgetKernels =
+      d.directLoadOutsideWaterBudgetKernels;
+  out.solidSurfaceChangeKernels = d.solidSurfaceChangeKernels;
+  out.tideKernels = d.tideKernels;
+  out.momentKernels = d.momentKernels;
+  out.thickness = d.thickness;
+  out.baseline = d.baseline;
+  out.initialSeaLevel = d.initialSeaLevel;
+  out.rate = d.rate;
+  out.itauKernel = d.itauKernel;
+  out.kappaKernel = d.kappaKernel;
+  out.muKernel = d.muKernel;
+  return out;
+}
+
+/// The radial viscosity kernels of each branch, `eta` (per branch, per
+/// unit volume at the mesh's nodes in the material's units: Kernels::
+/// Viscosity, or their derivatives along a direction), as a text table,
 /// densities per unit volume in SI at the mesh's nodes, element by
 /// element, with each row's volume weight.
 void WriteViscosityKernel1D(const std::filesystem::path& path,
                             const Writing& w, const MeasurementSpec& spec,
-                            const Built& built, const Kernels& kernels,
-                            const Rheology& rheology,
+                            const Built& built,
+                            const std::vector<std::vector<double>>& eta,
                             const Material& material) {
   const auto& mesh = material.Mesh();
   const auto& matScales = material.ModelScales();
   // dJ = int K d eta dV = 4 pi int K(r) d eta(r) r^2 dr per branch
-  const auto eta = kernels.Viscosity(rheology);
   const auto etaSi = matScales.Factor(ViscosityDimensions);
   const auto rSi = matScales.Length();
   const auto weights =
@@ -1414,12 +1578,15 @@ void WriteViscosityKernel1D(const std::filesystem::path& path,
   }
 }
 
-/// The radial kernels in the bulk and the unrelaxed shear modulus as a
-/// text table at the memory points, element by element, densities per
-/// unit volume in SI with each point's radius, volume weight and moduli.
+/// The radial kernels in the bulk and the unrelaxed shear modulus
+/// (Kernels' kappaKernel and muKernel, or their derivatives along a
+/// direction, at the operator's memory points) as a text table at the
+/// memory points, element by element, densities per unit volume in SI with
+/// each point's radius, volume weight and moduli.
 void WriteModuliKernel1D(const std::filesystem::path& path, const Writing& w,
                          const MeasurementSpec& spec, const Built& built,
-                         const Kernels& kernels,
+                         std::span<const double> kappaKernel,
+                         std::span<const double> muKernel,
                          const ViscoelasticOperator& op,
                          const Material& material) {
   const auto& mesh = material.Mesh();
@@ -1432,8 +1599,7 @@ void WriteModuliKernel1D(const std::filesystem::path& path, const Writing& w,
   const auto pa = matScales.Factor(ModulusDimensions);
   const auto rSi = matScales.Length();
   const auto toKernel = built.factor / (pa * rSi * rSi * rSi);
-  if (kernels.kappaKernel.size() != radii.size() ||
-      kernels.muKernel.size() != radii.size()) {
+  if (kappaKernel.size() != radii.size() || muKernel.size() != radii.size()) {
     throw std::logic_error("the moduli kernels are not at the memory points");
   }
   auto out = std::ofstream(path);
@@ -1452,9 +1618,8 @@ void WriteModuliKernel1D(const std::filesystem::path& path, const Writing& w,
   for (auto i = std::size_t{0}; i < radii.size(); ++i) {
     out << std::format("{:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g}\n",
                        radii[i] * rSi, weights[i] * rSi * rSi * rSi,
-                       bulk[i] * pa, shear[i] * pa,
-                       toKernel * kernels.kappaKernel[i],
-                       toKernel * kernels.muKernel[i]);
+                       bulk[i] * pa, shear[i] * pa, toKernel * kappaKernel[i],
+                       toKernel * muKernel[i]);
   }
 }
 
@@ -1506,6 +1671,14 @@ std::string SweepEach(
   const auto steps = w.relaxation ? ", " + w.relaxation->text : std::string{};
   values << std::format("# adjoint {}{}\n", MethodWord(w.method), steps);
   if (w.total) values << std::format("# calibration {}\n", w.Derivative());
+  // the direction of the second-order kernels
+  if (block.second_order) {
+    values << "# second_order the kernels' derivatives along the "
+              "perturbation, in the files <name>_..._second_order\n";
+    for (const auto& [name, text] : w.along) {
+      values << std::format("# perturbation {} {}\n", name, text);
+    }
+  }
   const auto unit =
       run.times && !run.times->Dated() ? run.times->unit.name : "kyr";
   values << std::format(
@@ -1543,11 +1716,16 @@ std::string SweepEach(
              : std::string{});
   }
   return std::format(
-      "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint{}{}{})",
+      "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint{}{}{}{})",
       read, block.measurements.size(), block.output.string(), names,
       MethodWord(w.method), steps, derivatives,
       block.lateral.value_or(false) ? "; the kernels in the Earth as fields"
-                                    : "");
+                                    : "",
+      block.second_order
+          ? std::format("; and their second-order kernels along the "
+                        "perturbation's {}",
+                        w.Members())
+          : std::string{});
 }
 
 /// The forcing of one measurement's sweep about a run. A calibrated run's
@@ -1602,6 +1780,10 @@ Options AdjointOptionsOf(const KernelInput& input, const Writing& w) {
   auto options = Options{};
   options.method = block.method;
   options.rtol = input.run.solver.rtol;
+  // the partial kernels of a calibrated run hold its initial sea level, and
+  // so do their derivatives (the second-order sweep's about a state the
+  // calibration marked)
+  options.initial_sea_level_held = input.run.Calibrating() && !block.total;
   options.material_kernels = block.Writes(KernelParameter::Moduli);
   options.tide_kernels = block.Writes(KernelParameter::Tide);
   if (block.Writes(KernelParameter::Moment)) {
@@ -1630,7 +1812,9 @@ Writing WritingOf(const std::filesystem::path& config,
                    .relaxation = std::nullopt,
                    .total = run.Calibrating()
                                 ? std::optional<bool>{input.kernels.total}
-                                : std::nullopt};
+                                : std::nullopt,
+                   .second = false,
+                   .along = {}};
   if (run.times) {
     for (auto n = std::size_t{0}; n < run.times->Size(); ++n) {
       w.axis.push_back(run.times->Axis(n));
@@ -1639,6 +1823,9 @@ Writing WritingOf(const std::filesystem::path& config,
   }
   w.held = run.ocean && (!run.times || run.ocean->at == WindowEnd::Start);
   w.points = SourcePointsOf(run, solver);
+  if (input.perturbation) {
+    w.along = DescribePerturbation(run, *input.perturbation);
+  }
   return w;
 }
 
@@ -1705,13 +1892,25 @@ void WriteFieldKernels(const std::filesystem::path& stem,
   // the values non-dimensional under the model's own scales, the
   // writer's
   const auto toModel = built.factor / matScales.Factor(built.objective);
-  const auto write = [&](const std::string& suffix,
+  const auto write = [&](std::string_view kind,
                          std::vector<io::NodeField> fields,
                          io::KernelFileOptions file) {
     if (!ranks.First()) return;
     // of a calibrated run: 1 for the total derivatives, 0 for the partial
     if (w.total) {
       file.meta.emplace("calibration_total_derivative", *w.total ? 1.0 : 0.0);
+    }
+    // a second-order file: what its fields are and along what
+    if (w.second) {
+      file.name = "second-order " + file.name;
+      file.text.emplace("second_order", kSecondOrder);
+      for (const auto& [name, text] : w.along) {
+        file.text.emplace("perturbation_" + name, text);
+      }
+      for (auto& field : fields) {
+        field.meaning = "the derivative along the perturbation of: " +
+                        field.meaning;
+      }
     }
     const auto& relaxation = w.relaxation;
     if (relaxation) {
@@ -1720,7 +1919,7 @@ void WriteFieldKernels(const std::filesystem::path& stem,
       file.meta.emplace("shortest_relaxation_time_s", relaxation->time_s);
       file.meta.emplace("shortest_relaxation_radius_m", relaxation->radius_m);
     }
-    const auto path = std::filesystem::path(stem.string() + suffix);
+    const auto path = w.Named(stem, kind, ".nc");
     const auto written = io::WriteNodeFields(path, whole ? *whole : coupling,
                                              mesh, earth.model, fields, file);
     if (!written) throw std::runtime_error(written.error().message);
@@ -1753,7 +1952,7 @@ void WriteFieldKernels(const std::filesystem::path& stem,
                                    .time = built.objective.time},
           .values = kept[b]});
     }
-    write("_viscosity_kernels.nc", std::move(fields),
+    write("_viscosity_kernels", std::move(fields),
           {.name = std::format("viscosity kernels of {}", spec.name),
            .meta = {{"lateral_log_viscosity_pairing", built.factor * lateral},
                     {"uniform_log_viscosity_pairing", built.factor * uniform}}});
@@ -1773,7 +1972,7 @@ void WriteFieldKernels(const std::filesystem::path& stem,
     const auto dims = Dimensions{.mass = built.objective.mass - 1,
                                  .length = built.objective.length + 1 - 3,
                                  .time = built.objective.time + 2};
-    write("_moduli_kernels.nc",
+    write("_moduli_kernels",
           {io::NodeField{.name = "K_kappa",
                          .meaning = "dJ per Pa of the bulk modulus "
                                     "(absolute perturbation), per unit "
@@ -1792,20 +1991,73 @@ void WriteFieldKernels(const std::filesystem::path& stem,
   }
 }
 
+/// The derivatives along a direction of a radial run's viscosity kernels
+/// (Kernels::Viscosity, per branch at the mesh's nodes): of
+/// K_eta_b = -(itau_b^2 / mu_b) K_b, K_b the kernel in itau_b, with the
+/// direction's delta itau_b (`ditau`, nodal per branch; empty for none)
+/// and its change of the unrelaxed shear modulus at the nodes (`dmu`;
+/// empty for none), which moves every branch's modulus in proportion, the
+/// relaxation times held:
+///   dK_eta_b = -(itau_b^2 / mu_b) dK_b - (2 itau_b delta itau_b / mu_b) K_b
+///              + (itau_b^2 delta mu_b / mu_b^2) K_b,
+/// delta mu_b = mu_b delta mu / mu, which is what the files of the kernels
+/// of the run moved along the direction differ by.
+std::vector<std::vector<double>> ViscosityDerivatives(
+    const Kernels& kernels, const KernelDerivatives& derivatives,
+    const Rheology& rheology, const std::vector<std::vector<double>>& ditau,
+    std::span<const double> dmu) {
+  const auto shear = rheology.BaseMaterial().Moduli().KappaMu().second;
+  auto out = std::vector<std::vector<double>>{};
+  for (auto b = std::size_t{0}; b < rheology.BranchCount(); ++b) {
+    const auto& branch = rheology.BranchAt(b);
+    const auto& K = kernels.itauKernel[b];
+    const auto& dK = derivatives.itauKernel[b];
+    auto kernel = std::vector<double>(K.size(), 0.0);
+    for (auto i = std::size_t{0}; i < kernel.size(); ++i) {
+      const auto mu = branch.mu[i];
+      if (!(mu > 0.0)) continue;
+      const auto itau = branch.itau[i];
+      const auto dItau = ditau.empty() ? 0.0 : ditau[b][i];
+      const auto dMu =
+          dmu.empty() || !(shear[i] > 0.0) ? 0.0 : mu * dmu[i] / shear[i];
+      kernel[i] = -(itau * itau / mu) * dK[i] - (2.0 * itau * dItau / mu) * K[i] +
+                  (itau * itau * dMu / (mu * mu)) * K[i];
+    }
+    out.push_back(std::move(kernel));
+  }
+  return out;
+}
+
+/// The second-order kernels' writing beside the first-order kernels': the
+/// same, its files the second-order ones.
+Writing SecondOrderOf(const Writing& w) {
+  auto out = w;
+  out.second = true;
+  return out;
+}
+
 /// The kernels over a recorded radial run (the static problem's one
-/// node, or a run through time), its snapshots from `evolution` on the
+/// node, or a run through time), its snapshots from its evolution on the
 /// operator's rheology: the radial profiles of the viscosity and moduli
 /// kernels, and with `kernels.lateral` their fields over the memory nodes'
 /// grids too (LateralKernelSolver's radial route), written as a 3-D run's
-/// are, the run's own lateral structure none.
+/// are, the run's own lateral structure none. With `kernels.second_order`
+/// the second-order kernels too, along the direction of the `perturbation`
+/// block (`forcing`, PerturbedForcingOf's run): the direction against the
+/// run (SurfaceDirectionOf, AddEarthDirection), its tangent-linear run
+/// recorded at every node by the kernels' method, and per measurement one
+/// second-order sweep, whose kernels are the first-order files' and whose
+/// derivatives the second-order files'.
 std::string Sweep1D(const KernelInput& input, const Json& top,
-                    const Writing& w, const Evolution& evolution,
-                    std::span<const Evolution::Snapshot> snapshots,
-                    std::span<const double> times,
-                    const ViscoelasticOperator& op, const Rheology& rheology,
-                    const BuiltEarth& earth, std::string_view iceRead,
-                    std::string_view seaLevelRead, std::string_view read) {
+                    const Writing& w, const Recorded1D& recorded,
+                    const Run& forcing) {
   const auto& block = input.kernels;
+  const auto& evolution = *recorded.evolution;
+  const auto snapshots = recorded.snapshots;
+  const auto& times = recorded.steps.times;
+  const auto& op = *recorded.op;
+  const auto& rheology = *recorded.rheology;
+  const auto& earth = *recorded.earth;
   const auto& material = earth.material;
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
   // about a migrating run, the sweeps linearise about its own shorelines
@@ -1830,9 +2082,46 @@ std::string Sweep1D(const KernelInput& input, const Json& top,
       lateral && block.Writes(KernelParameter::Viscosity)
           ? io::SampleNodeField(lateral->Coupling(), DeltaOf(earth))
           : std::vector<double>{};
+  // the second-order kernels' direction and its tangent-linear run
+  auto direction = std::optional<Direction<TangentPerturbation>>{};
+  auto tangent = std::vector<Evolution::Snapshot>{};
+  auto shear = std::vector<double>{};
+  if (block.second_order) {
+    const auto& perturbation = *input.perturbation;
+    const auto& member = top.At("perturbation");
+    direction = SurfaceDirectionOf<TangentPerturbation>(
+        recorded, perturbation, forcing, member, block.total);
+    AddEarthDirection(direction->perturbation, perturbation, recorded, member);
+    shear = ShearChangeAtNodes(perturbation, recorded, member);
+    auto tangentOptions = TangentLinearSolver::Options{};
+    tangentOptions.method = block.method;
+    tangentOptions.rtol = input.run.solver.rtol;
+    tangentOptions.record = true;
+    tangent = TangentLinearSolver(evolution, tangentOptions)
+                  .Run(times, direction->perturbation, &trajectory, oceans);
+  }
+  const auto second = SecondOrderOf(w);
+  // a measurement's radial files, of the kernels or of their derivatives
+  const auto writeRadial = [&](const Writing& ww, const std::filesystem::path& stem,
+                               const MeasurementSpec& spec, const Built& built,
+                               const Kernels& kernels,
+                               const std::vector<std::vector<double>>& eta,
+                               const Multiplier* multiplier) {
+    WriteSurfaceKernels(stem, ww, block, spec, kernels, built, multiplier);
+    if (block.Writes(KernelParameter::Viscosity)) {
+      WriteViscosityKernel1D(ww.Named(stem, "_viscosity_kernel", ".txt"), ww,
+                             spec, built, eta, material);
+    }
+    if (block.Writes(KernelParameter::Moduli)) {
+      WriteModuliKernel1D(ww.Named(stem, "_moduli_kernel", ".txt"), ww, spec,
+                          built, kernels.kappaKernel, kernels.muKernel, op,
+                          material);
+    }
+  };
   auto mostSweeps = 0;
   return SweepEach<Evolution::Snapshot>(
-      input, w, snapshots, iceRead, seaLevelRead, read, mostSweeps,
+      input, w, snapshots, recorded.IceRead(), recorded.SeaLevelRead(),
+      recorded.read, mostSweeps,
       [&](const MeasurementSpec& spec, const Built& built,
           const std::filesystem::path& stem) {
         // a calibrated run's total kernels: the measurement less the
@@ -1841,6 +2130,26 @@ std::string Sweep1D(const KernelInput& input, const Json& top,
         const auto multiplier =
             CalibratedForcing(input, top, w, evolution, times, spec, built,
                               oceans, options, measurements, mostSweeps);
+        const auto* lambda = multiplier ? &*multiplier : nullptr;
+        const auto viscous = block.Writes(KernelParameter::Viscosity);
+        if (direction) {
+          // the kernels and their derivatives along the direction, by one
+          // sweep (no lateral kernels: refused beside the second order)
+          const auto [kernels, derivatives] = adjoint.SecondOrderKernels(
+              times, measurements, tangent, direction->perturbation.itau,
+              trajectory, oceans, direction->perturbation.material);
+          writeRadial(w, stem, spec, built, kernels,
+                      viscous ? kernels.Viscosity(rheology)
+                              : std::vector<std::vector<double>>{},
+                      lambda);
+          writeRadial(second, stem, spec, built, AsKernels(derivatives),
+                      viscous ? ViscosityDerivatives(
+                                    kernels, derivatives, rheology,
+                                    direction->perturbation.itau, shear)
+                              : std::vector<std::vector<double>>{},
+                      lambda);
+          return;
+        }
         auto fields = std::optional<Kernels3D>{};
         if (lateral) {
           fields = lateral->FirstOrderKernels(times, measurements, trajectory,
@@ -1850,16 +2159,10 @@ std::string Sweep1D(const KernelInput& input, const Json& top,
             fields ? fields->ice
                    : adjoint.FirstOrderKernels(times, measurements, &trajectory,
                                                oceans);
-        WriteSurfaceKernels(stem, w, block, spec, kernels, built,
-                            multiplier ? &*multiplier : nullptr);
-        if (block.Writes(KernelParameter::Viscosity)) {
-          WriteViscosityKernel1D(stem.string() + "_viscosity_kernel.txt", w,
-                                 spec, built, kernels, rheology, material);
-        }
-        if (block.Writes(KernelParameter::Moduli)) {
-          WriteModuliKernel1D(stem.string() + "_moduli_kernel.txt", w, spec,
-                              built, kernels, op, material);
-        }
+        writeRadial(w, stem, spec, built, kernels,
+                    viscous ? kernels.Viscosity(rheology)
+                            : std::vector<std::vector<double>>{},
+                    lambda);
         if (fields) {
           WriteFieldKernels(stem, block, w, spec, built, *fields,
                             lateral->Coupling(), nullptr,
@@ -1868,22 +2171,42 @@ std::string Sweep1D(const KernelInput& input, const Json& top,
       });
 }
 
+/// The derivatives of a 3-D run's kernels along a direction
+/// (KernelDerivatives3D) as Kernels3D, for the writers of the first-order
+/// files.
+Kernels3D AsKernels3D(const KernelDerivatives3D& d) {
+  auto out = Kernels3D{};
+  out.ice = AsKernels(d.ice);
+  out.itauKernel3D = d.itauKernel3D;
+  out.itauKernelSpherical = d.itauKernelSpherical;
+  out.logViscosityKernel3D = d.logViscosityKernel3D;
+  out.kappaKernel3D = d.kappaKernel3D;
+  out.muKernel3D = d.muKernel3D;
+  out.kappaKernelSpherical = d.kappaKernelSpherical;
+  out.muKernelSpherical = d.muKernelSpherical;
+  return out;
+}
+
 /// The 3-D kernels over a recorded 3-D run: the ice-history, load, tide
 /// and moment kernels as the 1-D ones, the log-viscosity kernels and the
 /// moduli kernels as planetmodel model files over the coupling's memory
 /// nodes (gathered to the first rank on several), each with its pairing
 /// against the run's own lateral structure (the log viscosity's against a
-/// uniform perturbation too) in the metadata.
+/// uniform perturbation too) in the metadata. With `kernels.second_order`
+/// the second-order kernels too, as the radial run's: the direction over
+/// each rank's own memory nodes, its tangent-linear run collective.
 std::string Sweep3D(const KernelInput& input, const Json& top,
-                    const Writing& w, const Evolution3D& evolution,
-                    std::span<const Evolution3D::Snapshot> snapshots,
-                    const ForwardTrajectory3D& trajectory,
-                    std::span<const double> times, const Viscoelastic3D& op,
-                    const BuiltEarth& earth, std::string_view iceRead,
-                    std::string_view seaLevelRead, std::string_view read) {
+                    const Writing& w, const Recorded3D& recorded,
+                    const Run& forcing) {
   const auto& run = input.run;
   const auto& block = input.kernels;
   const auto& ranks = TheRanks();
+  const auto& evolution = *recorded.evolution;
+  const auto snapshots = recorded.snapshots;
+  const auto& trajectory = *recorded.trajectory;
+  const auto& times = recorded.steps.times;
+  const auto& op = *recorded.op;
+  const auto& earth = *recorded.earth;
   const auto oceans =
       run.Migrating() ? OceanFunctions::Of(snapshots) : OceanFunctions{};
   auto options = AdjointOptionsOf<AdjointSolver3D::Options>(input, w);
@@ -1898,9 +2221,60 @@ std::string Sweep3D(const KernelInput& input, const Json& top,
   const auto delta = block.Writes(KernelParameter::Viscosity)
                          ? io::SampleNodeField(coupling, DeltaOf(earth))
                          : std::vector<double>{};
+  // the second-order kernels' direction and its tangent-linear run; the
+  // direction's relaxation times, every branch's change of ln viscosity
+  // and each branch's own, over the grid values
+  auto direction = std::optional<Direction<TangentPerturbation3D>>{};
+  auto tangent = std::vector<Evolution3D::Snapshot>{};
+  auto itau = std::vector<std::vector<double>>{};
+  if (block.second_order) {
+    const auto& perturbation = *input.perturbation;
+    const auto& member = top.At("perturbation");
+    direction = SurfaceDirectionOf<TangentPerturbation3D>(
+        recorded, perturbation, forcing, member, block.total);
+    AddEarthDirection(direction->perturbation, perturbation, recorded, member);
+    const auto& d = direction->perturbation;
+    if (!d.logViscosity.empty()) {
+      itau = TangentLinearSolver3D::ItauOfLogViscosity(op, d.logViscosity);
+    }
+    if (!d.itau.empty()) {
+      if (itau.empty()) {
+        itau = d.itau;
+      } else {
+        for (auto b = std::size_t{0}; b < itau.size(); ++b) {
+          for (auto i = std::size_t{0}; i < itau[b].size(); ++i) {
+            itau[b][i] += d.itau[b][i];
+          }
+        }
+      }
+    }
+    auto tangentOptions = TangentLinearSolver3D::Options{};
+    tangentOptions.method = block.method;
+    tangentOptions.rtol = run.solver.rtol;
+    tangentOptions.max_coupled_iterations = run.solver.step_max_iterations;
+    tangentOptions.coupled_rtol = run.solver.step_rtol;
+    tangentOptions.record = true;
+    tangent = TangentLinearSolver3D(evolution, tangentOptions)
+                  .Run(times, d, &trajectory, oceans);
+  }
+  const auto second = SecondOrderOf(w);
+  // a measurement's files, of the kernels or of their derivatives
+  const auto writeAll = [&](const Writing& ww, const std::filesystem::path& stem,
+                            const MeasurementSpec& spec, const Built& built,
+                            const Kernels3D& kernels,
+                            const Multiplier* multiplier) {
+    if (ranks.First()) {
+      WriteSurfaceKernels(stem, ww, block, spec, kernels.ice, built,
+                          multiplier);
+    }
+    WriteFieldKernels(stem, block, ww, spec, built, kernels, coupling,
+                      whole ? &*whole : nullptr, mesh, earth, delta,
+                      op.UnrelaxedShearPerturbation(), op.BulkPerturbation());
+  };
   auto mostSweeps = 0;
   return SweepEach<Evolution3D::Snapshot>(
-      input, w, snapshots, iceRead, seaLevelRead, read, mostSweeps,
+      input, w, snapshots, recorded.IceRead(), recorded.SeaLevelRead(),
+      recorded.read, mostSweeps,
       [&](const MeasurementSpec& spec, const Built& built,
           const std::filesystem::path& stem) {
         // a calibrated run's total kernels, as the radial run's (collective:
@@ -1909,16 +2283,20 @@ std::string Sweep3D(const KernelInput& input, const Json& top,
         const auto multiplier =
             CalibratedForcing(input, top, w, evolution, times, spec, built,
                               oceans, options, measurements, mostSweeps);
-        const auto kernels = adjoint.FirstOrderKernels(
-            times, measurements, &trajectory, oceans);
-        if (ranks.First()) {
-          WriteSurfaceKernels(stem, w, block, spec, kernels.ice, built,
-                              multiplier ? &*multiplier : nullptr);
+        const auto* lambda = multiplier ? &*multiplier : nullptr;
+        if (direction) {
+          const auto [kernels, derivatives] = adjoint.SecondOrderKernels(
+              times, measurements, tangent, itau, trajectory, oceans,
+              direction->perturbation.material);
+          writeAll(w, stem, spec, built, kernels, lambda);
+          writeAll(second, stem, spec, built, AsKernels3D(derivatives),
+                   lambda);
+          return;
         }
-        WriteFieldKernels(stem, block, w, spec, built, kernels,
-                          coupling, whole ? &*whole : nullptr, mesh, earth,
-                          delta, op.UnrelaxedShearPerturbation(),
-                          op.BulkPerturbation());
+        writeAll(w, stem, spec, built,
+                 adjoint.FirstOrderKernels(times, measurements, &trajectory,
+                                           oceans),
+                 lambda);
       });
 }
 
@@ -1957,7 +2335,8 @@ void RefuseOnRanks3D(const Json& top, const KernelInput& input) {
 /// steps against the shortest relaxation time through time.
 std::string Kernel1D(const std::filesystem::path& config,
                      const KernelInput& input, const Json& top,
-                     const BuiltEarth& earth, const Recorded1D& recorded) {
+                     const BuiltEarth& earth, const Run& forcing,
+                     const Recorded1D& recorded) {
   const auto& run = input.run;
   auto w = WritingOf(config, input, *recorded.solver);
   if (run.times && w.method == AdjointMethod::Continuous) {
@@ -1965,9 +2344,7 @@ std::string Kernel1D(const std::filesystem::path& config,
                                 recorded.op->ShortestRelaxation(), earth,
                                 recorded.rheology->BranchCount());
   }
-  return Sweep1D(input, top, w, *recorded.evolution, recorded.snapshots,
-                 recorded.steps.times, *recorded.op, *recorded.rheology, earth,
-                 recorded.IceRead(), recorded.SeaLevelRead(), recorded.read);
+  return Sweep1D(input, top, w, recorded, forcing);
 }
 
 /// The kernels over a recorded 3-D run, as the radial one's; the steps
@@ -1975,7 +2352,8 @@ std::string Kernel1D(const std::filesystem::path& config,
 /// every rank asks).
 std::string Kernel3D(const std::filesystem::path& config,
                      const KernelInput& input, const Json& top,
-                     const BuiltEarth& earth, const Recorded3D& recorded) {
+                     const BuiltEarth& earth, const Run& forcing,
+                     const Recorded3D& recorded) {
   const auto& run = input.run;
   auto w = WritingOf(config, input, *recorded.solver);
   if (run.times && w.method == AdjointMethod::Continuous) {
@@ -1983,10 +2361,7 @@ std::string Kernel3D(const std::filesystem::path& config,
                                 recorded.op->ShortestRelaxation(), earth,
                                 recorded.rheology->BranchCount());
   }
-  return Sweep3D(input, top, w, *recorded.evolution, recorded.snapshots,
-                 *recorded.trajectory, recorded.steps.times, *recorded.op,
-                 earth, recorded.IceRead(), recorded.SeaLevelRead(),
-                 recorded.read);
+  return Sweep3D(input, top, w, recorded, forcing);
 }
 
 }  // namespace
@@ -2011,12 +2386,34 @@ std::string RunKernel(const std::filesystem::path& config) {
                      earth.Dimension()));
   }
   const auto lateral = input.kernels.lateral.value_or(false);
+  // the direction of the second-order kernels: its forcing readied against
+  // the Earth as the run's own, its model files held to the Earth before
+  // the forward run (a radial run, the static problem's on a radial Earth
+  // too, takes radial ones)
+  auto forcing = run;
+  if (input.perturbation) {
+    const auto radial = run.problem == Problem::Static ? !earth.LateralModuli()
+                                                       : !earth.Lateral();
+    if (radial && lateral) {
+      Fail(top.At("kernels").At("lateral"),
+           "asks for the kernels in the viscosity and the moduli as fields "
+           "about a radial run, and `second_order` for their second-order "
+           "kernels: the second-order kernels as fields about a radial run "
+           "are not built (the radial sweeps' lateral kernels have no "
+           "second-order sweep). Drop `lateral` for the radial profiles' "
+           "second-order kernels, or give the model lateral structure, whose "
+           "3-D sweep forms the fields' (or drop `second_order`)");
+    }
+    const auto& block = top.At("perturbation");
+    forcing = PerturbedForcingOf(run, *input.perturbation, earth, block);
+    CheckEarthDirection(*input.perturbation, earth, !radial, block);
+  }
   // the sweeps over the recorded forward run
   const auto sweep1D = [&](const Recorded1D& recorded) {
-    return Kernel1D(config, input, top, earth, recorded);
+    return Kernel1D(config, input, top, earth, forcing, recorded);
   };
   const auto sweep3D = [&](const Recorded3D& recorded) {
-    return Kernel3D(config, input, top, earth, recorded);
+    return Kernel3D(config, input, top, earth, forcing, recorded);
   };
   if (run.problem == Problem::Static) {
     // a viscosity file is refused in the static problem when the config is

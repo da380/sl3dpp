@@ -251,9 +251,9 @@ class AdjointSolver3D {
     /// under Sdirk2 the discrete sweep, first and second order, is the
     /// transpose of the two-stage step (each first stage about its own
     /// state, the stage repeated under its recorded closure, and its own
-    /// shorelines, OceanFunctions::stages), and the continuous first-order
-    /// sweep steps by the same stages; the continuous second-order sweep is
-    /// not built there and is refused (docs/adjoints.md §1a).
+    /// shorelines, OceanFunctions::stages), and the continuous sweep steps
+    /// by the same stages, the second-order one the adjoint state and its
+    /// derivative together (docs/adjoints.md §1a).
     AdjointMethod method = AdjointMethod::Discrete;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
@@ -348,7 +348,8 @@ class AdjointSolver3D {
    *
    * @param tangent v's tangent-linear run about the forward run, recorded
    * at every node (TangentLinearSolver3D::Options::record), by the SAME
-   * method as Options::method.
+   * method as Options::method: a run of the other method is refused
+   * (Evolution3D::Snapshot::tangentMethod).
    * @param itau v's perturbation of itau over the grid values, per
    * branch (TangentPerturbation3D::itau; a log-viscosity direction maps
    * to it by TangentLinearSolver3D::ItauOfLogViscosity); empty for none.

@@ -4,6 +4,7 @@
 #include <optional>
 #include <stdexcept>
 
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/InteriorSources.hpp"
@@ -129,7 +130,9 @@ std::map<int, std::vector<double>> TangentLinearSolver::FirstOrderDrive(
     const auto ncols = static_cast<int>(
         mPrev.size() / (K * 3 * static_cast<std::size_t>(deg.ne) * deg.np));
     const auto block = deg.NodalSize(ncols);
-    const auto& d0 = prev.strain.at(l);
+    // (a backward Euler step reads no start strain: a combined stage start
+    // or a state just jumped need carry none)
+    const auto* d0 = implicit ? nullptr : &prev.strain.at(l);
     const auto& d1 = next.strain.at(l);
     const auto& mNext = next.m.at(l);
     auto extra = std::vector<double>(mPrev.size(), 0.0);
@@ -153,7 +156,7 @@ std::map<int, std::vector<double>> TangentLinearSolver::FirstOrderDrive(
                     implicit
                         ? dw.e[full] * dh * (mPrev[at + c] - d1[sn + c])
                         : dh * (dw.e[full] * mPrev[at + c] +
-                                dw.alpha[full] * d0[sn + c] +
+                                dw.alpha[full] * (*d0)[sn + c] +
                                 dw.beta[full] * d1[sn + c]);
               }
             } else {
@@ -162,10 +165,13 @@ std::map<int, std::vector<double>> TangentLinearSolver::FirstOrderDrive(
               if (itau <= 0.0) continue;
               const auto ratio = delta / itau;
               for (auto c = 0; c < ncols; ++c) {
-                const auto q0 = (d0[sn + c] - mPrev[at + c]) * ratio;
                 const auto q1 = (d1[sn + c] - mNext[at + c]) * ratio;
-                extra[at + c] = implicit ? (1.0 - w.e[full]) * q1
-                                         : w.alpha[full] * q0 + w.beta[full] * q1;
+                if (implicit) {
+                  extra[at + c] = (1.0 - w.e[full]) * q1;
+                } else {
+                  const auto q0 = ((*d0)[sn + c] - mPrev[at + c]) * ratio;
+                  extra[at + c] = w.alpha[full] * q0 + w.beta[full] * q1;
+                }
               }
             }
           }
@@ -642,17 +648,6 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   if (!direction.itau.empty()) CheckTrajectory(trajectory, nodes);
   const bool hasMaterial = !direction.material.Empty();
   if (hasMaterial) CheckTrajectory(trajectory, nodes);
-  if (IsMultiStage(scheme) && options_.method == AdjointMethod::Continuous &&
-      !direction.itau.empty()) {
-    throw std::invalid_argument(
-        "the continuous tangent-linear drive of a direction in the "
-        "relaxation times (Options::method AdjointMethod::Continuous) is "
-        "not built for Sdirk2: it serves the continuous second-order sweep, "
-        "which is not built for it either. The discrete run (AdjointMethod::"
-        "Discrete, the default method) steps by the scheme's stages; or "
-        "state a one-stage scheme, Scheme::ExponentialTrapezoid, in the "
-        "evolution's Options::scheme, whose default is Sdirk2");
-  }
   detail::CheckStageOceanFunctions(scheme, times, migrating,
                                    oceanFunctions.stages, fieldSize);
 
@@ -831,15 +826,17 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   const auto nodes = times.size();
   const bool discrete = options_.method == AdjointMethod::Discrete;
 
+  // about a state calibrated under migrating shorelines the run holds the
+  // initial sea level, which the calibrated run's own does not
+  if (ev.Calibrated() && !oceanFunctions.nodes.empty() &&
+      !options_.initial_sea_level_held) {
+    RefuseCalibratedSecondOrderRun();
+  }
   CheckTimes(times);
-  if (IsMultiStage(scheme) && !discrete) {
-    throw std::invalid_argument(
-        "the continuous second-order tangent-linear run (Options::method "
-        "AdjointMethod::Continuous) is not built for Sdirk2: its drive is a "
-        "one-stage step's. The discrete run (AdjointMethod::Discrete, the "
-        "default method) steps by the scheme's stages; or state a one-stage "
-        "scheme, Scheme::ExponentialTrapezoid, in the evolution's "
-        "Options::scheme, whose default is Sdirk2");
+  for (const auto run : {tangentU, tangentV}) {
+    detail::CheckTangentMethod(
+        run, options_.method,
+        "the second-order run (TangentLinearSolver::RunSecondOrder)");
   }
   const auto dts = StepSizes(ev, times);
   const bool both = !direction.itauU.empty() && !direction.itauV.empty();
@@ -1457,6 +1454,9 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     }
     record(node, response);
   }
+  // the method the run is by, which a second-order sweep or run reading it
+  // must share (detail::CheckTangentMethod)
+  for (auto& snapshot : snapshots) snapshot.tangentMethod = options_.method;
   return snapshots;
 }
 

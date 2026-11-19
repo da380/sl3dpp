@@ -307,8 +307,6 @@ struct Kernels {
   std::vector<double> muKernel;
 };
 
-enum class AdjointMethod { Continuous, Discrete };
-
 /**
  * @brief The derivative of an objective's kernels along a direction v of
  * the model parameters: what the second-order adjoint returns, the
@@ -337,6 +335,12 @@ struct KernelDerivatives {
   std::vector<std::vector<double>> solidSurfaceChangeKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> initialSeaLevel;
+  /// The derivatives along v of Kernels' `baseline` (the dual of the ice
+  /// the run starts from, the ice at every node held) and `rate` (the
+  /// quelled view, per interval), in their pairings. The distributional
+  /// view's (`density`, `instantaneous`) is not formed.
+  std::vector<double> baseline;
+  std::vector<std::vector<double>> rate;
   std::vector<std::vector<double>> itauKernel;
   /// The derivatives along v of the material kernels (Kernels::
   /// kappaKernel, muKernel), in their layout: the material rows of the
@@ -416,8 +420,9 @@ class AdjointSolver {
     /// the exact transpose of the two-stage step and the continuous sweep
     /// steps the adjoint by the same stages; the discrete second-order
     /// sweep is the derivative of the first, and the continuous
-    /// second-order sweep is not built there and is refused
-    /// (docs/adjoints.md §1a).
+    /// second-order sweep steps the adjoint state and its derivative
+    /// together by them, its derivatives the exact derivative of the
+    /// continuous kernels at the step (docs/adjoints.md §1a).
     AdjointMethod method = AdjointMethod::Discrete;
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
@@ -512,7 +517,8 @@ class AdjointSolver {
    *
    * @param tangent v's tangent-linear run about the forward run, recorded
    * at every node (TangentLinearSolver::Options::record), by the same
-   * method as this sweep.
+   * method as this sweep: a run of the other method is refused
+   * (Evolution::Snapshot::tangentMethod).
    * @param itau v's perturbation of the inverse relaxation times, nodal
    * per branch over the material's mesh (TangentPerturbation::itau);
    * empty for none.
@@ -575,7 +581,7 @@ class AdjointSolver {
       std::span<const Evolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
+      const OceanFunctions& oceanFunctions,
       const PointMaterialDirection& material) const;
   /// The two sweeps; with `lateral`, the lateral kernels' fields are
   /// handed to it as the sweep passes them.

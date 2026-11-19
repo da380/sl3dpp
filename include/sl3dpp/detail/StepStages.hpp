@@ -38,6 +38,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -259,6 +260,31 @@ template <class State, class InnerEnd, class Combine>
   return RecipeOf(scheme, times[node] > times[node - 1] ? 1.0 : 0.0)
              .stages.size() -
          1;
+}
+
+/// Refuses a tangent-linear run made by the other method than the
+/// second-order sweep or run that reads it (`reader`, as a refusal names
+/// it): the second-order sweep is the derivative of its own method's first
+/// sweep, which pairs with its own method's tangent-linear run alone
+/// (Evolution::Snapshot::tangentMethod, which TangentLinearSolver and
+/// TangentLinearSolver3D set; snapshots that carry none are taken).
+template <class Snapshot>
+void CheckTangentMethod(std::span<const Snapshot> tangent,
+                        AdjointMethod method, std::string_view reader) {
+  const auto word = [](AdjointMethod m) {
+    return m == AdjointMethod::Discrete ? "AdjointMethod::Discrete"
+                                        : "AdjointMethod::Continuous";
+  };
+  for (const auto& snapshot : tangent) {
+    if (!snapshot.tangentMethod || *snapshot.tangentMethod == method) continue;
+    throw std::invalid_argument(std::format(
+        "the tangent-linear run is by {} and {} by {}: a tangent-linear run "
+        "and the second-order sweep or run that reads it are of one method. "
+        "Make the run by {} (the tangent-linear solver's Options::method), "
+        "or take {} for both",
+        word(*snapshot.tangentMethod), reader, word(method), word(method),
+        word(*snapshot.tangentMethod)));
+  }
 }
 
 /// The checks a derivative run makes of the inner stages' ocean functions

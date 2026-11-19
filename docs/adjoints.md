@@ -98,6 +98,37 @@ its adjoint's relaxation damped by the stages, 1.9 / 1.0%. Which scheme
 and step to take for a run and its kernels is in
 [running.md](running.md), "Choosing a step and scheme".
 
+**A fast branch inside a layer.** A layer of several branches (Burgers,
+Prony) has the shortest relaxation time of its fastest branch, however
+weak that branch is, and the continuous kernels meet it in two ways. On
+a body of two branches in every mantle layer, the fast one 2% of the
+shear modulus with a thirtieth of the other's relaxation time (3.6 yr at
+its shortest; two smooth loads over 10 kyr, sea level measured at 6 and
+10 kyr):
+
+- *The other branches' kernels under the exponential trapezoid.* The
+  measurement's jump in the adjoint strain carries the fast branch's
+  part, which lasts that branch's relaxation time, and the reversed
+  trapezoid step reads it as linear across the step. The slow branch's
+  kernel is then off by about the fast branch's share of the modulus
+  times half the ratio of the step to its relaxation time: 47% at 1 kyr
+  steps and 16% at 1/8 kyr, at first order until the step is near the
+  fast relaxation time and second order after. Sdirk2's stages read no
+  start strain, and the slow branch's kernel is 2.4% off at 1 kyr and
+  under 5e-4 at 1/8 kyr.
+- *The fast branch's own kernel, under either scheme.* The kernel is the
+  node quadrature of a product that changes within the fast relaxation
+  time after each measurement and each change of the loading rate, so it
+  is first order in the ratio of the step to that time until the step
+  resolves it, and second order after: several times too large at 1 kyr
+  steps and 74% off at 1/8 kyr under Sdirk2 (114% under the trapezoid),
+  2.8% at 1/64 kyr. The kernel itself is small, 7e-4 to 9e-4 of the
+  body's kernel for a uniform change of ln eta, of which this error is
+  0.6% at 1 kyr and 0.05% at 1/8 kyr.
+
+The discrete kernels are the run's exact gradient branch by branch at
+every step (second order against the limit under Sdirk2).
+
 ## 1a. The derivatives under Sdirk2
 
 Under `Scheme::Sdirk2` (design.md §5) a step of length Δt is two
@@ -110,8 +141,9 @@ feedback, a tide, interior sources, jumps of the forcing (a zero-length
 step is one stage under every scheme), lateral viscosity and moduli,
 over radial segments: the tangent-linear runs, the discrete adjoint and
 the discrete second-order sweeps, which are derivatives of the stepped
-map, and the continuous adjoint, which steps the adjoint state by the
-same stages.
+map, the continuous adjoint, which steps the adjoint state by the same
+stages, and the continuous second-order sweep, which steps the adjoint
+state and its derivative together by them (below).
 
 **The stepped map's derivatives, stage by stage.** A stage is a
 one-stage step of its family from a memory state that is a constant
@@ -297,18 +329,125 @@ ending there, 39% of the derivative, which the continuous sweep meets
 through that stage's shorelines (the kernels 2.1% from central
 differences; `Migrating.TrajectoryKernelsUnderSdirk2`).
 
-**Not built under Sdirk2, the default scheme, each refused by name with
-its cure:** the continuous
-second-order sweep, whose derivative state's drive is a one-stage
-step's, and with it the continuous drive of a tangent-linear run along
-the relaxation times (`TangentLinearSolver::Options::method`
-`Continuous` with an `itau` or log-viscosity direction) and the
-continuous second-order tangent-linear run, which serve that sweep
-alone. The discrete second-order sweep and its runs (the default
-method) are built, and a tangent-linear run along the forcing or the
-moduli is the same by either method. The continuous second order is had
-by stating a one-stage scheme, `Scheme::ExponentialTrapezoid`, in the
-evolution's `Options::scheme` (§9, §11): the refusals say so.
+**The continuous tangent-linear runs.** By the continuous method a
+tangent-linear run steps its state by the stages as the discrete run
+does, each stage driven by backward Euler's continuous drive,
+(1 − w) (δitau/itau) (d − m) at the forward stage's end, w = 1/(1 + h)
+the stage's weight at its length γ Δt (`FirstOrderDrive` with the
+stage's family and length; a backward Euler stage reads no start strain,
+so a combined stage start carries none). A backward Euler stage from X
+ends at m = w X + (1 − w) d, so d − m = w (d − X); with (1 − w) δitau/itau
+= w dh, dh = γ Δt δitau, the continuous drive is w² dh (d − X) =
+−(dw/dh) dh (X − d), the discrete drive. This is the Runge–Kutta property
+that differentiating the stages in a parameter is the scheme applied to
+the variational equations; the exponential trapezoid's weights are
+exponentials of h, and its two drives differ at second order (§8). The
+second-order run's drives sum likewise to the discrete one's second
+weight, d²w = 2 w³: −w dh_u (d_v − m_v) − w dh_v (d_u − m_u) with v's
+and u's tangent stages in place = d²w dh_u dh_v (X − d). So under Sdirk2
+(and backward Euler) the continuous tangent-linear runs, first and
+second order, are the discrete ones along every direction: to rounding
+in 1D and to the coupled iteration's tolerance in 3D. The rounding is the
+stage states' amplified by the stiffest branch, the continuous drive
+forming d − m, a difference of nearly equal numbers where w is small: on
+the 1e21 Pa s mantle of two branches (the faster a fifth of the other's
+relaxation time) 4e-12 to 1e-10 of the run along the relaxation times,
+first and second order, frozen and migrating, about the faster branch's
+the largest; six to ten times smaller at 1e22 Pa s and larger at 1e20;
+the same at sea level tolerances from 1e-10 to 1e-14. In 3D under a
+lateral viscosity 1e-13 to 5e-13 (the coupled tolerance 1e-12).
+
+**The continuous second-order sweep.** It steps the adjoint state and its
+derivative along v together, stage by stage: Sdirk2 applied to the pair
+in reversed time. At each reversed stage the adjoint state's stage is
+taken from its combined start, and then the derivative state's from its
+own, driven by the continuous first-order drive of the adjoint stage's
+own states and, along a direction in the moduli, by v's material force on
+the adjoint stage's end solution and decayed memory (`MaterialTools::Force`
+with the stage's family and length; in 3D the stage's own lateral
+weights), the two closed under the same ocean function: the node's for the
+last stage, and for the inner one the run's shorelines between its solves
+(`detail::OceanFunctionWithinStep`), as the first-order sweep reads them.
+The toroidal adjoint and its derivative go the same way. The jumps at the
+measurements, the equilibria and the kernels' node quadrature are the
+one-stage schemes'; the ice views take each inner stage's share of its
+step by the stage's own shorelines as the first-order sweep's do
+(`detail::ContinuousStageLoads`), the derivative views by the same linear
+map of the derivative densities, the shorelines held. No state is
+recorded beyond what the discrete route keeps: the sweep reads the
+forward and tangent states at the nodes alone. By the same Runge–Kutta
+property the derivative state at every node is the exact derivative along
+v of the stepped continuous adjoint state, the tangent-linear run is the
+exact derivative of the stepped run, and the node quadrature is fixed: so
+under Sdirk2 **the continuous second-order kernels are the exact
+derivative of the continuous first-order kernels at a fixed step**, which
+under the exponential trapezoid they are not. Against the discrete
+second-order kernels they converge at second order, as the first-order
+continuous kernels do, and the continuous Hessian is symmetric to that
+order; about a run whose shorelines move inside its steps, in the cells
+that flip there, at first order (the first-order kernels' rate, above).
+A grid of one node (the static problem) has no step: there the two
+methods' second-order sweeps and runs are one, to rounding (3e-13 in 1D
+and 7e-12 in 3D through `sl3d kernel`, `TestAppsSecondOrder`).
+
+*Gates* (`TestSdirk2Continuous`). The continuous tangent-linear runs
+against the discrete (above), along a change of ln viscosity, one
+branch's relaxation times, the moduli and a thickness history, frozen and
+about the marine cap's migrating run, and the second-order run, held at
+1e-9 in 1D and 1e-10 in 3D; against central differences of forward runs
+the run along ln viscosity at second order in the difference step
+(ratio 4.000, Richardson 7e-10). Central differences of the continuous
+first-order kernels along v (the relaxation times, the moduli and the
+thickness moved; a mantle of two branches, 6 nodes) paired with u against
+the continuous second-order kernels: ratio 4.001, Richardson 1.8e-8 in 1D;
+along a lateral change of ln viscosity and the thickness in 3D, 4.000 and
+6.5e-10. Against the discrete sweep as the steps halve (η = 1e22 Pa s,
+10 kyr, 9 to 65 nodes, along u and v in the thickness, the relaxation
+times and the moduli): every block (ice, viscosity, moduli), the Hessian,
+its asymmetry ⟨H u, w⟩ − ⟨H w, u⟩ and its gap to the second-order run
+fall by 3.96 to 4.01 a halving in 1D (from 5e-4 to 6e-3 at 9 nodes); by
+3.84 to 4.01 in 3D under a lateral viscosity at the Gauss points (9, 17
+and 33 nodes; the blocks 2.9e-3 to 2.3e-2 at 9). About the marine cap
+with its shorelines moving at its solved start alone (every inner stage's
+ocean function its end node's) by 3.96 to 4.01 from 17 nodes; with two
+cells flipping inside steps, erratically to 65 nodes and by 2.0 to 2.9
+from 129 to 257 nodes (2.0 to 2.5 from 257 to 513). Through `sl3d`
+(`TestAppsTangent`, `TestAppsSecondOrder`, `TestAppsDistributed`):
+`tangent.method` "continuous" along the viscosity is the discrete run's
+files to 1.1e-12 to 2.5e-12, 1D and 3D, at 500 and 250 yr steps on the
+test ball; `kernels.method` "continuous" with `second_order` writes the
+library's own call to 2.1e-13, over two and three ranks the one
+process's (to 4.2e-10, and its first-order files to 2.1e-9), and against
+the discrete method's files at 250 and 125 yr steps its viscosity files
+fall at second order (ratios 3.59 to 4.18, 1D and 3D), and its ice
+files' entries too, node by node, in their absolute departure (3.52 to
+3.62 at a measurement's node, 4.15 to 5.08 at the others). In the
+library the continuous tangent-linear run and second-order sweep over two
+to four ranks are the one process's to 3e-14 and 7e-13
+(`TestDistributed`).
+
+**An entry at a measurement's node.** A node's entry of the thickness
+kernel is a quadrature weight times the kernel's density in time, of the
+order of the step itself. The density stops at a measurement, so the
+entry at the measurement's node is one-sided: half a step times the
+density just before it by the continuous method, the scheme's own end
+weight by the discrete. The two differ there by an amount of second order
+in the step, which is first order against the entry: set side by side,
+the two methods' entries at that node agree to a share of the order of
+the step against the relaxation time, under either scheme, where the
+entries of the other nodes agree to second order of themselves. In the
+first-order kernels the same departure sits in the entry less the
+delta's amplitude (`instantaneous`), which does not shrink with the step
+and so hides it; along a change of viscosity the delta's derivative is
+zero, and the second-order entry is the one-sided part alone. On the
+example Earth (the radial deck at lmax 16, the sea level over Hudson Bay
+at the last node, steps of 1 to 1/8 kyr, under Sdirk2) the second-order
+entry there falls by 1.60, 1.72 and 1.82 a halving, the two methods'
+absolute departure by 2.91, 3.18 and 3.46, and its share of the entry by
+1.81, 1.85 and 1.90 (from 0.79 to 0.12); the first-order entry less its
+delta alike (3.12, 3.36 and 3.58; 1.82, 1.86 and 1.90). Paired with an
+ice history that node's departure is of second order, as the pairings
+above are.
 
 ## 2. Scope
 
@@ -695,8 +834,11 @@ problem once more:
     with qⁿ = (dⁿ − mⁿ_k) δitau_k/itau_k — the continuous drive entering
     like the strain, whose transpose is the continuous sweep.
 
-The two coincide in the loads and differ in itau by the order of the
-scheme. The forward trajectory is served forwards by the sweeps'
+The two coincide in the loads. In itau they differ at second order under
+the exponential trapezoid; under backward Euler, and under Sdirk2 whose
+stages are backward Euler's, the continuous drive (1 − w) q¹ is the
+discrete one, dw dh (m⁰ − d¹), and the two runs are one (§1a). The
+forward trajectory is served forwards by the sweeps'
 `TrajectoryCursor` (§3): stored states where the recording kept them
 (strain regenerated by one elastic solve under the recorded loads), the
 run's forward steps under the recorded loads between, the newest two
@@ -714,8 +856,9 @@ difference of two forward runs; the discrete pair exact transposes — the
 objective of the run along (δf, δitau) equals the pairing of the load
 duals (node 0 included) and the itau kernel at 1e-8, each argument alone
 too, and a stride-2 trajectory reproduces the full one at 1e-10; the
-continuous drive converging to the discrete at the scheme's order (gap
-< 0.2, falling by > 3 as the steps halve, η = 1e22 Pa s, 10 kyr ramp);
+continuous drive converging to the discrete at the scheme's order under
+the trapezoid (gap < 0.2, falling by > 3 as the steps halve, η = 1e22
+Pa s, 10 kyr ramp; under Sdirk2 the two runs are one, `TestSdirk2Continuous`);
 about a migrating marine-cap trajectory, the run along thickness and
 initial-sea-level perturbations that flip no flotation cell equal to
 central differences of migrating runs at 1e-7, both methods, and the
@@ -758,9 +901,10 @@ second order (ratio in 3–5) and Richardson lands on it at 1e-6, both
 schemes — and is symmetric in u and v at 1e-10; it vanishes identically
 without a viscosity perturbation, about frozen and migrating runs alike;
 by the continuous method it converges to the discrete one at the
-scheme's order (gap 0.11 → 0.027 from 17 to 33 nodes over 10 kyr at
-η = 1e22; the coarser grids, h ≈ 1, are pre-asymptotic); unrecorded
-tangent runs are refused.
+scheme's order under the trapezoid (gap 0.11 → 0.027 from 17 to 33 nodes
+over 10 kyr at η = 1e22; the coarser grids, h ≈ 1, are pre-asymptotic),
+and under Sdirk2 is the discrete one (1.8e-11 and 9.5e-12 on those grids;
+§1a); unrecorded tangent runs are refused.
 
 ## 9. The second-order adjoint
 
@@ -768,11 +912,17 @@ tangent runs are refused.
 `second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
 under the sharp flotation rule, Yu et al. 2025 §4): the kernels of the
 objective and their derivative along a direction v — the action of the
-objective's Hessian on v, returned as `KernelDerivatives` (the thickness
-and initial-sea-level views' derivatives in the kernels' own pairings,
-and the itau kernel's). Inputs: the recorded forward trajectory, v's
+objective's Hessian on v, returned as `KernelDerivatives` (the thickness,
+baseline, quelled and initial-sea-level views' derivatives in the
+kernels' own pairings, and the itau kernel's; the distributional view's
+deltas have none). Inputs: the recorded forward trajectory, v's
 tangent-linear run recorded at every node by the same method, v's
-δitau, and a migrating run's ocean functions. The sweep that gives the
+δitau, and a migrating run's ocean functions. A tangent-linear run's
+snapshots carry the method that made it (`Evolution::Snapshot::
+tangentMethod`, `Evolution3D::Snapshot::tangentMethod`), and the
+second-order sweeps and runs, 1D and 3D, refuse one of the other method by
+name: each is the derivative of its own method's first-order sweep or
+run, which pairs with its own method's tangent-linear run alone. The sweep that gives the
 kernels is itself a function of the parameters, through the forward
 trajectory and the relaxation times; differentiating it along v gives a
 second sweep of the same form, forced by the first sweep's state and
@@ -799,7 +949,9 @@ the kernels.
   by the forward machinery in reversed time; the derivative state's step
   carries the continuous first-order drive built from the adjoint
   trajectory (`TangentLinearSolver::FirstOrderDrive` with the primed
-  pre-step state and the post-step state); at an observation both jump
+  pre-step state and the post-step state; under Sdirk2 the two states are
+  stepped together stage by stage, each derivative stage driven by the
+  adjoint stage's own states, §1a); at an observation both jump
   by the instantaneous adjoint strain, over itau for the state and by
   δitau for its derivative; the viscosity pairing is differentiated with
   the derivative state and v's tangent trajectory in place, less
@@ -811,6 +963,37 @@ The sweeps' shared pieces (dual packers, node weights, measurement
 check) are in `detail/AdjointInternals.hpp`, the trajectory cursor in
 `detail/TrajectoryCursor.hpp`.
 
+**The program.** `sl3d kernel` with `kernels.second_order` writes, beside
+every kernel, its derivative along the direction of the config's
+`perturbation` block ([sl3d-configs.md](sl3d-configs.md), kernel,
+Second-order kernels): the direction formed as `sl3d tangent` forms it
+(§8), v's tangent-linear run recorded by `kernels.method`, and per
+measurement one second-order sweep (here, §11, §14), whose kernels are the
+first-order files' and whose derivatives the second-order files', each in
+its file's parameter: the radial viscosity kernel in eta_b =
+mu_b / itau_b, so that its derivative takes the changes of itau_b and mu_b
+along v (−(itau_b²/mu_b) dK − (2 itau_b δitau_b/mu_b) K + (itau_b² δmu_b /
+mu_b²) K), the field kernels in ln eta_b their −(δitau K + itau dK).
+Every measurement but the decay time is linear in the run, its Hessian
+the kernels' derivative; the decay time's has the fit's second derivative
+in it, which is not built, and is refused. Gates (`TestAppsSecondOrder`):
+each second-order file against the central difference of the first-order
+files of two `sl3d kernel` runs with the direction's members added plus
+and minus, per kind of direction, 1D and 3D, static and through time
+(along the forcing and the state's sea level, in which the problem is
+affine with the shorelines held, rounding: 5e-13 to 9e-10, and 2.6e-9
+along a seismic source and 1.6e-8 along the state's topography of the
+static problem on lateral moduli, the solves' rounding against the small
+changes those make; along the viscosity, a branch's viscosity and the
+moduli the differences' remainder, 5e-8 to 9e-7 at a step of 1e-3,
+second order in the step); the Hessian
+symmetric to 2e-11 (a tide and a change of ln eta, 1D and 3D; two changes
+of ln eta about a calibrated run); the files the library's own call to
+1e-13 (2e-13 by the continuous method); over two and three ranks the one
+process's to 3e-10 (4e-10 by the continuous method;
+`TestAppsDistributed`). The continuous method's files against the
+discrete's under Sdirk2 are in §1a.
+
 GATES (`TestSecondOrderAdjoint`): the kernels the second-order sweep
 carries equal the first-order sweep's at 1e-12, both methods, about
 frozen and migrating runs; along v, central differences of the gradient
@@ -820,7 +1003,9 @@ at 1e-9 and equals ⟨g, F''[u, w]⟩ from the second-order tangent-linear
 run at 1e-9, frozen and migrating; the continuous derivatives converge
 to the discrete block by block (ice, viscosity) and their mismatch with
 the continuous second-order run falls at the scheme's order (17 → 33
-nodes, η = 1e22), the discrete pair matching at 1e-9 at every spacing.
+nodes, η = 1e22), under either scheme, the discrete pair matching at 1e-9
+at every spacing. Under Sdirk2 the continuous derivatives are also the
+exact derivative of the continuous kernels (§1a, `TestSdirk2Continuous`).
 
 ## 10. The 3D tangent-linear runs
 
@@ -874,7 +1059,8 @@ the adjoint state along v — beside the first. The derivative state is
 stepped by the same reversed coupled machinery, its step driven by the
 continuous first-order drive of the adjoint trajectory
 (`TangentLinearSolver3D::FirstOrderDrive` with the primed pre-step
-adjoint state and the post-step one, through `OpenStep::AddMemory`);
+adjoint state and the post-step one, through `OpenStep::AddMemory`;
+under Sdirk2 the two states are stepped together stage by stage, §1a);
 both states jump at an observation by the instantaneous adjoint strain,
 over itau(x) and by δitau(x); and the pointwise pairing is
 differentiated — the derivative state against the forward d − m, the
@@ -897,7 +1083,10 @@ first-order sweep's at 1e-10, and ⟨H u, w⟩ against ⟨H w, u⟩, against
 uv term accounted for), and against central differences of the
 continuous kernels along u, all agree below 10 % at 9 nodes and improve
 at 17, on the η = 1e22 mantle — the continuous formulation's commute
-level, as the first-order 3D gates. The machine-grade version is the
+level, as the first-order 3D gates; under either scheme. Under Sdirk2
+the derivatives are the exact derivative of the continuous 3D kernels
+and converge to the discrete sweep's at second order (§1a,
+`TestSdirk2Continuous`). The machine-grade version is the
 discrete 3D second-order sweep (§14); the first-order discrete 3D
 transpose is §12.
 
@@ -2522,9 +2711,10 @@ outside the water budget, the layer, the thickness, the initial sea
 level, the moments, the relaxation times or log viscosity, the moduli)
 and the continuous Hessian converging to the discrete at second order,
 1D and 3D, under the exponential trapezoid; under Sdirk2, where the
-shorelines move inside steps, the continuous kernels converge to the
-discrete at first order (§1a), and the 3D sweep's about the solved start
-is held to halve at least with the step.
+shorelines move inside steps, the continuous kernels and the continuous
+Hessian converge to the discrete at first order, erratically at coarse
+steps (§1a), and the 3D sweep's about the solved start is held to halve
+at least with the step.
 
 **A jump of the forcing.** A time repeated once in the grid, times[k + 1]
 = times[k], is a jump of the forcing there (an earthquake's onset,
@@ -2966,8 +3156,16 @@ and the second-order sweeps about a marked evolution, given ocean
 functions, are refused naming what is not built
 (`RefuseCalibratedSecondOrderKernels`) unless their
 `Options::initial_sea_level_held` states that the partial kernels'
-derivative is what is wanted. Under frozen shorelines the sweep is the
-calibrated run's, and nothing is marked.
+derivative is what is wanted. The second-order tangent-linear runs
+(`TangentLinearSolver::RunSecondOrder`, 3D alike), the forward pair of
+those sweeps, are refused there alike (`RefuseCalibratedSecondOrderRun`)
+unless the tangent-linear solver's `Options::initial_sea_level_held`
+says so. Under frozen shorelines the sweep is the calibrated run's, and
+nothing is marked. `sl3d kernel` refuses the second-order kernels of a
+calibrated migrating run's total kernels by name, and writes those of its
+partial kernels where `kernels.calibration.derivative` is `"partial"`;
+under frozen shorelines the multiplier is zero at every parameter, and
+the total kernels' second-order kernels are the partial ones'.
 
 **Over ranks.** The multiplier's sweeps are the 3D sweeps, collective
 as they are (§17); every rank holds the same surface fields, and

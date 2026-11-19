@@ -64,7 +64,8 @@ Every input is in `build/examples/data/`.
   at 250 km depth, under the whole Earth (a function of the radius alone)
   and under a cap about Hudson Bay (varying laterally) — the form a
   direction in the viscosity is given to `sl3d tangent` in, for
-  `tangent1d.json` and `tangent3d.json`.
+  `tangent1d.json` and `tangent3d.json`, and to `sl3d kernel` for its
+  second-order kernels, in `kernel_second_order.json`.
 - **The synthetic Earth**, `synthetic_earth.nc`, which the build writes
   (`MakeSyntheticEarth`): a planetmodel surface file of `ice_thickness` and
   `topography` on a 1° grid over a toy glacial cycle — smooth continents on

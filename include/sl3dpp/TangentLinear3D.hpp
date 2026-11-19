@@ -118,9 +118,9 @@ class TangentLinearSolver3D {
  public:
   struct Options {
     /// Discrete (the default, as AdjointSolver3D's) or Continuous, as
-    /// TangentLinearSolver's: about an evolution under Sdirk2 the discrete
-    /// run steps the tangent state by the scheme's stages, and the
-    /// continuous drive of a direction in the relaxation times is refused.
+    /// TangentLinearSolver's: about an evolution under Sdirk2 either run
+    /// steps the tangent state by the scheme's stages, and the two are one
+    /// run, to the coupled iteration's tolerance (docs/adjoints.md §1a).
     AdjointMethod method = AdjointMethod::Discrete;
     /// The SLE's own tolerance per pass, and the combined fixed point's
     /// controls (as Evolution3D::Options).
@@ -134,6 +134,11 @@ class TangentLinearSolver3D {
     /// scheme each inner stage's (Evolution3D::Snapshot::stages): what a
     /// second-order run reads.
     bool record = false;
+    /// As TangentLinearSolver::Options::initial_sea_level_held: RunSecondOrder
+    /// about a state calibrated under migrating shorelines
+    /// (Evolution3D::Calibrated) is refused unless this states that the
+    /// second derivative with the initial sea level held is wanted.
+    bool initial_sea_level_held = false;
     std::function<void(std::size_t node)> on_node{};
   };
 
@@ -167,7 +172,9 @@ class TangentLinearSolver3D {
   /// trajectory (its full solution and its decayed memory with v's itau
   /// drive) and of v's on u's, the start's alike (docs/adjoints.md
   /// §15). Symmetric in u and v; the 3D form of
-  /// TangentLinearSolver::RunSecondOrder.
+  /// TangentLinearSolver::RunSecondOrder, refusing as it does a run of the
+  /// other method and, unless Options::initial_sea_level_held, a
+  /// calibrated migrating run.
   [[nodiscard]] std::vector<Evolution3D::Snapshot> RunSecondOrder(
       std::span<const double> times,
       std::span<const Evolution3D::Snapshot> tangentU,

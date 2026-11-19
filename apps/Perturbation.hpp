@@ -187,6 +187,19 @@ void AddEarthDirection(TangentPerturbation& direction,
                        const PerturbationBlock& perturbation,
                        const Recorded1D& recorded, const Json& block);
 
+/// A radial run's direction in the unrelaxed shear modulus at the radial
+/// mesh's nodes, (element, node) over the mesh, element by element, in the
+/// material's units: the `mu` field of `perturbation.model.moduli` read at
+/// each node within its element's layer, zero in the fluid; empty where
+/// the block gives no change of mu. AddEarthDirection takes the direction
+/// at the operator's memory points, where the run reads its moduli; this
+/// is it at the nodes, where the radial viscosity kernels live, whose
+/// branches' moduli move with it (`kernel`'s second-order viscosity
+/// kernels).
+[[nodiscard]] std::vector<double> ShearChangeAtNodes(
+    const PerturbationBlock& perturbation, const Recorded1D& recorded,
+    const Json& block);
+
 /// Adds a 3-D run's direction in the Earth's parameters, over the grid
 /// values of its coupling's memory nodes (each rank its own): the changes
 /// of ln viscosity (every branch's alike, and each branch's own as a
