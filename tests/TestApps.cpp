@@ -5511,6 +5511,13 @@ TEST_F(AppsTest, Solve1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   // a radial run under the ice alone has no toroidal displacement
   EXPECT_FALSE(reference.variables.contains("toroidal_potential"));
   EXPECT_EQ(rebuilt.meta.at("omega_z_rad_s"), reference.meta.at("omega_z_rad_s"));
+  // the checkpoints share the history file beside them, each holding the
+  // run's state alone: the same size at any node
+  const auto ckpt = dir_ / "ckpt";
+  ASSERT_TRUE(fs::exists(ckpt / "history.bin"));
+  EXPECT_EQ(fs::file_size(ckpt / "node_000002.ckpt"),
+            fs::file_size(ckpt / "node_000004.ckpt"));
+  const auto logged = fs::file_size(ckpt / "history.bin");
 
   // the checkpoints belong to the run, not to the config's text: the same
   // run with another output, no wall-time limit and other spacing adopts
@@ -5527,6 +5534,29 @@ TEST_F(AppsTest, Solve1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
                 .variables.at("relative_sea_level_change")
                 .values,
             reference.variables.at("relative_sea_level_change").values);
+  // a tail on the history file that no checkpoint names (a run stopped
+  // between its append and its checkpoint) is cut away; a checkpoint is
+  // whole only with the history it names, so a newest checkpoint cut
+  // short, or a history file short of the newest's, leaves the older
+  // checkpoint, from which the run resumes to the same output
+  const auto resumes = [&](std::string_view label) {
+    const auto said = app::RunSolve(same);
+    EXPECT_NE(said.find("resumed"), std::string::npos) << label << ": " << said;
+    EXPECT_EQ(pm::ReadSurfaceFile(dir_ / "out" / "same.nc")
+                  .variables.at("relative_sea_level_change")
+                  .values,
+              reference.variables.at("relative_sea_level_change").values)
+        << label;
+    EXPECT_EQ(fs::file_size(ckpt / "history.bin"), logged) << label;
+  };
+  std::ofstream(ckpt / "history.bin", std::ios::binary | std::ios::app)
+      << "a tail no checkpoint names";
+  resumes("a tail");
+  fs::resize_file(ckpt / "node_000004.ckpt",
+                  fs::file_size(ckpt / "node_000004.ckpt") / 2);
+  resumes("the newest checkpoint cut short");
+  fs::resize_file(ckpt / "history.bin", logged - 8);
+  resumes("the history file cut short");
 
   // ...while another computation, or the same config over a changed input
   // file, is refused
@@ -5570,6 +5600,13 @@ TEST_F(AppsTest, Solve1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   EXPECT_FALSE(fs::exists(dir_ / "ckpt" / "node_000004.ckpt"));
   EXPECT_TRUE(fs::exists(dir_ / "ckpt" / "node_000002.ckpt"));
   EXPECT_TRUE(fs::exists(dir_ / "ckpt" / "notes.ckpt"));
+  // its history file holds its own records alone, as a run's in an empty
+  // directory does
+  static_cast<void>(app::RunSolve(Write("scratch.json", "{" + shorter + R"(,
+              "checkpoint": {"directory": "scratch", "every": 1},
+              "output": {"surface": "out/scratch.nc"}})")));
+  EXPECT_EQ(fs::file_size(ckpt / "history.bin"),
+            fs::file_size(dir_ / "scratch" / "history.bin"));
   // and the same run, restarting, adopts the new checkpoints
   const auto again = Write(
       "again.json", "{" + shorter +

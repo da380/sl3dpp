@@ -186,7 +186,11 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
   ```
 
   The limit is checked only as a checkpoint is written, so set it below
-  the batch system's by more than `every` nodes' stepping. A checkpoint is
+  the batch system's by more than `every` nodes' stepping. The directory
+  holds the newest two checkpoints, each the run's state at its node, and
+  the history file they share (`history.bin`, the outputs' records of
+  every node so far, appended to at each checkpoint); a checkpoint is
+  usable only with the history file beside it. A checkpoint is
   bound to its run by a hash of the config's computation and its input
   files' contents; the static problem and a run under seismic sources
   take none ([sl3d-configs.md](sl3d-configs.md), "Checkpoints and

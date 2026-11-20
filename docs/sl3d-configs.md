@@ -77,8 +77,9 @@ solves' tolerances where an iterative solve closes a pass earlier or
 later on the ranks (up to about 1e-10 relative at the default
 tolerances of 1e-9). Each rank's
 checkpoints go to its own subdirectory, `rank_RRRR` of
-`checkpoint.directory`, holding its own segment's state (rank 0's holds
-the histories too, the others' each node's iteration counts alone), and
+`checkpoint.directory`, holding its own segment's state, with its own
+history file beside them (rank 0's holds the histories, the others' each
+node's iteration counts alone), and
 the trajectory store's states go to `rank_RRRR`
 of `trajectory.directory` likewise, rank 0 writing its manifest, its start
 and its surface records; a store is read over the count of ranks that
@@ -87,8 +88,11 @@ below). A run resumes from the newest node whose
 checkpoint every rank has (of the first rank's newest two), and over the
 same number of ranks only: the rank count is part of the checkpoints'
 hash, so a resumption over another count is refused like another run's.
-Where the ranks have no checkpoint in common (a run stopped while they
-wrote its first, say), each rank's checkpoints and any kept initial state
+Each rank then readies its own subdirectory as one process does its
+directory (Checkpoints and restarts, below), removing a checkpoint of a
+later node that some ranks wrote before the run stopped. Where the ranks
+have no checkpoint in common (a run stopped while they wrote its first,
+say), each rank's checkpoints, history file and any kept initial state
 are stale: they are removed and the run starts over, the summary saying
 `, replacing <k> earlier checkpoint(s)` where the first rank removed some.
 
@@ -2588,15 +2592,31 @@ limit and a pair of its own among them (Jumps of the forcing, above), so
 that a checkpoint may be a left limit, from which the resumed run takes
 the jump. Each is a file `node_NNNNNN.ckpt`
 in `checkpoint.directory`, named by its node, holding the run's state
-there and the histories so far (the response's fields, the angular
-velocity and the step's closure at each node; the loads applied and a
-3D run's radial reference model are formed when the output is written).
-It is written to a temporary file and
-renamed into place, so an interrupted write leaves no partial checkpoint,
-and only the newest two are kept.
+there and how much of the history file is its histories. The history
+file, `history.bin` beside the checkpoints, holds the histories (the
+response's fields, the angular velocity, a migrating run's ocean
+function and the step's closure at each node; the loads applied and a
+3D run's radial reference model are formed when the output is written),
+a record per node, appended to as each checkpoint is written: a
+checkpoint names how many records, and how many bytes of the file, are
+its histories, so that each node's record is written once and a
+checkpoint is the size of the state alone. The new records are written
+to the history file first, then the checkpoint to a temporary file
+renamed into place, so an interrupted write leaves no partial checkpoint;
+only the newest two checkpoints are kept. The directory holds those two,
+the history file they share and, for a calibrating run, the calibrated
+initial state (below). A checkpoint is usable only with the history file
+beside it: moving or copying one takes the history file along.
 
 When a run starts and finds a checkpoint in the directory, it resumes from
-the newest one, with the histories up to that node restored. A resumed run
+the newest whole one, with the histories up to that node restored: a
+checkpoint whose file is cut short, or whose history file is shorter than
+it names or another run's, is passed over for the older one. The
+resumption cuts the history file to the length its checkpoint names
+(records written after it, by a run stopped before their checkpoint, are
+written again) and removes the checkpoints of later nodes. A run that
+finds no whole checkpoint of its own starts over, removing what the
+directory holds as `"restart": false` does (below). A resumed run
 reproduces an uninterrupted one: bitwise within one process (the tests),
 and to rounding as any two runs of one config (Running sl3d, above).
 Rerunning a
@@ -2631,7 +2651,8 @@ and its resumption, and the paths may change as long as the files'
 contents do not, so a run directory can be moved. A checkpoint of a run
 of the other dimension (a 1D run's against a 3D run's) is refused too,
 and so is one of another format of this program's checkpoints (which
-holds other histories), naming the file: `"restart": false` starts over.
+lays out its state or its histories otherwise), naming the file:
+`"restart": false` starts over.
 The files are raw binary, for the machine that wrote them.
 
 A calibrating run also keeps its calibrated initial state in the directory
@@ -2645,11 +2666,12 @@ chain of jobs completes the store with the run. A store complete
 already is left as it is, and does not stop a resumption.
 
 With `restart` set to `false` the run starts over: it first removes the
-checkpoints it finds in the directory (and any kept initial state), then
-writes its own. Only this program's checkpoint files (`node_NNNNNN.ckpt`,
-and the `.node_NNNNNN.partial` it renames) are read, pruned or removed;
-anything else in the directory is left alone. Leave `restart` at `true` in
-a chain of jobs that is meant to resume.
+checkpoints it finds in the directory (with the history file and any kept
+initial state), then writes its own, its history file begun anew. Only
+this program's files (`node_NNNNNN.ckpt`, the `.node_NNNNNN.partial` it
+renames, `history.bin` and `initial_state.bin`) are read, pruned or
+removed; anything else in the directory is left alone. Leave `restart` at
+`true` in a chain of jobs that is meant to resume.
 
 `checkpoint.max_walltime_min` serves batch systems with a time limit.
 After writing a checkpoint, a run that has been stepping for longer than

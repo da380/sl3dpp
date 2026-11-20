@@ -96,8 +96,9 @@ struct WalltimeReached {
 // -- the checkpoint files: private scratch of a run, machine-local ----------
 
 /// The checkpoints' magic, its last character the format's version: the
-/// file of another version (a history of other fields) is refused.
-constexpr auto kMagic = std::uint64_t{0x534c3344434b5033};  // "SL3DCKP3"
+/// file of another version (another layout of the state, or of the
+/// history file it names) is refused.
+constexpr auto kMagic = std::uint64_t{0x534c3344434b5034};  // "SL3DCKP4"
 constexpr bool OtherFormat(std::uint64_t magic) {
   return magic != kMagic && (magic >> 8) == (kMagic >> 8);
 }
@@ -176,6 +177,109 @@ std::optional<GRDSolver::State> ReadInitialState(
   return state;
 }
 
+/// The history of the nodes kept so far, which a run's checkpoints share:
+/// one file beside them, appended to at each checkpoint with the nodes kept
+/// since the one before, so that each node's record is written once and a
+/// checkpoint holds the run's state alone. A checkpoint names how many
+/// records, and how many bytes of the file, belong to it; bytes past those
+/// of the newest are a tail that a run stopped between its append and its
+/// checkpoint left, which no checkpoint names. The file opens with its
+/// magic, the run's hash and whether the run migrates (a record holds the
+/// ocean function only then).
+constexpr auto kHistoryName = std::string_view{"history.bin"};
+constexpr auto kHistoryMagic = std::uint64_t{0x534c334448495331};  // "SL3DHIS1"
+
+/// One node's record in the history file: the response's fields, the
+/// angular velocity, a migrating run's ocean function and the step's
+/// closure.
+void PutRecord(std::ostream& out, const Node& kept, bool migrating) {
+  PutOne(out, kept.node);
+  PutVector(out, kept.relativeSeaLevelChange);
+  PutVector(out, kept.displacement);
+  PutVector(out, kept.potential);
+  PutVector(out, kept.tangentialPotential);
+  PutVector(out, kept.toroidalPotential);
+  Put(out, kept.angularVelocity.data(), 3 * sizeof(double));
+  if (migrating) PutVector(out, kept.oceanFunction);
+  PutOne(out, kept.stepIterations);
+  PutOne(out, kept.solveIterations);
+  PutOne(out, kept.stepResidual);
+}
+
+Node GetRecord(std::istream& in, bool migrating) {
+  auto kept = Node{};
+  kept.node = GetOne<double>(in);
+  kept.relativeSeaLevelChange = GetVector(in);
+  kept.displacement = GetVector(in);
+  kept.potential = GetVector(in);
+  kept.tangentialPotential = GetVector(in);
+  kept.toroidalPotential = GetVector(in);
+  in.read(reinterpret_cast<char*>(kept.angularVelocity.data()),
+          3 * sizeof(double));
+  if (migrating) kept.oceanFunction = GetVector(in);
+  kept.stepIterations = GetOne<long long>(in);
+  kept.solveIterations = GetOne<long long>(in);
+  kept.stepResidual = GetOne<double>(in);
+  return kept;
+}
+
+/// Starts the history file of a run that does not resume: its header
+/// alone, whatever file was there.
+void StartHistory(const std::filesystem::path& directory, std::uint64_t hash,
+                  bool migrating) {
+  std::filesystem::create_directories(directory);
+  const auto path = directory / kHistoryName;
+  auto out = std::ofstream(path, std::ios::binary | std::ios::trunc);
+  PutOne(out, kHistoryMagic);
+  PutOne(out, hash);
+  PutOne(out, static_cast<std::uint64_t>(migrating));
+  out.close();
+  if (!out) {
+    throw std::runtime_error(std::format("cannot write {}", path.string()));
+  }
+}
+
+/// Appends records to the history file, on disk (the file closed) before
+/// a checkpoint names them, and returns the file's length.
+std::uint64_t AppendHistory(const std::filesystem::path& directory,
+                            std::span<const Node> records, bool migrating) {
+  const auto path = directory / kHistoryName;
+  auto out = std::ofstream(path, std::ios::binary | std::ios::app);
+  for (const auto& kept : records) PutRecord(out, kept, migrating);
+  out.close();
+  if (!out) {
+    throw std::runtime_error(std::format("cannot write {}", path.string()));
+  }
+  return std::filesystem::file_size(path);
+}
+
+/// The first `records` records of the history file in `directory`, which
+/// a checkpoint says end `bytes` into it; nothing where the file is
+/// another run's, shorter than that, or its records end elsewhere.
+std::optional<std::vector<Node>> ReadHistory(
+    const std::filesystem::path& directory, std::uint64_t hash, bool migrating,
+    std::uint64_t records, std::uint64_t bytes) {
+  const auto path = directory / kHistoryName;
+  auto error = std::error_code{};
+  const auto length = std::filesystem::file_size(path, error);
+  if (error || length < bytes) return std::nullopt;
+  auto in = std::ifstream(path, std::ios::binary);
+  if (!in || GetOne<std::uint64_t>(in) != kHistoryMagic ||
+      GetOne<std::uint64_t>(in) != hash ||
+      GetOne<std::uint64_t>(in) != static_cast<std::uint64_t>(migrating)) {
+    return std::nullopt;
+  }
+  auto history = std::vector<Node>{};
+  for (auto k = std::uint64_t{0}; k < records && in; ++k) {
+    history.push_back(GetRecord(in, migrating));
+  }
+  if (!in || static_cast<std::streamoff>(in.tellg()) !=
+                 static_cast<std::streamoff>(bytes)) {
+    return std::nullopt;
+  }
+  return history;
+}
+
 /// Whether a file name is one this program writes into a checkpoint
 /// directory (node_NNNNNN.ckpt, or the .node_NNNNNN.partial it renames):
 /// only those are read, pruned or cleared, whatever else is there.
@@ -211,10 +315,17 @@ std::vector<std::filesystem::path> CheckpointsIn(
   return found;
 }
 
+/// The node of a finished checkpoint, by its file's name.
+std::size_t CheckpointNode(const std::filesystem::path& path) {
+  return static_cast<std::size_t>(
+      std::stoul(path.filename().string().substr(5, 6)));
+}
+
 /// Removes the checkpoint files an earlier run left in the directory, for
 /// a run that starts over: its own checkpoints would otherwise be pruned
 /// against the earlier run's by name, and a later resumption could pick
-/// one of those. Returns how many were removed.
+/// one of those. The history file and any kept initial state go with
+/// them. Returns how many checkpoints were removed.
 std::size_t ClearCheckpoints(const std::filesystem::path& directory) {
   auto removed = std::size_t{0};
   if (!std::filesystem::is_directory(directory)) return removed;
@@ -229,16 +340,32 @@ std::size_t ClearCheckpoints(const std::filesystem::path& directory) {
       ++removed;
     }
   }
+  std::filesystem::remove(directory / kHistoryName);
   std::filesystem::remove(directory / kInitialStateName);
   return removed;
 }
 
+/// Readies the directory for a run resuming from the checkpoint of node
+/// `node`, whose history ends `bytes` into the history file: the file cut
+/// there (dropping a tail no checkpoint names), and the checkpoints of
+/// later nodes removed, which name lengths of a history the resumed run
+/// writes again (on its own stride, which may be another).
+void ResumeHistory(const std::filesystem::path& directory, std::size_t node,
+                   std::uint64_t bytes) {
+  std::filesystem::resize_file(directory / kHistoryName, bytes);
+  for (const auto& path : CheckpointsIn(directory)) {
+    if (CheckpointNode(path) > node) std::filesystem::remove(path);
+  }
+}
+
 /// Writes a checkpoint whole (a temporary renamed into place) and keeps
-/// the newest two in the directory.
+/// the newest two in the directory. Its history is the first `records`
+/// records of the history file, which end `bytes` into it, appended
+/// before.
 template <class CheckpointT>
 void WriteCheckpoint(const std::filesystem::path& directory, std::uint64_t hash,
                      std::size_t node, const CheckpointT& cp,
-                     const std::vector<Node>& history, bool migrating) {
+                     std::uint64_t records, std::uint64_t bytes) {
   std::filesystem::create_directories(directory);
   const auto path = directory / std::format("node_{:06}.ckpt", node);
   const auto partial = directory / std::format(".node_{:06}.partial", node);
@@ -256,20 +383,8 @@ void WriteCheckpoint(const std::filesystem::path& directory, std::uint64_t hash,
     PutState(out, cp);
     PutComplex(out, cp.loadCoefficients);
     PutComplex(out, cp.tideCoefficients);
-    PutOne(out, static_cast<std::uint64_t>(history.size()));
-    for (const auto& kept : history) {
-      PutOne(out, kept.node);
-      PutVector(out, kept.relativeSeaLevelChange);
-      PutVector(out, kept.displacement);
-      PutVector(out, kept.potential);
-      PutVector(out, kept.tangentialPotential);
-      PutVector(out, kept.toroidalPotential);
-      Put(out, kept.angularVelocity.data(), 3 * sizeof(double));
-      if (migrating) PutVector(out, kept.oceanFunction);
-      PutOne(out, kept.stepIterations);
-      PutOne(out, kept.solveIterations);
-      PutOne(out, kept.stepResidual);
-    }
+    PutOne(out, records);
+    PutOne(out, bytes);
     if (!out) {
       throw std::runtime_error(
           std::format("cannot write {}", partial.string()));
@@ -289,10 +404,13 @@ struct ReadBack {
   std::size_t node = 0;
   CheckpointT checkpoint;
   std::vector<Node> history;
+  std::uint64_t historyBytes = 0;  ///< where its history ends in the file
 };
 
-/// One checkpoint file of this run, or nothing when it is not a whole
-/// checkpoint; refused when another run wrote it.
+/// One checkpoint file of this run with the history it names, or nothing
+/// when it is not a whole checkpoint (the file short, or the history file
+/// beside it short of what the checkpoint names, or another run's);
+/// refused when another run wrote the checkpoint.
 template <class CheckpointT>
 std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
     const std::filesystem::path& path, std::uint64_t hash, bool migrating) {
@@ -327,24 +445,16 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
     GetState(in, out.checkpoint);
     out.checkpoint.loadCoefficients = GetComplex(in);
     out.checkpoint.tideCoefficients = GetComplex(in);
-    const auto nodes = GetOne<std::uint64_t>(in);
-    for (auto k = std::uint64_t{0}; k < nodes; ++k) {
-      auto kept = Node{};
-      kept.node = GetOne<double>(in);
-      kept.relativeSeaLevelChange = GetVector(in);
-      kept.displacement = GetVector(in);
-      kept.potential = GetVector(in);
-      kept.tangentialPotential = GetVector(in);
-      kept.toroidalPotential = GetVector(in);
-      in.read(reinterpret_cast<char*>(kept.angularVelocity.data()),
-              3 * sizeof(double));
-      if (migrating) kept.oceanFunction = GetVector(in);
-      kept.stepIterations = GetOne<long long>(in);
-      kept.solveIterations = GetOne<long long>(in);
-      kept.stepResidual = GetOne<double>(in);
-      out.history.push_back(std::move(kept));
+    const auto records = GetOne<std::uint64_t>(in);
+    out.historyBytes = GetOne<std::uint64_t>(in);
+    if (in) {
+      auto history = ReadHistory(path.parent_path(), hash, migrating, records,
+                                 out.historyBytes);
+      if (history) {
+        out.history = std::move(*history);
+        return out;
+      }
     }
-    if (in) return out;
   }
   return std::nullopt;
 }
@@ -375,8 +485,7 @@ std::optional<ReadBack<CheckpointT>> ReadCommonCheckpoint(
   const auto& collectives = TheRanks().collectives;
   auto mine = std::vector<std::size_t>{};
   for (const auto& path : CheckpointsIn(directory)) {
-    mine.push_back(static_cast<std::size_t>(
-        std::stoul(path.filename().string().substr(5, 6))));
+    mine.push_back(CheckpointNode(path));
   }
   auto candidates = std::array{-1.0, -1.0};
   for (auto i = std::size_t{0}; i < std::min<std::size_t>(2, mine.size());
@@ -882,10 +991,11 @@ Reached RunThrough(
 
   // On several ranks each checkpoints its own radial segment into its own
   // subdirectory, and they resume from the newest node all of them have;
-  // each keeps its own history in its checkpoints, the fields the first
-  // rank's alone.
+  // each keeps its own history file beside its checkpoints, the fields the
+  // first rank's alone.
   // A checkpoint is of a node of the library's grid (its left limits and
-  // inserted pairs among them), with the window's records kept so far.
+  // inserted pairs among them), naming the window's records kept so far
+  // in the history file.
   const auto& checkpoint = input.checkpoint;
   const auto checkpointing = !checkpoint.directory.empty();
   const auto directory = RankDirectory(checkpoint.directory);
@@ -899,14 +1009,12 @@ Reached RunThrough(
         ranks.Distributed()
             ? ReadCommonCheckpoint<CheckpointT>(directory, hash, migrating)
             : ReadCheckpoint<CheckpointT>(directory, hash, migrating);
-    // a set the ranks do not share is stale: cleared, or its later nodes
-    // would outrank the new run's in the pruning
-    if (!resumed && ranks.Distributed()) {
-      out.replaced = ClearCheckpoints(directory);
-    }
-  } else if (checkpointing) {
-    out.replaced = ClearCheckpoints(directory);
   }
+  // a run that does not resume writes its history anew: the checkpoints
+  // in the directory (a set the ranks do not share among them) name
+  // another history, and are cleared, or their later nodes would outrank
+  // the new run's in the pruning
+  if (checkpointing && !resumed) out.replaced = ClearCheckpoints(directory);
   // the trajectory store, recorded from the first node
   const auto store = StoreToRecord(
       top, input.trajectory, trajectory,
@@ -961,12 +1069,25 @@ Reached RunThrough(
     keep(steps.window[k], s);
   };
   options.keep_snapshots = false;
+  // the history file, holding `logged` of the history's records: cut to
+  // the checkpoint a run resumes from, or begun anew
+  auto logged = std::size_t{0};
+  if (resumed) {
+    ResumeHistory(directory, resumed->node, resumed->historyBytes);
+    logged = resumed->history.size();
+  } else if (checkpointing) {
+    StartHistory(directory, hash, migrating);
+  }
   if (checkpointing) {
     options.checkpoint_stride = checkpoint.every;
     options.on_checkpoint = [&](std::size_t node,
                                 const typename Evolution::Checkpoint& cp) {
-      WriteCheckpoint(directory, hash, base_node + node, cp, history,
-                      migrating);
+      // the records kept since the last checkpoint, on disk before the
+      // checkpoint that names them
+      const auto bytes = AppendHistory(
+          directory, std::span(history).subspan(logged), migrating);
+      logged = history.size();
+      WriteCheckpoint(directory, hash, base_node + node, cp, logged, bytes);
       const auto done = base_node + node + 1 >= times.size();
       if (checkpoint.max_walltime_min > 0.0 && !done) {
         const auto minutes = std::chrono::duration<double>(

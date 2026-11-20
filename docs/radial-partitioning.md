@@ -278,9 +278,10 @@ rank its segment.
   run of these commands is the first rank's alone, the other ranks
   returning at once.
   - Rank 0 writes the outputs.
-  - Each rank checkpoints its own segment into its own subdirectory. A
-    run resumes from the newest node every rank has, over the same rank
-    count only; where the ranks have none in common, their checkpoints
+  - Each rank checkpoints its own segment into its own subdirectory,
+    with its own history file beside its checkpoints. A run resumes from
+    the newest node every rank has, over the same rank count only; where
+    the ranks have none in common, their checkpoints and history files
     are removed and the run starts over.
   - The 3D kernels (viscosity and moduli) are gathered to rank 0 for
     writing.

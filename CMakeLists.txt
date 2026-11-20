@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.24)
 
 project(
   sl3dpp
-  VERSION 0.1.0
+  VERSION 0.2.0
   LANGUAGES CXX
   DESCRIPTION "Forward and adjoint GIA modelling in 1D and 3D viscosity earth models")
 

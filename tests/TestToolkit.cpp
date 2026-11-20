@@ -20,7 +20,7 @@
 #include "sl3dpp/detail/AndersonMixer.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 
-TEST(Toolkit, Version) { EXPECT_EQ(sl3dpp::Version(), "0.1.0"); }
+TEST(Toolkit, Version) { EXPECT_EQ(sl3dpp::Version(), "0.2.0"); }
 
 // planetmodel tracks main, so its version is whatever was fetched: what the
 // library reports must be what a code linking it alongside sees.
