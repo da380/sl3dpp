@@ -6,7 +6,7 @@
 // lateral viscosity, and to the quadrature of the lateral product with it
 // (the product's weights are resolved to each block's degree); and the 3D
 // adjoint's kernels, laid out per block, pair with a smooth direction as
-// the single grid's do.
+// the single grid's do, by either sweep.
 
 #include <gtest/gtest.h>
 
@@ -18,6 +18,8 @@
 #include <functional>
 #include <map>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Adjoint3D.hpp"
@@ -193,6 +195,7 @@ TEST(NodeBlocks, FollowTheTruncation) {
       EXPECT_EQ(weights[e], 0.0);
       continue;
     }
+    // a formula, no transform: deterministic
     EXPECT_DOUBLE_EQ(
         weights[e],
         nodesIn[e] * std::pow((degrees[e] + 1.0) / (kLmax + 1.0), 3));
@@ -258,18 +261,21 @@ TEST(NodeBlocks, TransformsInvertAndCarryToTheSurfaceGrid) {
   for (auto i = std::size_t{0}; i < back.r.size(); ++i) {
     worst = std::max(worst, std::abs(back.r[i] - spectral.r[i]));
   }
-  EXPECT_LT(worst, 1e-13);
+  // coefficients of order one half: measured 8e-15
+  EXPECT_LT(worst, 1e-12);
 
   // A block's real field, carried to the lmax grid, is the single grid's
   // synthesis of the same coefficients zero padded.
   const auto carried = blocked.OnSurfaceGrid(field.r);
   const auto want = single.Synthesise(padded).r;
   ASSERT_EQ(carried.size(), want.size());
-  auto carriedWorst = 0.0;
+  auto carriedWorst = 0.0, carriedScale = 0.0;
   for (auto i = std::size_t{0}; i < want.size(); ++i) {
     carriedWorst = std::max(carriedWorst, std::abs(carried[i] - want[i]));
+    carriedScale = std::max(carriedScale, std::abs(want[i]));
   }
-  EXPECT_LT(carriedWorst, 1e-13);
+  // transforms of two sizes, to rounding: measured 3e-15 of the field
+  EXPECT_LT(carriedWorst, 1e-12 * carriedScale);
   EXPECT_THROW(static_cast<void>(blocked.OnSurfaceGrid(want)),
                std::invalid_argument);
 }
@@ -312,10 +318,12 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
   // kernel, laid out per block, pairs with a smooth direction (each node
   // sampling it on its own grid) as the single grid's does, and its
   // spherical kernel and ice kernels are the single grid's; to round-off
-  // without lateral viscosity, to the forward's agreement with it.
+  // without lateral viscosity, to the forward's agreement with it. By the
+  // default (discrete) sweep, whose transposed fixed point on the blocks
+  // stops at about 2e-12 (so to 1e-11 here), and by the continuous one.
   const auto body = Body::Make(1e22);
   ViscoelasticOperator reference(body.rheology, kLmax);
-  SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
@@ -334,13 +342,13 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
   }
   const auto times =
       std::vector<double>{0.0, 2.5 * kyr, 5.0 * kyr, 7.5 * kyr, 10.0 * kyr};
-  const auto iceLoad = [&](double t) {
+  const auto directLoad = [&](double t) {
     auto out = melt;
     for (auto& v : out) v *= t / times.back();
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       solver.Grid().FromFunction([](double theta, double phi) {
         return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
       });
@@ -354,35 +362,31 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     std::vector<double> loadDual;
   };
   auto run = [&](const std::function<double(double, double, double)>& delta,
-                 bool blocks) {
+                 bool blocks, const AdjointSolver3D::Options& sweep) {
     Viscoelastic3D op(
         body.rheology, kLmax, delta,
         {.eps = kEps,
          .transform_degrees = blocks ? Degrees() : std::vector<int>{}});
     EXPECT_EQ(op.Coupling().BlockCount() > 1, blocks);
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, solver, state,
         {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
-    const auto snapshots = evolution.Run(times, iceLoad);
+    const auto snapshots = evolution.Run(times, directLoad);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-    AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    AdjointSolver3D adjoint(evolution, sweep);
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto& coupling = op.Coupling();
     auto out = Result{};
+    auto atNodes = std::vector<double>(coupling.GridValueCount());
     for (auto node = 0; node < coupling.NodeCount(); ++node) {
-      const auto& grid = coupling.GridOf(node);
-      auto product = grid.FromFunction(direction);
-      const auto row =
-          std::span(kernels.logViscosityKernel3D[0])
-              .subspan(coupling.FieldOffset(node), coupling.FieldSizeOf(node));
-      for (auto x = std::size_t{0}; x < product.size(); ++x) {
-        product[x] *= row[x];
-      }
-      out.pairing += grid.Integrate(product);
+      const auto values = coupling.GridOf(node).FromFunction(direction);
+      std::ranges::copy(values, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                      coupling.FieldOffset(node)));
     }
+    out.pairing = VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
     out.spherical = kernels.itauKernelSpherical[0];
-    out.loadDual = kernels.ice.loadDuals.front();
+    out.loadDual = kernels.ice.directLoadKernels.front();
     return out;
   };
   auto relative = [](std::span<const double> a, std::span<const double> b) {
@@ -394,9 +398,10 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     return diff / scale;
   };
   auto compare = [&](const std::function<double(double, double, double)>& delta,
-                     double tolerance, const char* label) {
-    const auto blocked = run(delta, true);
-    const auto single = run(delta, false);
+                     double tolerance, const std::string& label,
+                     const AdjointSolver3D::Options& sweep) {
+    const auto blocked = run(delta, true, sweep);
+    const auto single = run(delta, false, sweep);
     EXPECT_NE(single.pairing, 0.0) << label;
     const auto pairing =
         std::abs(blocked.pairing - single.pairing) / std::abs(single.pairing);
@@ -412,11 +417,21 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     EXPECT_LT(spherical, tolerance) << label;
     EXPECT_LT(loadDual, tolerance) << label;
   };
-  // measured 4e-14 to 6e-14, and 3e-10 to 1.3e-9
-  compare([](double, double, double) { return 0.0; }, 1e-12, "zero_lateral");
-  compare(
-      [](double, double theta, double phi) {
-        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
-      },
-      1e-7, "smooth_lateral");
+  const auto smooth = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  using Sweep = std::pair<std::string, AdjointSolver3D::Options>;
+  const auto sweeps = std::vector<Sweep>{
+      {"discrete", {.rtol = 1e-12, .coupled_rtol = 1e-11}},
+      {"continuous",
+       {.method = AdjointMethod::Continuous,
+        .rtol = 1e-12,
+        .coupled_rtol = 1e-12}}};
+  for (const auto& [name, sweep] : sweeps) {
+    // measured: discrete 1.7e-14 to 4.3e-14, and 3.0e-10 to 2.0e-9;
+    // continuous 4.3e-14 to 1.6e-13, and 3.4e-10 to 2.9e-9
+    compare([](double, double, double) { return 0.0; }, 1e-10,
+            name + "_zero_lateral", sweep);
+    compare(smooth, 1e-7, name + "_smooth_lateral", sweep);
+  }
 }

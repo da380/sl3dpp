@@ -1,0 +1,11 @@
+{
+  "problem": "static",
+  "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
+  "discretisation": {"lmax": 128},
+  "forcing": {
+    "load": [{"cap": {"latitude": 50.0, "longitude": 260.0, "width_deg": 3.0,
+                      "amplitude_kg_m2": 9.17e5}}]
+  },
+  "rotation": "none",
+  "output": {"surface": "out/no_ocean_ice_cap/no_ocean_ice_cap.nc"}
+}

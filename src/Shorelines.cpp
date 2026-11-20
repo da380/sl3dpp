@@ -6,9 +6,9 @@
 
 namespace sl3dpp::detail {
 
-void CheckMigratingStart(const SeaLevelSolver& solver,
-                         const SeaLevelSolver::State& background,
-                         std::span<const double> startIce) {
+void CheckMigratingStart(const GRDSolver& solver,
+                         const GRDSolver::State& background,
+                         std::span<const double> startIce, bool startSolved) {
   const auto fieldSize = solver.Grid().FieldSize();
   if (startIce.size() != fieldSize) {
     throw std::invalid_argument(
@@ -19,7 +19,7 @@ void CheckMigratingStart(const SeaLevelSolver& solver,
     scale = std::max(scale, std::abs(startIce[i]));
     worst = std::max(worst, std::abs(background.iceThickness[i] - startIce[i]));
   }
-  if (worst > 1e-6 * scale) {
+  if (!startSolved && worst > 1e-6 * scale) {
     throw std::invalid_argument(
         "the background state's ice thickness is not the history's at the "
         "first node; build the state at times[0]");
@@ -34,21 +34,24 @@ void CheckMigratingStart(const SeaLevelSolver& solver,
   }
 }
 
-std::vector<std::complex<double>> MigratedLoadCoefficients(
-    const SeaLevelSolver& solver, const SeaLevelSolver::State& background,
-    const SeaLevelSolver::State& final) {
+void CheckLandAtStart(const GRDSolver& solver,
+                      const GRDSolver::State& background,
+                      std::span<const char> startLand) {
   const auto fieldSize = solver.Grid().FieldSize();
-  const auto& start = background;
-  auto total = std::vector<double>(fieldSize);
-  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    total[i] =
-        solver.IceDensity() *
-            ((1.0 - final.oceanFunction[i]) * final.iceThickness[i] -
-             (1.0 - start.oceanFunction[i]) * start.iceThickness[i]) +
-        solver.WaterDensity() * (final.oceanFunction[i] * final.seaLevel[i] -
-                                 start.oceanFunction[i] * start.seaLevel[i]);
+  if (!startLand.empty() && startLand.size() != fieldSize) {
+    throw std::invalid_argument(
+        "the land held is not a mask on the solver's grid");
   }
-  return solver.Grid().Expand(total);
+  const auto& held = background.forcedLand;
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    const auto given = !startLand.empty() && startLand[i] != 0;
+    const auto own = !held.empty() && held[i] != 0;
+    if (given != own) {
+      throw std::invalid_argument(
+          "the land held at the first node is not the background state's: "
+          "build the state with the land held at times[0]");
+    }
+  }
 }
 
 }  // namespace sl3dpp::detail

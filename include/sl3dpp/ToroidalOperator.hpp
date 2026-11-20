@@ -99,6 +99,11 @@ class ToroidalOperator {
   /// construction).
   [[nodiscard]] int SurfaceDof() const;
 
+  /// The force of a unit toroidal traction in the units of a surface
+  /// density, as DegreeOperator::Tangential is the spheroidal one's: the
+  /// surface dof takes -g a^2 l (l + 1).
+  [[nodiscard]] std::vector<double> Tangential() const;
+
   /// x with A x = b for nrhs column-major right-hand sides; at l = 1 in
   /// the pinned gauge (x zero at the pinned dofs), which needs b
   /// torque-free (orthogonal to every RigidRotation) to solve A x = b.

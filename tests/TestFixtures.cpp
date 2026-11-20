@@ -131,7 +131,7 @@ TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
   constexpr auto lmax = 32;
   auto table =
       sl3dpp::LoveNumbers::FromFile(data / "pyslfp_love_numbers.txt").value();
-  sl3dpp::SeaLevelSolver solver(sl3dpp::SurfaceGrid(lmax), table,
+  sl3dpp::GRDSolver solver(sl3dpp::SurfaceGrid(lmax), table,
                                 sl3dpp::SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -151,7 +151,7 @@ TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
     return c;
   };
 
-  sl3dpp::SeaLevelSolver::GeneralisedForcing forcing;
+  sl3dpp::GRDSolver::GeneralisedForcing forcing;
   forcing.oceanFunctionOverride = gridInput("ocean_function", {});
   forcing.directLoad = gridInput("direct_load", kSigma);
   forcing.displacementLoad = gridInput("displacement_load", kSigma);
@@ -184,8 +184,8 @@ TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
   // The floor is the aliasing tail of near-lmax products, which differs
   // between grids; observed ~2e-9.
   constexpr auto tol = 5e-9;
-  EXPECT_LT(CoefficientError(toSi(response.seaLevelChange, {.length = 1}),
-                             fixture.fields.at("sea_level_change")),
+  EXPECT_LT(CoefficientError(toSi(response.relativeSeaLevelChange, {.length = 1}),
+                             fixture.fields.at("relative_sea_level_change")),
             tol);
   EXPECT_LT(CoefficientError(toSi(response.displacement, {.length = 1}),
                              fixture.fields.at("displacement")),
@@ -227,12 +227,14 @@ TEST(SeaLevelGate, SharpOceanFingerprintNearPyslfp) {
       iceChange, sl3dpp::RotationalFeedback::Full);
   ASSERT_TRUE(result.converged);
 
-  // The tolerances below are pyslfp's own measured grid sensitivity for
-  // this problem (DH vs GLQ at lmax 32): ocean area 0.44%, sea-level
-  // coefficients 0.049 of the largest, the axial rotation 4%. The
-  // transverse rotation is a small residual of a nearly zonal load and is
-  // not determined at this resolution (pyslfp's own grids disagree on it
-  // by a factor of two), so it is not compared.
+  // The reference, written by scripts/make_sea_level_fixtures.py, is
+  // pyslfp's fingerprint of the same melt on its DH grid. The tolerances
+  // below cover pyslfp's own measured grid sensitivity for this problem
+  // (DH vs GLQ at lmax 32): ocean area 0.44%, sea-level coefficients 0.049
+  // of the largest, the axial rotation 4%. The transverse rotation is a
+  // small residual of a nearly zonal load and is not determined at this
+  // resolution (pyslfp's own grids disagree on it by a factor of two), so
+  // it is not compared.
   std::vector<double> ocean(fingerprint.OceanFunction().begin(),
                             fingerprint.OceanFunction().end());
   const auto area = table.radius * table.radius * grid.Integrate(ocean);
@@ -240,8 +242,8 @@ TEST(SeaLevelGate, SharpOceanFingerprintNearPyslfp) {
 
   auto toSi = [&](std::span<const double> field) { return grid.Expand(field); };
   constexpr auto tol = 8e-2;
-  EXPECT_LT(CoefficientError(toSi(result.seaLevelChange),
-                             fixture.fields.at("sea_level_change")),
+  EXPECT_LT(CoefficientError(toSi(result.relativeSeaLevelChange),
+                             fixture.fields.at("relative_sea_level_change")),
             tol);
   EXPECT_LT(CoefficientError(toSi(result.displacement),
                              fixture.fields.at("displacement")),
@@ -292,7 +294,9 @@ TEST(EvolutionGate, StepperMatchesPyslfp) {
   // Parse and replay the fixture.
   std::ifstream file(data / "pyslfp_stepper.txt");
   ASSERT_TRUE(file.is_open());
-  constexpr auto tol = 1e-9;
+  // each code's own rounding, carried through the steps: 1.7e-10 at worst
+  // in the history, 1e-11 in the effective numbers
+  constexpr auto tol = 1e-8;
   auto scheme = sl3dpp::Scheme::ExponentialTrapezoid;
   auto state = std::optional<sl3dpp::ViscoelasticState>{};
   auto solutions = std::map<int, std::vector<double>>{};
@@ -376,7 +380,8 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
   auto material = sl3dpp::Material::Create(model, mesh).value();
   auto ln = sl3dpp::ComputeLoveNumbers(material, lmax);
 
-  // Parse the pyslfp reference.
+  // Parse the reference, written by scripts/make_love_number_fixtures.py:
+  // pyslfp's generalised Love numbers of the same deck and mesh rule.
   std::ifstream file(data / "pyslfp_love_numbers.txt");
   ASSERT_TRUE(file.is_open());
   auto radius = 0.0, surfaceGravity = 0.0, fluidTidal = 0.0;
@@ -403,7 +408,8 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
   }
   ASSERT_EQ(table.size(), static_cast<std::size_t>(lmax + 1));
 
-  constexpr auto tol = 1e-10;
+  // each code's solves' rounding: 6e-11 of a degree's scale at worst
+  constexpr auto tol = 1e-9;
   EXPECT_NEAR(ln.radius, radius, tol * radius);
   EXPECT_NEAR(ln.surface_gravity, surfaceGravity, tol * surfaceGravity);
   const std::vector<double>* columns[12] = {
@@ -429,7 +435,7 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
     const double scale =
         std::max({std::abs(axial[i]), std::abs(values[i]), 1e-30});
     EXPECT_NEAR(values[i], axial[i],
-                std::max(tol * scale, 1e-10 * std::abs(axial[2])))
+                std::max(tol * scale, 1e-9 * std::abs(axial[2])))
         << "axial " << i;
   }
   EXPECT_NEAR(sl3dpp::FluidTidalNumber(material, 2), fluidTidal,

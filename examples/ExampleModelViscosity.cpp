@@ -8,29 +8,31 @@
  * eta(x) = eta_bar(r) exp(delta(x)) about its lateral geometric mean:
  * eta_bar is the Maxwell rheology's radial profile and delta the lateral
  * perturbation Viscoelastic3D applies pseudospectrally. The file here is
- * the test suite's (viscosity_log.nc, copied beside the examples): on this
+ * the test suite's (viscosity_log.nc, copied into data/): on this
  * same PREM-like body, 1e21 Pa s with a degree-2 sectoral perturbation
  * delta = 0.4 (r/a)^2 sin^2(theta) cos(2 phi) through the mantle. A file
  * converted from a tomography model by planetmodel is read the same way.
  *
  * The load is the state file's own ice history from 21 ka to the present
  * (the synthetic Earth's glacial cycle, or ICE-7G with
- * `--state ice7g.nc`), relative to 21 ka, with the background state taken
- * at 21 ka. The radial twin uses the file's reference profile alone, so
- * the difference is what the lateral structure does.
+ * `--state data/ice7g.nc`), relative to 21 ka, with the background state
+ * taken at 21 ka. The radial twin uses the file's reference profile alone,
+ * so the difference is what the lateral structure does.
  *
- * Outputs (SI): present-day sea-level change for both runs and their
- * difference, delta at 1000 km depth, the 21 ka ice, and the sea-level
- * histories at two sites near the former ice sheets.
+ * Outputs (SI), in output/library/model_viscosity/model_viscosity.txt:
+ * present-day sea-level change for both runs and their difference, delta
+ * at 1000 km depth, the 21 ka ice, and the sea-level histories at two
+ * sites near the former ice sheets (6 degree cap means).
  *
  *   ExampleModelViscosity [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_model_viscosity.py.
+ * Run from build/examples; plot with python/plot_model_viscosity.py.
  */
 
 #include <cmath>
 #include <format>
 #include <iostream>
+#include <numbers>
 
 #include "Common.hpp"
 #include "sl3dpp/Evolution3D.hpp"
@@ -56,10 +58,11 @@ int main(int argc, char** argv) {
       "ExampleModelViscosity: a model file's 3D viscosity at lmax {}, state "
       "{}",
       lmax, options.state.string()));
-  examples::Say("reading viscosity_log.nc; building the 3D operators");
+  const auto viscosityFile = examples::DataFile("viscosity_log.nc");
+  examples::Say(std::format("reading {}; building the 3D operators",
+                            viscosityFile.string()));
   const auto earth = examples::Earth::Make(lmax, 1e21);
-  const auto viscosity =
-      io::ModelViscosity::Read("viscosity_log.nc", earth.model);
+  const auto viscosity = io::ModelViscosity::Read(viscosityFile, earth.model);
   if (!viscosity) {
     std::cerr << viscosity.error().message << "\n";
     return 1;
@@ -70,7 +73,7 @@ int main(int argc, char** argv) {
   Viscoelastic3D radial(rheology, lmax,
                         [](double, double, double) { return 0.0; });
 
-  SeaLevelSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
+  GRDSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -89,7 +92,7 @@ int main(int argc, char** argv) {
   // The grounded load relative to 21 ka, a callable of solver time.
   const auto& C = state.oceanFunction;
   const auto startSi = -startKyr * kyr;
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ice =
         history.Values("ice_thickness", startSi + t * scales.Time());
     auto load = std::vector<double>(grid.FieldSize());
@@ -104,15 +107,15 @@ int main(int argc, char** argv) {
     times.push_back(startKyr * kyr * n / (nodes - 1) / scales.Time());
   }
 
-  const auto report = examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(
+  const auto report = examples::NodeReporter<Evolution3D::Snapshot>(
       nodes - 1, scales.Time());
   examples::Say(
       std::format("the run on the file's viscosity, {} steps:", nodes - 1));
-  SeaLevelEvolution3D run3(lateral, solver, state, {.on_snapshot = report});
-  const auto with = run3.Run(times, iceLoad);
+  Evolution3D run3(lateral, solver, state, {.on_snapshot = report});
+  const auto with = run3.Run(times, directLoad);
   examples::Say("its radial twin:");
-  SeaLevelEvolution3D run1(radial, solver, state, {.on_snapshot = report});
-  const auto without = run1.Run(times, iceLoad);
+  Evolution3D run1(radial, solver, state, {.on_snapshot = report});
+  const auto without = run1.Run(times, directLoad);
   for (const auto& snapshot : with) {
     if (!snapshot.converged) {
       std::cerr << "the coupled fixed point did not converge at t = "
@@ -121,19 +124,21 @@ int main(int argc, char** argv) {
     }
   }
 
-  examples::Writer out("model_viscosity.txt");
+  const auto table =
+      examples::OutputDirectory("model_viscosity") / "model_viscosity.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "3D viscosity from viscosity_log.nc against its radial "
       "reference, ice history of " +
       options.state.string() + " from 21 ka (SI)");
   out.Grid(grid);
-  out.Field("slc_lateral_m", with.back().seaLevelChange, length);
-  out.Field("slc_radial_m", without.back().seaLevelChange, length);
+  out.Field("slc_lateral_m", with.back().relativeSeaLevelChange, length);
+  out.Field("slc_radial_m", without.back().relativeSeaLevelChange, length);
   auto difference = std::vector<double>(grid.FieldSize());
   for (auto i = std::size_t{0}; i < difference.size(); ++i) {
     difference[i] =
-        with.back().seaLevelChange[i] - without.back().seaLevelChange[i];
+        with.back().relativeSeaLevelChange[i] - without.back().relativeSeaLevelChange[i];
   }
   out.Field("slc_difference_m", difference, length);
   out.Field("ice_21ka_m", start.iceThickness);
@@ -144,7 +149,10 @@ int main(int argc, char** argv) {
     return delta(rDeep, theta, phi);
   }));
 
-  // The cap-mean sea level at two sites near the former ice sheets.
+  // The sea level at two sites near the former ice sheets, averaged over
+  // Gaussian caps of 6 degrees: at least half the truncation wavelength
+  // 360 / lmax degrees at the default lmax 32 (5.6), so that the band
+  // resolves the caps.
   const auto a = solver.Radius();
   const GeographicPoint sites[] = {{60.0, 275.0},  // Hudson Bay
                                    {60.0, 10.0}};  // southern Norway
@@ -152,11 +160,12 @@ int main(int argc, char** argv) {
   for (auto n = std::size_t{0}; n < with.size(); ++n) {
     auto row = std::vector<double>{startKyr - startKyr * n / (nodes - 1)};
     for (const auto& site : sites) {
-      const auto dual = CapMeanDual(grid, a, site, 0.05);
+      const auto dual =
+          CapMeanDual(grid, a, site, 6.0 * std::numbers::pi / 180.0);
       row.push_back(length *
-                    PairedValue(grid, a, dual, with[n].seaLevelChange));
+                    PairedValue(grid, a, dual, with[n].relativeSeaLevelChange));
       row.push_back(length *
-                    PairedValue(grid, a, dual, without[n].seaLevelChange));
+                    PairedValue(grid, a, dual, without[n].relativeSeaLevelChange));
     }
     row.push_back(static_cast<double>(with[n].coupledIterations));
     rows.push_back(row);
@@ -171,8 +180,8 @@ int main(int argc, char** argv) {
   }
 
   const auto& last = rows.back();
-  std::cout << "wrote model_viscosity.txt (present-day sea level at Hudson "
-               "Bay: "
+  std::cout << "wrote " << table.string()
+            << " (present-day sea level at Hudson Bay: "
             << last[1] << " m lateral, " << last[2] << " m radial)\n";
   return 0;
 }

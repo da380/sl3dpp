@@ -40,6 +40,18 @@ anything back.
 | `viscosity_log.nc`, `viscosity_mean.nc`, `viscosity_full3d.nc`, `viscosity_radial.nc` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` (and `viscosity_log.nc` `TestApps`, `TestAppsDistributed` and the 3D examples) | the `TestViscoelastic3D` body's viscosity as planetmodel model files: a zero-mean log perturbation, one with a lateral mean, stored fully 3D, and radial alone |
 | `viscosity_probes_log.txt`, `viscosity_probes_mean.txt`, `viscosity_probes_full3d.txt` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` | planetmodel's own reading of those files at fixed off-grid points |
 
+## Written at test time
+
+The planetmodel fault files (`planetmodel.fault/1`) the fault-file tests
+read are not kept here: `tests/FaultFixtures.hpp` builds each fault with
+planetmodel's C++ classes and writes it with planetmodel's own writer
+(`planetmodel::WriteFaultFile`, the Python's `write_fault` in C++) into
+the test's directory. They lie on the homogeneous test ball: the twin of
+a planar fault of 1e22 N m, that plane's slip growing on a time axis,
+turning between two slices and served at its stored times alone, and a
+curved megathrust with a tapered thrust. The decks of the prony and
+burgers tests are written the same way, by planetmodel's `WriteDeck`.
+
 ## From the Fortran sl3d
 
 - `prem.simp.vm1` — copied verbatim from `sl3d/data/prem.simp.vm1`

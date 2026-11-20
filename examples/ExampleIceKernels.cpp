@@ -18,13 +18,15 @@
  *   tail sum of the later node-wise thickness duals: bounded, and free of
  *   the delta those carry at the observation;
  * - the radial viscosity kernels dJ / d eta(r), from the recorded
- *   forward trajectory, by BOTH the continuous adjoint (the preferred
- *   path) and the exact discrete transpose: their agreement is the
- *   resolution diagnostic (docs/adjoints.md §1).
+ *   forward trajectory, by BOTH the continuous adjoint and the exact
+ *   discrete transpose: their agreement is a check of the time
+ *   discretisation (docs/adjoints.md §1).
+ *
+ * Outputs: output/library/ice_kernels/ice_kernels.txt.
  *
  *   ExampleIceKernels [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_kernels.py.
+ * Run from build/examples; plot with python/plot_kernels.py.
  */
 
 #include <format>
@@ -53,7 +55,7 @@ int main(int argc, char** argv) {
   examples::Say("building the model, the operator and the sea level solver");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
-  SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -86,7 +88,7 @@ int main(int argc, char** argv) {
   for (auto n = 0; n < nodes; ++n) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ramp = t / times.back();
     auto load = std::vector<double>(unitLoad.size());
     for (auto i = std::size_t{0}; i < load.size(); ++i)
@@ -94,21 +96,19 @@ int main(int argc, char** argv) {
     return load;
   };
   // Checkpointed: every other state is kept, and each sweep rebuilds the
-  // one between by an exact backward step (ViscoelasticOperator::
-  // StepBack). A backward step runs the dissipation the other way, so it
-  // amplifies the forward solves' error by exp(h) per step, h = dt / tau;
-  // here h is about 2, so one step per gap rather than the sqrt(N) of
-  // examples::CheckpointStride (which suits the 3D sweep, whose rebuilt
-  // steps go forward).
+  // one between by the run's own forward step from the kept state below,
+  // the kernels the full recording's to rounding at any stride. At 11
+  // nodes a sweep holds as many states at stride 2 as at the sqrt(N) of
+  // examples::CheckpointStride, eight.
   constexpr auto stride = 2;
   examples::Say(std::format(
       "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));
-  SeaLevelEvolution evolution(
+  Evolution evolution(
       op, solver, state,
       {.record_stride = stride,
-       .on_snapshot = examples::NodeReporter<SeaLevelEvolution::Snapshot>(
+       .on_snapshot = examples::NodeReporter<Evolution::Snapshot>(
            nodes - 1, scales.Time())});
-  const auto snapshots = evolution.Run(times, iceLoad);
+  const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
 
   // The objective: the cap-weighted mean sea-level change at a site off
@@ -125,10 +125,12 @@ int main(int argc, char** argv) {
   for (auto i = std::size_t{0}; i < site.size(); ++i) siteArea[i] = site[i];
   const auto norm = a * a * grid.Integrate(siteArea);
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[nodes - 1].seaLevelDual = site;
-  for (auto& v : measurements[nodes - 1].seaLevelDual) v /= norm;
+  measurements[nodes - 1].relativeSeaLevelDual = site;
+  for (auto& v : measurements[nodes - 1].relativeSeaLevelDual) v /= norm;
 
-  examples::Writer out("kernels.txt");
+  const auto table =
+      examples::OutputDirectory("ice_kernels") / "ice_kernels.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "adjoint kernels of the site-mean sea level at 10 kyr under a "
@@ -139,12 +141,11 @@ int main(int argc, char** argv) {
   out.Grid(grid);
   out.Scalar("gauge_lat", gauge.latitude);
   out.Scalar("gauge_lon", gauge.longitude);
-  out.Field("site_dual", measurements[nodes - 1].seaLevelDual);
+  out.Field("site_dual", measurements[nodes - 1].relativeSeaLevelDual);
   out.Field("ice_change_final_m", unitLoad);  // the load shape, context
 
   const auto& mesh = earth.material.Mesh();
   const auto& matScales = earth.material.ModelScales();
-  const auto w = mesh.Weights();
   for (auto method : {AdjointMethod::Continuous, AdjointMethod::Discrete}) {
     const auto continuous = method == AdjointMethod::Continuous;
     const std::string tag = continuous ? "continuous" : "discrete";
@@ -153,7 +154,7 @@ int main(int argc, char** argv) {
         evolution,
         {.method = method, .on_node = examples::SweepReporter(nodes - 1)});
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
 
     // The rate kernels of four intervals, PROJECTED onto the grounded
     // present-day ice: only
@@ -189,25 +190,26 @@ int main(int argc, char** argv) {
       }
     }
 
-    // The radial viscosity kernel as a density in radius: divide the
-    // nodal values by their quadrature weight w jac, convert eta and
-    // radius to SI. dJ = int K(r) d eta(r) dr.
+    // The radial viscosity kernel as a density in radius: the kernel is
+    // a density per unit volume, so the shell's 4 pi r^2 times it, with
+    // eta and radius in SI. dJ = int K(r) d eta(r) dr.
     const auto eta = kernels.Viscosity(earth.rheology);
     const auto etaSi = matScales.Factor(ViscosityDimensions);
     const auto rSi = matScales.Length();
     auto rows = std::vector<std::vector<double>>{};
     for (auto e = 0; e < mesh.ElementCount(); ++e) {
-      const auto jac = mesh.Jacobian(e);
       for (auto q = 0; q < mesh.NGll(); ++q) {
         const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
         if (earth.rheology.BranchAt(0).itau[i] <= 0.0) continue;
-        rows.push_back({mesh.Radius(e, q) * rSi / 1.0e3,  // km
-                        eta[0][i] / (w[q] * jac) / (etaSi * rSi)});
+        const auto r = mesh.Radius(e, q);
+        rows.push_back({r * rSi / 1.0e3,  // km
+                        4.0 * std::numbers::pi * r * r * eta[0][i] /
+                            (etaSi * rSi)});
       }
     }
     out.Series("viscosity_kernel_" + tag, {"r_km", "dJ_deta"}, rows);
   }
 
-  std::cout << "wrote kernels.txt\n";
+  std::cout << "wrote " << table.string() << "\n";
   return 0;
 }

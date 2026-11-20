@@ -2,12 +2,11 @@
 
 /**
  * @file detail/Shorelines.hpp
- * @brief What the 1D and 3D evolutions share under migrating shorelines
- * (pyslfp's `_run_migrating`). Internal.
+ * @brief What the 1D and 3D evolutions share under migrating shorelines.
+ * Internal.
  *
  * A migrating run starts from its background state, which must be the state
- * at the first node, and finishes each step under the load its converged
- * nonlinear state carries relative to that background.
+ * at the first node unless the start is solved.
  */
 
 #include <complex>
@@ -22,17 +21,21 @@ namespace sl3dpp::detail {
 /// node: the background's ice thickness must be `startIce` (the history's
 /// at times[0], on the solver's grid) to 1e-6 of its largest value, and its
 /// ocean function the flotation one, since the shorelines follow flotation
-/// from the first node.
-void CheckMigratingStart(const SeaLevelSolver& solver,
-                         const SeaLevelSolver::State& background,
-                         std::span<const double> startIce);
+/// from the first node. Where the start is solved (`startSolved`: a run
+/// under a forcing beside the ice), the ice at the first node may differ
+/// from the background's, its change being part of what the start solves
+/// under; the ocean function must still be flotation's.
+void CheckMigratingStart(const GRDSolver& solver,
+                         const GRDSolver::State& background,
+                         std::span<const double> startIce,
+                         bool startSolved = false);
 
-/// The surface load of a converged nonlinear state relative to the
-/// background, grounded ice and ocean water (pyslfp's `_total_load_coeffs`),
-/// as m >= 0 coefficients in the solver's units: what the radial step
-/// finishes under, so that it sees the load its sea level solution saw.
-[[nodiscard]] std::vector<std::complex<double>> MigratedLoadCoefficients(
-    const SeaLevelSolver& solver, const SeaLevelSolver::State& background,
-    const SeaLevelSolver::State& final);
+/// Refuses a migrating run whose land held at its first node (`startLand`,
+/// the mask of a land that changes in time there; empty: none held) is not
+/// its background's, whose ocean function holds the land of the first
+/// node: a point is held where its mask is nonzero.
+void CheckLandAtStart(const GRDSolver& solver,
+                      const GRDSolver::State& background,
+                      std::span<const char> startLand);
 
 }  // namespace sl3dpp::detail

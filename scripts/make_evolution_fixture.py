@@ -1,11 +1,14 @@
 """The coupled evolution's reference: pyslfp's forward GIA run.
 
-The analytic test state with the PREM-deck Maxwell body (the stepper
-fixture's rheology rule), ice melting linearly in time, stepped by the
-coupled loop with full rotational feedback. The sharp flotation ocean
+The analytic test state (pyslfp's `AnalyticalIceModel` at the present)
+with the PREM-deck Maxwell body (the stepper fixture's rheology rule), a
+tenth of the ice melting linearly over 5000 years, stepped by the coupled
+loop with full rotational feedback. The sharp flotation ocean
 function makes the solution grid-sensitive, so pyslfp's own DH-vs-GLQ
 spread is measured here and printed, and the C++ gate's tolerances are set
 to it, as for the sharp-ocean fingerprint of make_sea_level_fixtures.py.
+The file holds the GLQ run at lmax 16: at each of 11 nodes the time, the
+angular-velocity change and the sea level change's coefficients, in SI.
 tests/TestEvolution.cpp holds the C++ to it.
 
 Run in this directory's environment (pyproject.toml):

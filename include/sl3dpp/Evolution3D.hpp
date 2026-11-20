@@ -15,20 +15,26 @@
  * and centrifugal channels from the SLE's answer, and updates the strain
  * through the step's reference solves. With no lateral perturbation the
  * channels are strain-independent, the loop converges on its first pass,
- * and the history equals the 1D coupled evolution's.
+ * and the history equals the 1D coupled evolution's. Under Sdirk2 a step
+ * is two such opened stages, each its own combined fixed point, the first
+ * under the forcing of the step's two nodes combined (StepRecipe.hpp).
  *
- * Units follow SeaLevelEvolution: times, the ice-load callable and the
+ * Units follow Evolution: times, the ice-load callable and the
  * returned fields are in the SLE solver's non-dimensional scheme; the
  * radial operator works in the material's, with the ratios carried here.
  * The m >= 0 SLE coefficients and the full-m material columns are bridged
  * by the Hermitian symmetry of real fields.
  *
- * Two shoreline treatments, as SeaLevelEvolution's: `Run` solves the
+ * Two shoreline treatments, as Evolution's: `Run` solves the
  * linear (frozen shoreline) equation in each pass, for a given non-ocean
  * load; `RunMigrating` solves the nonlinear equation in each pass, for a
  * given ice thickness history, so the ocean function follows the
  * flotation condition inside the combined fixed point and every snapshot
  * records the converged one.
+ *
+ * `Instantaneous` is the start of `Run` on its own: the elastic response
+ * to a load, one solve with no time step — under lateral moduli the
+ * elastic sea-level fingerprint of a laterally heterogeneous Earth.
  */
 
 #include <array>
@@ -39,18 +45,26 @@
 #include <span>
 #include <vector>
 
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
 namespace sl3dpp {
 
-class SeaLevelEvolution3D {
+class Evolution3D {
  public:
   struct Snapshot {
     double t = 0.0;
-    std::vector<double> seaLevelChange;
+    std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
+    /// The potential V of the tangential displacement (the displacement
+    /// its surface gradient), as GRDSolver::Response's.
+    std::vector<double> tangentialPotential;
+    /// The toroidal potential W of the tangential displacement, as
+    /// GRDSolver::Response's; empty where there is none (a radial model
+    /// under a load and a tide).
+    std::vector<double> toroidalPotential;
     std::array<double, 3> angularVelocity{};
     int coupledIterations = 0;
     double coupledResidual = 0.0;
@@ -69,6 +83,39 @@ class SeaLevelEvolution3D {
     /// The node's ocean function under migrating shorelines; empty when
     /// the shorelines are frozen at the background state's.
     std::vector<double> oceanFunction;
+    /// Under interior sources, when recording: the sources' forces at
+    /// the node. Such a run is recorded at every node (record_stride 1),
+    /// each state with its strain (on the snapshot, or handed to
+    /// Options::on_state): the strain of a source-driven solution is not
+    /// regenerated from the loads alone.
+    std::optional<DegreeFields> sourceForces;
+    /// An inner stage of the step that ends at the node, under a
+    /// multi-stage scheme (Sdirk2's first stage), as Evolution::Snapshot::
+    /// Stage: what closed it, under which a derivative run about the step
+    /// and the rebuild of a state between kept ones repeat the stage from
+    /// the node below (the stage's fixed point under known channels, no
+    /// sea level equation to close). The coefficients are kept whenever
+    /// the node's are, the ocean function under migrating shorelines, the
+    /// forces under interior sources.
+    struct Stage {
+      std::vector<std::complex<double>> loadCoefficients;
+      std::vector<std::complex<double>> tideCoefficients;
+      std::vector<double> oceanFunction;
+      std::optional<DegreeFields> sourceForces;
+      /// A recorded tangent-linear run's own state at the stage, with its
+      /// strain (TangentLinearSolver3D::Options::record); absent on a
+      /// forward run's snapshots.
+      std::optional<Viscoelastic3D::State> internalState;
+    };
+    /// The inner stages of the step ending at the node, in order: empty
+    /// under a one-stage scheme, at the first node and at the second node
+    /// of a repeated pair.
+    std::vector<Stage> stages;
+    /// The method of the tangent-linear run whose node this is
+    /// (TangentLinearSolver3D::Options::method), on every snapshot that
+    /// solver returns; absent on a forward run's. A second-order sweep or
+    /// run refuses a tangent-linear run of the other method.
+    std::optional<AdjointMethod> tangentMethod;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -87,7 +134,10 @@ class SeaLevelEvolution3D {
   };
 
   struct Options {
-    Scheme scheme = Scheme::ExponentialTrapezoid;
+    /// The time step, as Evolution::Options::scheme: under Sdirk2 each
+    /// stage's combined fixed point closed under its forcing, the first
+    /// stage's the step's two nodes' combined.
+    Scheme scheme = Scheme::Sdirk2;
     RotationalFeedback rotation = RotationalFeedback::Full;
     /// The SLE's own tolerance per pass.
     double rtol = 1e-9;
@@ -96,6 +146,17 @@ class SeaLevelEvolution3D {
     /// contracts by less than anderson_rate a pass (and the SLE's own
     /// iteration, at the same memory; Viscoelastic3D::IterationControl).
     int max_coupled_iterations = 60;
+    /// Its tolerance on the relative change of the strain between passes,
+    /// which has a floor: the rounding of a pass (its lateral products'
+    /// transforms and its degree solves) keeps two passes apart at about
+    /// 1e-13 to 1e-12 (measured 6e-14 to 3e-13 on the tests' small bodies,
+    /// 3e-13 to 7e-13 under their lateral moduli), and under
+    /// StepSolver::ConjugateGradients each pass's inner solve stops at its
+    /// own tolerance (Viscoelastic3D::Options::solve_rtol), at about 1e-11
+    /// (measured 4e-12 to 9e-12). A tolerance below the floor is not met:
+    /// the node reports unconverged with the residual it stopped at
+    /// (Snapshot::coupledResidual; the start's failure states it,
+    /// StepInfo::Describe).
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
     /// The most passes of each nonlinear sea level solve under migrating
@@ -107,6 +168,13 @@ class SeaLevelEvolution3D {
     /// rebuilds the states between by forward steps (ForwardTrajectory3D):
     /// a stride near sqrt(nodes) holds the fewest states.
     int record_stride = 0;
+    /// The nodes of the whole run before a call's first, which the record
+    /// stride counts, as Evolution::Options::record_offset.
+    std::size_t record_offset = 0;
+    /// Under migrating shorelines, the points held as land at time t, as
+    /// Evolution::Options::land_held: every pass of a node's combined
+    /// fixed point holds the mask at the node's time.
+    std::function<std::vector<char>(double)> land_held{};
     /// Whether a kept state also keeps its strain. By default (false)
     /// only the internal variables are kept, and an adjoint regenerates
     /// each node's strain by one elastic solve under its recorded loads;
@@ -117,12 +185,18 @@ class SeaLevelEvolution3D {
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
     std::function<void(std::size_t node, const Snapshot&)> on_snapshot{};
+    /// Whether the run returns its snapshots. false: each is handed to
+    /// on_snapshot and then dropped, and the run returns none, so that a
+    /// caller keeping its outputs its own way holds no node twice.
+    bool keep_snapshots = true;
     /// With record_stride set, hand each kept node's internal state to
     /// on_state (after its on_snapshot) INSTEAD of keeping it on the
     /// snapshot: the recording then lives where the callback puts it (a
-    /// disk store, say), the snapshots keep the loads alone, and a
-    /// reverse sweep reads the states back through
-    /// ForwardTrajectory3D's fetch.
+    /// disk store, say, io::TrajectoryStore), the snapshots keep the loads
+    /// alone, and a reverse sweep reads the states back through
+    /// ForwardTrajectory3D's fetch. Under interior sources the state
+    /// handed out carries its strain, and the snapshot keeps the sources'
+    /// forces.
     std::function<void(std::size_t node, Viscoelastic3D::State&&)> on_state{};
     /// Hand every checkpoint_stride-th node's recurrence, and the last
     /// node's, to on_checkpoint (0 hands none), after that node's
@@ -134,17 +208,77 @@ class SeaLevelEvolution3D {
 
   /// The operator and solver are borrowed for the evolution's lifetime;
   /// the SLE grid's lmax must match the operator's.
-  SeaLevelEvolution3D(const Viscoelastic3D& op, const SeaLevelSolver& solver,
-                      SeaLevelSolver::State state, Options options);
-  SeaLevelEvolution3D(const Viscoelastic3D& op, const SeaLevelSolver& solver,
-                      SeaLevelSolver::State state)
-      : SeaLevelEvolution3D(op, solver, std::move(state), Options{}) {}
+  Evolution3D(const Viscoelastic3D& op, const GRDSolver& solver,
+                      GRDSolver::State state, Options options);
+  Evolution3D(const Viscoelastic3D& op, const GRDSolver& solver,
+                      GRDSolver::State state)
+      : Evolution3D(op, solver, std::move(state), Options{}) {}
 
-  /// As SeaLevelEvolution::Run: times increasing in SLE units,
-  /// iceLoad(t) the non-ocean surface load on the SLE grid.
+  /// As Evolution::Run: times increasing in SLE units, a time repeated
+  /// once for a jump of the forcing (its left limit, then its right, a
+  /// zero-length step between), directLoad(t) the non-ocean surface load
+  /// on the SLE grid.
   [[nodiscard]] std::vector<Snapshot> Run(
       std::span<const double> times,
-      const std::function<std::vector<double>(double)>& iceLoad);
+      const std::function<std::vector<double>(double)>& directLoad);
+
+  /// What drives a run, as Evolution::Forcing: the direct load, a grid
+  /// field, and a prescribed tidal potential, its coefficients on the
+  /// surface (degree 2 and up, kLowestTideDegree), each a function of
+  /// time in the solver's units and either absent.
+  struct Forcing {
+    /// The direct load at time t that enters the water budget; one
+    /// outside it; and the height of a layer laid on the solid surface:
+    /// as Evolution::Forcing's.
+    std::function<std::vector<double>(double)> directLoad{};
+    std::function<std::vector<double>(double)> directLoadOutsideWaterBudget{};
+    std::function<std::vector<double>(double)> solidSurfaceChange{};
+    /// The prescribed tidal potential at time t, as Evolution::Forcing's:
+    /// taken with frozen shorelines and with migrating ones alike, and
+    /// refused at a node where it has a part below degree 2.
+    std::function<std::vector<std::complex<double>>(double)> tide{};
+    /// The point stress gluts acting at time t (PointSource.hpp), in the
+    /// solver's units: the radius a length, the moment a stress times a
+    /// volume. A source is the stress glut itself, not its rate: one that
+    /// acts from a time on is returned from that time on, and the
+    /// response at the first node is the elastic one to the sources there.
+    std::function<std::vector<PointSource>(double)> sources{};
+    /// The stress gluts on shells acting at time t (StressGlut), as
+    /// `sources`: the general stress glut, a tensor field on each shell,
+    /// its moment per unit solid angle in the solver's units.
+    std::function<std::vector<StressGlut>(double)> stressGluts{};
+    /// Their left limits at time t, read at the first node of a repeated
+    /// pair, as Evolution::Forcing's: absent, the plain callbacks.
+    std::function<std::vector<PointSource>(double)> sourcesBefore{};
+    std::function<std::vector<StressGlut>(double)> stressGlutsBefore{};
+    /// The left limits of the surface terms and of a migrating run's ice
+    /// thickness, as Evolution::Forcing's: absent, the plain callbacks; a
+    /// left limit without its term refused, and the ice thickness's under
+    /// frozen shorelines. The pair's zero-length step takes the jump as
+    /// the combined fixed point of a zero-length step under it.
+    std::function<std::vector<double>(double)> directLoadBefore{};
+    std::function<std::vector<double>(double)>
+        directLoadOutsideWaterBudgetBefore{};
+    std::function<std::vector<double>(double)> solidSurfaceChangeBefore{};
+    std::function<std::vector<std::complex<double>>(double)> tideBefore{};
+    std::function<std::vector<double>(double)> iceThicknessBefore{};
+  };
+
+  /// `Run` under a forcing, as Evolution's: on a background state without
+  /// an ocean (GRDSolver::NoOceanState) the solid body stepped under the
+  /// forcing, the combined fixed point then over the lateral terms and
+  /// the rotational feedback alone. With one time the run is the start
+  /// alone, the static problem (Instantaneous under the forcing); a run of
+  /// one node takes no step, and the check of the transverse rotational
+  /// feedback against the model's fluid limit, which a run that steps
+  /// makes, does not apply to it (every entry alike).
+  [[nodiscard]] std::vector<Snapshot> Run(std::span<const double> times,
+                                          const Forcing& forcing);
+
+  /// `Resume` under a forcing.
+  [[nodiscard]] std::vector<Snapshot> Resume(const Checkpoint& from,
+                                             std::span<const double> times,
+                                             const Forcing& forcing);
 
   /// Continues a run from a checkpoint: `times` is the remaining grid,
   /// its first entry the checkpoint's own node, and the snapshots come
@@ -152,10 +286,10 @@ class SeaLevelEvolution3D {
   /// uninterrupted run's.
   [[nodiscard]] std::vector<Snapshot> Resume(
       const Checkpoint& from, std::span<const double> times,
-      const std::function<std::vector<double>(double)>& iceLoad);
+      const std::function<std::vector<double>(double)>& directLoad);
 
   /// Integrates under migrating shorelines, as
-  /// SeaLevelEvolution::RunMigrating: `iceThickness(t)` is the ice
+  /// Evolution::RunMigrating: `iceThickness(t)` is the ice
   /// thickness at t on the SLE grid, solver units, and the background
   /// state is the state at times[0] (its ice thickness iceThickness(times[0])
   /// and its ocean function the flotation one); the run starts undisturbed.
@@ -168,27 +302,95 @@ class SeaLevelEvolution3D {
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness);
 
+  /// A migrating run under further forcing beside the ice, as
+  /// Evolution's: the direct loads inside and outside the water budget,
+  /// a layer on the solid surface, a prescribed tide (in every pass's
+  /// nonlinear solve and beside the centrifugal potential in the steps,
+  /// as `Run` takes it) and interior sources, changes from the
+  /// background state. The start is then solved (the nonlinear equation
+  /// on the unrelaxed body; under lateral moduli or sources, inside the
+  /// combined fixed point of a zero-length step), and the ice at times[0]
+  /// may differ from the background's. With one time the run is that
+  /// solve alone.
+  [[nodiscard]] std::vector<Snapshot> RunMigrating(
+      std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness,
+      const Forcing& forcing);
+
   /// `Resume` for a migrating run: the same recurrence, each pass closed
   /// by the nonlinear solve.
   [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
       const Checkpoint& from, std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness);
+  [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
+      const Checkpoint& from, std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness,
+      const Forcing& forcing);
+
+  /// The instantaneous elastic response to a direct load, as one solve
+  /// with no time step: `load` the non-ocean surface load on the SLE grid,
+  /// solver units (what Run's directLoad(t) returns), and the problem the
+  /// linear sea level equation on the background state's shorelines,
+  /// coupled to the rotational feedback of Options::rotation, its sea
+  /// level solves to Options::rtol. Without lateral moduli the equation is
+  /// closed by the operator's unrelaxed Love numbers. Under lateral moduli
+  /// (Viscoelastic3D::Options::moduli) the unrelaxed operator varies
+  /// laterally, and the response is the combined fixed point of a
+  /// zero-length step (Viscoelastic3D::StartStep with dt = 0) over the
+  /// strain, the ocean load and the rotation, closed as the operator's
+  /// step solver says (the passes of the fixed point, or the sea level
+  /// closure nested over conjugate-gradient solves) to Options::
+  /// coupled_rtol within max_coupled_iterations (docs/adjoints.md §13k,
+  /// §13n): the elastic sea-level fingerprint of a laterally
+  /// heterogeneous Earth.
+  ///
+  /// It is Run's first node, by the same code: Run(times, directLoad)[0] is
+  /// Instantaneous(directLoad(times[0]), times[0]). Distributed over radial
+  /// segments as Run is (collective; every process returns the same
+  /// snapshot). The snapshot's t is `t` (the response does not depend on
+  /// it), its iterations and residual the fixed point's (zero without
+  /// lateral moduli); with Options::record_stride set it keeps the state
+  /// and the load and centrifugal coefficients as Run's first node does;
+  /// no callback is called. FinalState() is the response's state
+  /// afterwards. The check of the transverse rotational feedback against
+  /// the model's fluid limit, which a run through time makes, does not
+  /// apply to the elastic problem. Throws when the fixed point does not
+  /// converge.
+  [[nodiscard]] Snapshot Instantaneous(const std::vector<double>& load,
+                                       double t = 0.0);
+
+  /// `Instantaneous` under a forcing at time t: its direct load, tide,
+  /// point sources and stress gluts there (any absent). The elastic response
+  /// to a source: the coseismic field.
+  [[nodiscard]] Snapshot Instantaneous(const Forcing& forcing, double t = 0.0);
 
   [[nodiscard]] const Viscoelastic3D::State& FinalState() const {
     return vstate_;
   }
 
   /// The background surface state: the initial state of every run.
-  [[nodiscard]] const SeaLevelSolver::State& BackgroundState() const {
+  [[nodiscard]] const GRDSolver::State& BackgroundState() const {
     return state_;
   }
 
   /// Replaces the background state (a calibrated initial state, say);
   /// its fields must live on the solver's grid.
-  void SetBackgroundState(SeaLevelSolver::State state);
+  void SetBackgroundState(GRDSolver::State state);
+
+  /// Whether the background state is marked as one calibrated under
+  /// migrating shorelines: CalibrateInitialSeaLevel marks the state it
+  /// leaves (and a caller who builds an evolution on such a state marks
+  /// it), SetBackgroundState clears the mark. The initial sea level of
+  /// such a state is not a parameter of the run, and the second-order
+  /// sweeps about it, which would hold it, are refused unless they say so
+  /// (AdjointSolver3D::Options::initial_sea_level_held; InitialSeaLevel.hpp).
+  [[nodiscard]] bool Calibrated() const { return calibrated_; }
+  void MarkCalibrated() { calibrated_ = true; }
 
   /// The sea level solver the evolution was built with.
-  [[nodiscard]] const SeaLevelSolver& Solver() const { return *solver_; }
+  [[nodiscard]] const GRDSolver& Solver() const { return *solver_; }
+  /// The operator the evolution steps.
+  [[nodiscard]] const Viscoelastic3D& Operator() const { return *op_; }
 
  private:
   friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
@@ -205,27 +407,60 @@ class SeaLevelEvolution3D {
       const std::map<int, std::vector<Complex>>& perDegree,
       double factor) const;
 
+  /// The machinery of one call's combined fixed point (Evolution3D.cpp):
+  /// the flavour sea level solvers, a pass's closure over the sea level
+  /// equation, and the step's closer under the operator's step solver.
+  class Coupled;
+
   /// The loop every entry shares, given the non-ocean load (frozen
   /// shorelines) or the ice thickness (migrating); `resumed` skips the
   /// start, the members below holding the checkpoint's recurrence instead.
   [[nodiscard]] std::vector<Snapshot> March(
       std::span<const double> times,
-      const std::function<std::vector<double>(double)>* iceLoad,
+      const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
-      bool resumed);
+      const std::function<std::vector<std::complex<double>>(double)>* tide,
+      bool resumed, const Forcing* interior = nullptr);
+
+  /// The instantaneous response at time t (SLE units) to the non-ocean
+  /// load, from rest, under frozen shorelines: Run's first node and
+  /// Instantaneous. Sets the state, the recurrence's coefficients and the
+  /// coupling's response; returns the fixed point's diagnostics. A
+  /// prescribed tide there is the coupling's (Coupled::tide).
+  Viscoelastic3D::StepInfo Start(Coupled& coupled, double t,
+                                 std::vector<double> load);
+
+  /// Primes the state's strain under the recurrence's coefficients when
+  /// the states are recorded (Options::record_stride).
+  void PrimeForRecording();
+
+  /// A node's snapshot: the response's fields (moved out) and the
+  /// diagnostics, the ocean function given, the state when `keepState`
+  /// (its strain as Options::record_strain says), and the recurrence's
+  /// coefficients whenever the record stride is set.
+  [[nodiscard]] Snapshot MakeSnapshot(double t,
+                                      GRDSolver::Response& response,
+                                      const Viscoelastic3D::StepInfo& info,
+                                      bool converged,
+                                      std::vector<double> oceanFunction,
+                                      bool keepState) const;
 
   /// Restores a checkpoint's recurrence into the members below.
   void Restore(const Checkpoint& from, std::span<const double> times);
 
   const Viscoelastic3D* op_;
-  const SeaLevelSolver* solver_;
-  SeaLevelSolver::State state_;
+  const GRDSolver* solver_;
+  GRDSolver::State state_;
+  bool calibrated_ = false;
   Options options_;
   Viscoelastic3D::State vstate_;
   // The running node's total-load and centrifugal coefficients
   // (material units): the recurrence `Checkpoint` carries.
   std::vector<Complex> sigma_;
   std::vector<Complex> psi_;
+  /// Whether the run in hand is under interior sources (its kept states
+  /// then carry their strains).
+  bool sourced_ = false;
   double toNdLength_ = 1.0, toNdPotential_ = 1.0, toNdMoment_ = 1.0;
   double toMatDensity_ = 1.0, toMatPotential_ = 1.0, toMatTime_ = 1.0;
 };

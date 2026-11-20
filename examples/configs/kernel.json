@@ -1,20 +1,30 @@
 {
-  "model": "prem8.gia.deck",
-  "lmax": 12,
-  "viscosity": {"file": "../viscosity_log.nc"},
-  "state": {"file": "../synthetic_earth.nc"},
-  "ice_history": {"file": "../synthetic_earth.nc"},
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../data/viscosity_log.nc"}},
+  "discretisation": {"lmax": 12},
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 22},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
+  },
+  "ocean": {
+    "at": "start",
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
   "rotation": "full",
   "moments": "hydrostatic",
-  "coupled": {"rtol": 1e-8, "max_iterations": 80},
-  "measurements": [
-    {"type": "sea_level_cap", "name": "hudson_bay_sea_level",
-     "latitude": 60, "longitude": 275, "width_deg": 10, "date_kyr_bp": 0},
-    {"type": "decay_time", "name": "hudson_bay_decay",
-     "latitude": 60, "longitude": 275, "width_deg": 10,
-     "window_start_kyr_bp": 7, "window_end_kyr_bp": 0,
-     "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0}
-  ],
-  "output": "out/kernels3d"
+  "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
+  "kernels": {
+    "parameters": ["ice", "viscosity"],
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",
+       "latitude": 60, "longitude": 275, "width_deg": 15, "date_kyr_bp": 0},
+      {"type": "decay_time", "name": "hudson_bay_decay",
+       "latitude": 60, "longitude": 275, "width_deg": 15,
+       "window_start_kyr_bp": 7, "window_end_kyr_bp": 0,
+       "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0}
+    ],
+    "output": "out/kernel"
+  }
 }

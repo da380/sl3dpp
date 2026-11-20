@@ -21,8 +21,9 @@
  * Degree-dependent truncation is a per-degree element subset of this one
  * mesh — never a separate sub-mesh, since the pseudospectral coupling needs
  * a single radial node set. Two truncation-radius rules are offered
- * (docs/design.md): the graded rule r = rmax eps^(1/(l+1)) of
- * pyslfp, and the old Fortran's r = rmax (1 - 20/(l+0.5)).
+ * (docs/design.md): the graded rule r = rmax eps^(1/(l+1)), from the
+ * interior decay (r/rmax)^(l+1), and the Fortran's
+ * r = rmax (1 - 20/(l+0.5)).
  */
 
 #include <cstddef>
@@ -43,8 +44,7 @@ struct MeshError {
 
 /// The truncation-radius heuristic for a degree-l solve.
 enum class TruncationRule {
-  /// r_l = rmax eps^(1/(l+1)), from the interior decay (r/rmax)^(l+1)
-  /// (pyslfp's grading).
+  /// r_l = rmax eps^(1/(l+1)), from the interior decay (r/rmax)^(l+1).
   Graded,
   /// r_l = rmax (1 - 20/(l+0.5)), the old Fortran's rule.
   Legacy,
@@ -83,7 +83,7 @@ class RadialMesh {
 
   /**
    * @brief A mesh for every degree up to lmax, fine at the surface and
-   * widening with depth (pyslfp's `graded_mesh`).
+   * widening with depth.
    *
    * The degree-l solution is negligible below eps of its surface value
    * deeper than a(1 - eps^(1/(l+1))), and the uniform lmax rule resolves

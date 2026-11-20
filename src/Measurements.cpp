@@ -6,6 +6,7 @@ void dgesv_(const int* n, const int* nrhs, double* a, const int* lda,
             int* ipiv, double* b, const int* ldb, int* info);
 }
 
+#include <GaussQuad/All>
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -210,14 +211,51 @@ std::vector<double> CapMeanDual(const SurfaceGrid& grid, double a,
   }
   const auto colat0 = site.CoLatitude();
   const auto lon0 = site.Longitude();
-  auto dual = grid.FromFunction([&](double theta, double phi) {
-    const auto d =
-        std::acos(std::clamp(CosDistance(theta, phi, colat0, lon0), -1.0, 1.0));
-    return std::exp(-0.5 * (d / width) * (d / width));
+  const auto lmax = grid.LMax();
+  const auto weights = CapMeanWeights(lmax, width);
+  // the cap's band-limited kernel about the site, sum_l lambda_l (2l + 1)
+  // P_l(cos d) / (4 pi a^2): its pairing with a field is the field's
+  // expansion weighted by lambda_l and synthesised there
+  return grid.FromFunction([&](double theta, double phi) {
+    const auto x = std::clamp(CosDistance(theta, phi, colat0, lon0), -1.0, 1.0);
+    auto before = 1.0, current = x;
+    auto sum = weights[0] + (lmax >= 1 ? 3.0 * weights[1] * x : 0.0);
+    for (auto l = 2; l <= lmax; ++l) {
+      const auto next =
+          ((2.0 * l - 1.0) * x * current - (l - 1.0) * before) / l;
+      sum += (2.0 * l + 1.0) * weights[static_cast<std::size_t>(l)] * next;
+      before = std::exchange(current, next);
+    }
+    return sum / (4.0 * std::numbers::pi * a * a);
   });
-  const auto norm = a * a * grid.Integrate(dual);
-  for (auto& v : dual) v /= norm;
-  return dual;
+}
+
+std::vector<double> CapMeanWeights(int lmax, double width) {
+  if (!(width > 0.0) || !std::isfinite(width)) {
+    throw std::invalid_argument("a cap's width is a positive angle in radians");
+  }
+  if (lmax < 0) throw std::invalid_argument("a degree is not negative");
+  const auto reach = std::min(std::numbers::pi, 12.0 * width);
+  const auto rule = GaussQuad::GaussLegendreQuadrature1D<double>(lmax + 128);
+  auto sums = std::vector<double>(static_cast<std::size_t>(lmax) + 1, 0.0);
+  for (auto k = std::size_t{0}; k < rule.Points().size(); ++k) {
+    const auto d = 0.5 * reach * (rule.Points()[k] + 1.0);
+    const auto weight = 0.5 * reach * rule.Weights()[k] *
+                        std::exp(-0.5 * (d / width) * (d / width)) *
+                        std::sin(d);
+    // P_l(cos d) by the upward recurrence
+    const auto x = std::cos(d);
+    auto before = 1.0, current = x;
+    sums[0] += weight;
+    for (auto l = 1; l <= lmax; ++l) {
+      sums[static_cast<std::size_t>(l)] += weight * current;
+      const auto next = ((2.0 * l + 1.0) * x * current - l * before) / (l + 1.0);
+      before = std::exchange(current, next);
+    }
+  }
+  const auto total = sums[0];
+  for (auto& s : sums) s /= total;
+  return sums;
 }
 
 std::vector<double> PointDual(const SurfaceGrid& grid, double a,
@@ -274,7 +312,7 @@ Measurement FieldMeasurement(FieldChannel channel, std::vector<double> dual) {
   auto out = Measurement{};
   switch (channel) {
     case FieldChannel::SeaLevel:
-      out.seaLevelDual = std::move(dual);
+      out.relativeSeaLevelDual = std::move(dual);
       break;
     case FieldChannel::Displacement:
       out.displacementDual = std::move(dual);
@@ -282,7 +320,338 @@ Measurement FieldMeasurement(FieldChannel channel, std::vector<double> dual) {
     case FieldChannel::Potential:
       out.potentialDual = std::move(dual);
       break;
+    case FieldChannel::TangentialPotential:
+      out.tangentialPotentialDual = std::move(dual);
+      break;
   }
+  return out;
+}
+
+namespace {
+
+using Complex = std::complex<double>;
+
+void NeedsUpperIndexOne(const SurfaceGrid& grid) {
+  if (grid.NMax() < 1) {
+    throw std::invalid_argument(
+        "a vector field's tangential part needs a grid carrying upper "
+        "index 1 (SurfaceGrid::Options::nmax)");
+  }
+}
+
+/// A real field's coefficient at any order from its m >= 0 storage.
+Complex AtOrder(std::span<const Complex> c, int l, int m) {
+  if (m >= 0) return c[SurfaceGrid::Index(l, m)];
+  const auto v = std::conj(c[SurfaceGrid::Index(l, -m)]);
+  return (-m) % 2 == 0 ? v : -v;
+}
+
+}  // namespace
+
+SurfaceVectorField DisplacementField(const SurfaceGrid& grid,
+                                     std::span<const double> U,
+                                     std::span<const double> V,
+                                     std::span<const double> W) {
+  auto out = SurfaceVectorField{};
+  out.up.assign(U.begin(), U.end());
+  if (V.empty() && W.empty()) return out;
+  NeedsUpperIndexOne(grid);
+  const auto lmax = grid.LMax();
+  const auto vlm = V.empty() ? grid.ZeroCoefficients() : grid.Expand(V);
+  const auto wlm = W.empty() ? grid.ZeroCoefficients() : grid.Expand(W);
+  constexpr Complex i(0.0, 1.0);
+  auto plus = std::vector<Complex>(grid.SpinCoefficientSize(1), 0.0);
+  auto minus = std::vector<Complex>(grid.SpinCoefficientSize(-1), 0.0);
+  for (auto l = 1; l <= lmax; ++l) {
+    const auto omega = std::sqrt(0.5 * l * (l + 1.0));
+    for (auto m = -l; m <= l; ++m) {
+      const auto v = AtOrder(vlm, l, m);
+      const auto w = AtOrder(wlm, l, m);
+      plus[SurfaceGrid::SpinIndex(1, l, m)] = omega * (v + i * w);
+      minus[SurfaceGrid::SpinIndex(-1, l, m)] = omega * (v - i * w);
+    }
+  }
+  const auto up = grid.SynthesiseSpin(1, plus);
+  const auto um = grid.SynthesiseSpin(-1, minus);
+  // u^+ = -(u_theta - i u_phi) / sqrt 2, u^- = (u_theta + i u_phi) / sqrt 2;
+  // north is -theta, east is phi.
+  out.east.resize(grid.FieldSize());
+  out.north.resize(grid.FieldSize());
+  for (auto k = std::size_t{0}; k < grid.FieldSize(); ++k) {
+    const auto theta = (um[k] - up[k]) / std::numbers::sqrt2;
+    const auto phi = (up[k] + um[k]) / (i * std::numbers::sqrt2);
+    out.north[k] = -theta.real();
+    out.east[k] = phi.real();
+  }
+  return out;
+}
+
+Measurement DisplacementMeasurement(const SurfaceGrid& grid,
+                                    const SurfaceVectorField& weight) {
+  for (const auto* f : {&weight.east, &weight.north, &weight.up}) {
+    if (!f->empty() && f->size() != grid.FieldSize()) {
+      throw std::invalid_argument(
+          "a vector weight's components live on the grid");
+    }
+  }
+  auto out = Measurement{};
+  out.displacementDual = weight.up;
+  if (weight.east.empty() && weight.north.empty()) return out;
+  NeedsUpperIndexOne(grid);
+  constexpr Complex i(0.0, 1.0);
+  auto plus = std::vector<Complex>(grid.FieldSize());
+  auto minus = std::vector<Complex>(grid.FieldSize());
+  for (auto k = std::size_t{0}; k < grid.FieldSize(); ++k) {
+    const auto theta = weight.north.empty() ? 0.0 : -weight.north[k];
+    const auto phi = weight.east.empty() ? 0.0 : weight.east[k];
+    plus[k] = -(theta - i * phi) / std::numbers::sqrt2;
+    minus[k] = (theta + i * phi) / std::numbers::sqrt2;
+  }
+  const auto wp = grid.ExpandSpin(1, plus);
+  const auto wm = grid.ExpandSpin(-1, minus);
+  // w = grad_1 a - r x grad_1 b pairs with u as sum l (l + 1) (a V + b W),
+  // and w^(+-)_lm = omega (a +- i b)_lm, 2 omega^2 = l (l + 1).
+  auto gv = grid.ZeroCoefficients(), gw = grid.ZeroCoefficients();
+  for (auto l = 1; l <= grid.LMax(); ++l) {
+    const auto omega = std::sqrt(0.5 * l * (l + 1.0));
+    for (auto m = 0; m <= l; ++m) {
+      const auto p = wp[SurfaceGrid::SpinIndex(1, l, m)];
+      const auto q = wm[SurfaceGrid::SpinIndex(-1, l, m)];
+      gv[SurfaceGrid::Index(l, m)] = omega * (p + q);
+      // no degree 1 of W: the rigid rotation, which is gauge
+      if (l > 1) gw[SurfaceGrid::Index(l, m)] = -i * omega * (p - q);
+    }
+  }
+  out.tangentialPotentialDual = grid.Synthesise(gv);
+  out.toroidalPotentialDual = grid.Synthesise(gw);
+  return out;
+}
+
+namespace {
+
+/// The displacement at `site` along `direction` of the displacement whose
+/// potentials have degree l weighted by `weights[l]` (all ones when
+/// empty): the up part on U by `upDual` (the dual reading U so weighted at
+/// the site), the horizontal part the derivative along the direction of
+/// the weighted reproducing kernel sum_l w_l (2l + 1) P_l(x . x0) / (4 pi
+/// a^2), on V and (turned a quarter) on W, the latter from degree 2.
+Measurement WeightedPointDisplacement(const SurfaceGrid& grid, double a,
+                                      GeographicPoint site,
+                                      SurfaceDirection direction,
+                                      std::span<const double> weights,
+                                      std::vector<double> upDual) {
+  const auto colat0 = site.CoLatitude();
+  const auto lon0 = site.Longitude();
+  const auto lmax = grid.LMax();
+  const auto weight = [&](int l) {
+    return weights.empty() ? 1.0 : weights[static_cast<std::size_t>(l)];
+  };
+  auto out = Measurement{};
+  if (direction.up != 0.0) {
+    out.displacementDual = std::move(upDual);
+    for (auto& v : out.displacementDual) v *= direction.up;
+  }
+  if (direction.east == 0.0 && direction.north == 0.0) return out;
+
+  // The unit vectors at the site, Cartesian: east, north, and the
+  // horizontal direction with the one a quarter turn from it, d x r.
+  using Vector = std::array<double, 3>;
+  const Vector east{-std::sin(lon0), std::cos(lon0), 0.0};
+  const Vector north{-std::cos(colat0) * std::cos(lon0),
+                     -std::cos(colat0) * std::sin(lon0), std::sin(colat0)};
+  auto along = Vector{}, turned = Vector{};
+  for (auto i = 0; i < 3; ++i) {
+    along[i] = direction.east * east[i] + direction.north * north[i];
+    // east x up = -north, north x up = east
+    turned[i] = -direction.east * north[i] + direction.north * east[i];
+  }
+  // A band-limited field's value at the site is its pairing with the
+  // reproducing kernel K(x . x0) = sum_l (2l + 1) P_l / (4 pi a^2); its
+  // derivative along d at the site pairs with (x . d) K'(x . x0), and so
+  // d . grad_1 V and d . (-r x grad_1 W) = -(d x r) . grad_1 W. Weighting
+  // degree l of the kernel weights degree l of the field it reads.
+  out.tangentialPotentialDual.resize(grid.FieldSize());
+  out.toroidalPotentialDual.resize(grid.FieldSize());
+  const auto ntheta = grid.CoLatitudes().size();
+  const auto nphi = grid.Longitudes().size();
+  const auto first = lmax >= 1 ? 3.0 * weight(1) : 0.0;
+  for (auto it = std::size_t{0}; it < ntheta; ++it) {
+    const auto theta = grid.CoLatitudes()[it];
+    for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
+      const auto phi = grid.Longitudes()[ip];
+      const Vector x{std::sin(theta) * std::cos(phi),
+                     std::sin(theta) * std::sin(phi), std::cos(theta)};
+      const auto c = std::clamp(CosDistance(theta, phi, colat0, lon0), -1.0, 1.0);
+      // sum_l w_l (2l + 1) P_l'(c), by P_{l+1}' = P_{l-1}' + (2l + 1) P_l
+      auto pBefore = 1.0, pNow = c;         // P_0, P_1
+      auto dBefore = 0.0, dNow = 1.0;       // P_0', P_1'
+      auto sum = first;
+      for (auto l = 1; l < lmax; ++l) {
+        const auto pNext = ((2.0 * l + 1.0) * c * pNow - l * pBefore) / (l + 1.0);
+        const auto dNext = dBefore + (2.0 * l + 1.0) * pNow;
+        sum += (2.0 * l + 3.0) * weight(l + 1) * dNext;
+        pBefore = std::exchange(pNow, pNext);
+        dBefore = std::exchange(dNow, dNext);
+      }
+      const auto kernel = sum / (4.0 * std::numbers::pi * a * a);
+      // W's from degree 2, its degree-1 term 3 w_1 P_1' = 3 w_1 left out:
+      // the rigid rotation is gauge
+      const auto kernelW = (sum - first) / (4.0 * std::numbers::pi * a * a);
+      const auto i = it * nphi + ip;
+      out.tangentialPotentialDual[i] =
+          kernel * (x[0] * along[0] + x[1] * along[1] + x[2] * along[2]);
+      out.toroidalPotentialDual[i] =
+          -kernelW * (x[0] * turned[0] + x[1] * turned[1] + x[2] * turned[2]);
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
+                                         GeographicPoint site,
+                                         SurfaceDirection direction) {
+  return WeightedPointDisplacement(
+      grid, a, site, direction, {},
+      direction.up != 0.0 ? PointDual(grid, a, site) : std::vector<double>{});
+}
+
+Measurement CapDisplacementMeasurement(const SurfaceGrid& grid, double a,
+                                       GeographicPoint site, double width,
+                                       SurfaceDirection direction) {
+  const auto weights = CapMeanWeights(grid.LMax(), width);
+  return WeightedPointDisplacement(grid, a, site, direction, weights,
+                                   direction.up != 0.0
+                                       ? CapMeanDual(grid, a, site, width)
+                                       : std::vector<double>{});
+}
+
+namespace {
+
+using Vector3 = std::array<double, 3>;
+
+Vector3 UnitRadial(double theta, double phi) {
+  return {std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi),
+          std::cos(theta)};
+}
+
+double Dot(const Vector3& p, const Vector3& q) {
+  return p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+}
+
+/// A Cartesian vector's components to the east, to the north and upwards
+/// at a site.
+SurfaceDirection DirectionAt(GeographicPoint site, const Vector3& d) {
+  const auto theta = site.CoLatitude();
+  const auto phi = site.Longitude();
+  const Vector3 east{-std::sin(phi), std::cos(phi), 0.0};
+  const Vector3 north{-std::cos(theta) * std::cos(phi),
+                      -std::cos(theta) * std::sin(phi), std::sin(theta)};
+  return {.east = Dot(d, east),
+          .north = Dot(d, north),
+          .up = Dot(d, UnitRadial(theta, phi))};
+}
+
+/// into += m, over the duals of U, V and W.
+void Add(Measurement& into, const Measurement& m) {
+  auto add = [](std::vector<double>& x, const std::vector<double>& y) {
+    if (y.empty()) return;
+    if (x.empty()) x.assign(y.size(), 0.0);
+    for (auto i = std::size_t{0}; i < y.size(); ++i) x[i] += y[i];
+  };
+  add(into.displacementDual, m.displacementDual);
+  add(into.tangentialPotentialDual, m.tangentialPotentialDual);
+  add(into.toroidalPotentialDual, m.toroidalPotentialDual);
+}
+
+}  // namespace
+
+std::array<double, 3> NetRotation(const SurfaceGrid& grid,
+                                  std::span<const double> W) {
+  if (W.size() != grid.FieldSize()) {
+    throw std::invalid_argument("a toroidal potential lives on the grid");
+  }
+  // the degree-1 part of W is c . r, c_i = (3 / 4 pi) int W r_i dOmega
+  auto c = Vector3{};
+  auto weighted = std::vector<double>(grid.FieldSize());
+  const auto nphi = grid.Longitudes().size();
+  for (auto axis = std::size_t{0}; axis < 3; ++axis) {
+    for (auto it = std::size_t{0}; it < grid.CoLatitudes().size(); ++it) {
+      for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
+        const auto r = UnitRadial(grid.CoLatitudes()[it], grid.Longitudes()[ip]);
+        weighted[it * nphi + ip] = W[it * nphi + ip] * r[axis];
+      }
+    }
+    c[axis] = 3.0 / (4.0 * std::numbers::pi) * grid.Integrate(weighted);
+  }
+  return c;
+}
+
+std::vector<double> RigidRotationPotential(const SurfaceGrid& grid,
+                                           std::array<double, 3> c) {
+  return grid.FromFunction([&](double theta, double phi) {
+    return Dot(c, UnitRadial(theta, phi));
+  });
+}
+
+std::vector<double> WithoutNetRotation(const SurfaceGrid& grid,
+                                       std::span<const double> W) {
+  const auto rigid = RigidRotationPotential(grid, NetRotation(grid, W));
+  auto out = std::vector<double>(W.begin(), W.end());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] -= rigid[i];
+  return out;
+}
+
+Measurement BaselineMeasurement(const SurfaceGrid& grid, double a,
+                                GeographicPoint from, GeographicPoint to) {
+  const auto x0 = UnitRadial(from.CoLatitude(), from.Longitude());
+  const auto x1 = UnitRadial(to.CoLatitude(), to.Longitude());
+  auto e = Vector3{x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]};
+  const auto length = std::sqrt(Dot(e, e));
+  if (!(length > 1e-12)) {
+    throw std::invalid_argument("a baseline's two sites must differ");
+  }
+  for (auto& v : e) v /= length;
+  auto out = PointDisplacementMeasurement(grid, a, to, DirectionAt(to, e));
+  for (auto& v : e) v = -v;
+  Add(out, PointDisplacementMeasurement(grid, a, from, DirectionAt(from, e)));
+  return out;
+}
+
+Measurement AngleMeasurement(const SurfaceGrid& grid, double a,
+                             GeographicPoint vertex, GeographicPoint first,
+                             GeographicPoint second) {
+  const auto x0 = UnitRadial(vertex.CoLatitude(), vertex.Longitude());
+  const auto x1 = UnitRadial(first.CoLatitude(), first.Longitude());
+  const auto x2 = UnitRadial(second.CoLatitude(), second.Longitude());
+  auto p = Vector3{}, q = Vector3{};
+  for (auto i = std::size_t{0}; i < 3; ++i) {
+    p[i] = a * (x1[i] - x0[i]);
+    q[i] = a * (x2[i] - x0[i]);
+  }
+  const auto pp = Dot(p, p), qq = Dot(q, q);
+  if (!(pp > 1e-24 * a * a) || !(qq > 1e-24 * a * a)) {
+    throw std::invalid_argument("an angle's three sites must differ");
+  }
+  const auto pq = std::sqrt(pp * qq);
+  const auto cosine = Dot(p, q) / pq;
+  const auto sine = std::sqrt(std::max(0.0, 1.0 - cosine * cosine));
+  if (!(sine > 1e-9)) {
+    throw std::invalid_argument("an angle's three sites lie on one line");
+  }
+  // cos = p . q / (|p| |q|), p and q the lines from the vertex:
+  // d cos = (dp . q + p . dq) / (|p| |q|) - cos (p . dp / p^2 + q . dq / q^2),
+  // d angle = -d cos / sin, with dp = u(first) - u(vertex) and dq likewise.
+  auto g1 = Vector3{}, g2 = Vector3{}, g0 = Vector3{};
+  for (auto i = std::size_t{0}; i < 3; ++i) {
+    g1[i] = -(q[i] / pq - cosine * p[i] / pp) / sine;
+    g2[i] = -(p[i] / pq - cosine * q[i] / qq) / sine;
+    g0[i] = -(g1[i] + g2[i]);
+  }
+  auto out = PointDisplacementMeasurement(grid, a, first, DirectionAt(first, g1));
+  Add(out, PointDisplacementMeasurement(grid, a, second, DirectionAt(second, g2)));
+  Add(out, PointDisplacementMeasurement(grid, a, vertex, DirectionAt(vertex, g0)));
   return out;
 }
 

@@ -14,6 +14,7 @@
 #include <complex>
 #include <filesystem>
 #include <map>
+#include <numbers>
 #include <span>
 #include <vector>
 
@@ -61,8 +62,8 @@ struct Scene {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
   std::vector<double> iceNd;
 
   static Scene Make(double viscositySI) {
@@ -86,7 +87,7 @@ struct Scene {
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     const auto elastic = ViscoelasticOperator(rheology, kLmax);
-    auto solver = SeaLevelSolver(
+    auto solver = GRDSolver(
         SurfaceGrid(kLmax), elastic.ElasticLoveNumbers(), SeaLevelParameters{});
     auto fingerprint = Fingerprint(kLmax, elastic.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -302,47 +303,49 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
   const auto scene = Scene::Make(1e21);
   const auto times = scene.TimesKyr(10.0, 6);
   const auto load = scene.MeltLoad(-0.1);
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     auto out = std::vector<double>(load.size());
     const auto ramp = t / times.back();
     for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[5].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[5].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   measurements[3].displacementDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
 
   const auto op1 = ViscoelasticOperator(
       scene.rheology, kLmax, {.memory_points = MemoryPointSet::Gauss});
-  auto evolution1 = SeaLevelEvolution(op1, scene.solver, scene.state,
+  auto evolution1 = Evolution(op1, scene.solver, scene.state,
                                       {.rtol = 1e-12, .record_stride = 1});
-  const auto snapshots1 = evolution1.Run(times, iceLoad);
+  const auto snapshots1 = evolution1.Run(times, directLoad);
   const auto trajectory1 = ForwardTrajectory::FromSnapshots(snapshots1);
   const auto adjoint1 = AdjointSolver(
       evolution1, {.method = AdjointMethod::Continuous, .rtol = 1e-12});
   const auto kernels1 =
-      adjoint1.IceHistoryKernels(times, measurements, &trajectory1);
+      adjoint1.FirstOrderKernels(times, measurements, &trajectory1);
 
   const auto op3 = Operator3D(scene.rheology, MemoryPointSet::Gauss, Uniform);
-  auto evolution3 = SeaLevelEvolution3D(
+  auto evolution3 = Evolution3D(
       op3, scene.solver, scene.state,
       {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
-  const auto snapshots3 = evolution3.Run(times, iceLoad);
+  const auto snapshots3 = evolution3.Run(times, directLoad);
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(snapshots3);
   const auto adjoint3 =
-      AdjointSolver3D(evolution3, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+      AdjointSolver3D(evolution3, {.method = AdjointMethod::Continuous,
+                                   .rtol = 1e-12,
+                                   .coupled_rtol = 1e-12});
   const auto kernels3 =
-      adjoint3.IceHistoryKernels(times, measurements, &trajectory3);
+      adjoint3.FirstOrderKernels(times, measurements, &trajectory3);
 
   auto scale = 0.0, worst = 0.0;
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    for (auto i = std::size_t{0}; i < snapshots1[n].seaLevelChange.size();
+    for (auto i = std::size_t{0}; i < snapshots1[n].relativeSeaLevelChange.size();
          ++i) {
-      scale = std::max(scale, std::abs(snapshots1[n].seaLevelChange[i]));
-      worst = std::max(worst, std::abs(snapshots3[n].seaLevelChange[i] -
-                                       snapshots1[n].seaLevelChange[i]));
+      scale = std::max(scale, std::abs(snapshots1[n].relativeSeaLevelChange[i]));
+      worst = std::max(worst, std::abs(snapshots3[n].relativeSeaLevelChange[i] -
+                                       snapshots1[n].relativeSeaLevelChange[i]));
     }
   }
   EXPECT_GT(scale, 0.0);
@@ -351,17 +354,21 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
   scale = 0.0;
   worst = 0.0;
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    for (auto i = std::size_t{0}; i < kernels1.loadDuals[n].size(); ++i) {
-      scale = std::max(scale, std::abs(kernels1.loadDuals[n][i]));
-      worst = std::max(worst, std::abs(kernels3.ice.loadDuals[n][i] -
-                                       kernels1.loadDuals[n][i]));
+    for (auto i = std::size_t{0}; i < kernels1.directLoadKernels[n].size(); ++i) {
+      scale = std::max(scale, std::abs(kernels1.directLoadKernels[n][i]));
+      worst = std::max(worst, std::abs(kernels3.ice.directLoadKernels[n][i] -
+                                       kernels1.directLoadKernels[n][i]));
     }
   }
   EXPECT_GT(scale, 0.0);
   EXPECT_LT(worst, 1e-12 * scale);
 
-  // The spherical reduction lives at the memory nodes: laid out over the
-  // whole mesh's points and carried to the nodes by the reference.
+  // The spherical reduction lives at the memory nodes: as the gradient
+  // with respect to the point values (the mean times the node's volume
+  // weight 4 pi w r^2), laid out over the whole mesh's points and carried
+  // to the nodes by the reference, it is the 1D kernel's gradient with
+  // respect to the nodal values (the kernel times the nodes' volume
+  // weights).
   const auto& coupling = op3.Coupling();
   const auto np = coupling.Points().count;
   const auto pointCount =
@@ -370,18 +377,24 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
   for (const auto& spherical : kernels3.itauKernelSpherical) {
     auto full = std::vector<double>(pointCount, 0.0);
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto r = coupling.RadiusOfNode(rn);
       full[static_cast<std::size_t>(coupling.ElementOfNode(rn)) * np +
-           coupling.NodeInElementOf(rn)] = spherical[rn];
+           coupling.NodeInElementOf(rn)] =
+          spherical[rn] * 4.0 * std::numbers::pi * coupling.WeightOfNode(rn) * r * r;
     }
     atPoints.push_back(std::move(full));
   }
   const auto nodal = op3.Reference().ItauKernelsAtNodes(std::move(atPoints));
+  const auto& mesh = scene.material.Mesh();
+  const auto nodalWeights =
+      MemoryPoints::Of(MemoryPointSet::Gll, mesh).VolumeWeights(mesh);
   for (auto k = std::size_t{0}; k < nodal.size(); ++k) {
+    ASSERT_EQ(nodal[k].size(), nodalWeights.size());
     auto kScale = 0.0, kWorst = 0.0;
     for (auto i = std::size_t{0}; i < nodal[k].size(); ++i) {
-      kScale = std::max(kScale, std::abs(kernels1.itauKernel[k][i]));
-      kWorst =
-          std::max(kWorst, std::abs(nodal[k][i] - kernels1.itauKernel[k][i]));
+      const auto gradient1 = kernels1.itauKernel[k][i] * nodalWeights[i];
+      kScale = std::max(kScale, std::abs(gradient1));
+      kWorst = std::max(kWorst, std::abs(nodal[k][i] - gradient1));
     }
     EXPECT_GT(kScale, 0.0);
     EXPECT_LT(kWorst, 1e-10 * kScale) << "branch " << k;
@@ -396,7 +409,7 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
   const auto scene = Scene::Make(1e22);
   const auto times = scene.TimesKyr(10.0, 5);
   const auto load = scene.MeltLoad(-0.1);
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     auto out = std::vector<double>(load.size());
     const auto ramp = t / times.back();
     for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
@@ -406,7 +419,7 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       scene.solver.Grid().FromFunction(
           [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
@@ -418,19 +431,21 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
                                    },
                                    {.memory_points = set});
     auto evolution =
-        SeaLevelEvolution3D(op, scene.solver, scene.state,
+        Evolution3D(op, scene.solver, scene.state,
                             {.rtol = 1e-12,
                              .coupled_rtol = 1e-12,
                              .record_stride = kernelsOut != nullptr ? 1 : 0});
-    const auto snapshots = evolution.Run(times, iceLoad);
+    const auto snapshots = evolution.Run(times, directLoad);
     if (kernelsOut != nullptr) {
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
       const auto adjoint =
-          AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
-      *kernelsOut = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+          AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12});
+      *kernelsOut = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
-    return scene.Surface(measurements[times.size() - 1].seaLevelDual,
-                         snapshots.back().seaLevelChange);
+    return scene.Surface(measurements[times.size() - 1].relativeSeaLevelDual,
+                         snapshots.back().relativeSeaLevelChange);
   };
 
   auto predicted = std::map<MemoryPointSet, double>{};
@@ -441,17 +456,13 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     const auto& coupling = probe.Coupling();
     const auto& grid = coupling.Grid();
     const auto p = grid.FromFunction(direction);
-    const auto gridF = grid.FieldSize();
-    auto sum = 0.0;
-    auto product = std::vector<double>(gridF);
+    auto atNodes = std::vector<double>(coupling.GridValueCount());
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto row =
-          std::span(kernels.logViscosityKernel3D[0])
-              .subspan(static_cast<std::size_t>(rn) * gridF, gridF);
-      for (auto x = std::size_t{0}; x < gridF; ++x) product[x] = row[x] * p[x];
-      sum += grid.Integrate(product);
+      std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                  coupling.FieldOffset(rn)));
     }
-    predicted[set] = sum;
+    predicted[set] =
+        VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
   }
   const auto eps = 0.1;
   const auto fd = (run(MemoryPointSet::Gauss, eps, nullptr) -

@@ -112,23 +112,32 @@ class GridCoupling {
     /// viscous elements holds no nodes.
     std::pair<int, int> elements{0, -1};
     /// Every SOLID element of the range carries memory nodes, viscous or
-    /// not (the element holding the centre excepted: the spherical strain
-    /// components divide by r), so that a lateral perturbation of the
-    /// elastic moduli can live anywhere solid; the memory of an elastic
-    /// element is inert (no active branch). False: the viscous elements
-    /// alone.
+    /// not, so that a lateral perturbation of the elastic moduli can live
+    /// anywhere solid; the memory of an elastic element is inert (no
+    /// active branch). False: the viscous elements alone.
     bool all_solid = false;
     /// A per-element mask (ElementCount entries, non-zero = carries
     /// nodes) overriding the rheology's activity where given: the
     /// viscous elements and those where a lateral perturbation of the
     /// moduli is non-zero, as Viscoelastic3D samples them, so
     /// that a perturbation confined to the mantle costs no lithosphere
-    /// or inner-core nodes. Fluid elements and the centre element are
-    /// never carried.
+    /// or inner-core nodes. Fluid elements are never carried.
     std::vector<char> active_elements{};
+    // The element holding the centre is carried by these rules like any
+    // other at the Gauss points, which are interior to it. The spherical
+    // components of a tensor at a node divide by the node's radius
+    // (SpinComponents.hpp), a regular singularity whose factor of r the
+    // force rows and the volume weight restore; no point at r = 0 is ever
+    // evaluated. Under the GLL points the element's first node IS the
+    // centre: the element is then never carried (its memory is inert
+    // where it does not relax, and a lateral perturbation of the moduli
+    // there is not applied), and a coupling over it is refused where it
+    // relaxes.
   };
 
-  /// The rheology is borrowed and must outlive the coupling.
+  /// The rheology is borrowed and must outlive the coupling. Refused at the
+  /// GLL memory points when the range holds the element at the centre of
+  /// a body without a hole and that element relaxes (Options).
   GridCoupling(const Rheology& rheology, int lmax, Options options);
   GridCoupling(const Rheology& rheology, int lmax)
       : GridCoupling(rheology, lmax, Options{}) {}
@@ -156,6 +165,8 @@ class GridCoupling {
   /// lmax block's otherwise (GridOf for a node's own).
   [[nodiscard]] const SurfaceGrid& Grid() const { return grid_; }
   [[nodiscard]] int LMax() const { return lmax_; }
+  /// The options as given (an element range's end of -1 as given too).
+  [[nodiscard]] const Options& GetOptions() const { return options_; }
 
   // -- the node blocks
   // -------------------------------------------------
@@ -288,6 +299,13 @@ class GridCoupling {
   void AddScalarState(SpectralTensor& spectral, int l,
                       std::span<const Complex> M, std::span<const Complex> R,
                       std::span<const Complex> S) const;
+  /// The same for the toroidal scalars (M, S) of a degree from 1
+  /// (ComponentsFromToroidalScalars): the toroidal systems' internal
+  /// variables or strain scalars at every radial node, laid out (node,
+  /// column m), zero below the degree's element subset.
+  void AddToroidalScalarState(SpectralTensor& spectral, int l,
+                              std::span<const Complex> M,
+                              std::span<const Complex> S) const;
 
   /// Adds the deviatoric strain of degree solutions to a spectral tensor:
   /// per degree, complex m >= 0 columns over the spheroidal system's dofs

@@ -5,8 +5,7 @@
  * @brief The tangent-linear runs of the coupled evolution: the derivative
  * of a run's responses along a perturbation of the ice history, the
  * initial sea level and the inverse relaxation times, about a forward
- * trajectory. Corresponds to pyslfp's `tangent_linear_ice_history`; see
- * docs/adjoints.md.
+ * trajectory; see docs/adjoints.md.
  *
  * With the trajectory's ocean functions held the forward problem is linear
  * in its loads, so the derivative is the forward problem once more: the
@@ -41,7 +40,8 @@
  * Conventions are the evolution's: times increasing in SLE units, grids in
  * the solver's units, the itau perturbation nodal (element, gll) per
  * branch over the material's mesh in MATERIAL units (the layout of
- * IceKernels::itauKernel, which pairs with it by the plain nodal sum).
+ * Kernels::itauKernel, a density per unit volume, which pairs with it as
+ * VolumePairing(mesh, kernel, perturbation)).
  */
 
 #include <complex>
@@ -56,14 +56,53 @@
 
 namespace sl3dpp {
 
+namespace detail {
+struct StageRef;
+}  // namespace detail
+
 /// A direction in the evolution's inputs. Empty members are absent.
+///
+/// The members given per time node are the direction's values at the
+/// nodes, which are all a run reads of its forcing. Under a multi-stage
+/// scheme (Sdirk2) a step's inner stage takes 1 - c of the forcing at the
+/// step's start node and c of it at the end node (a repeated node's two
+/// sides are nodes of their own), and the tangent run takes the same
+/// combination of the direction: it is the derivative of the forward run
+/// along the direction, and the exact transpose of the discrete adjoint
+/// sweep, whose node kernels pair with these values.
 struct TangentPerturbation {
-  /// Per time node, a perturbation of the non-ocean load a frozen `Run`
-  /// was driven by; refused about a migrating trajectory, which is driven
-  /// by its thickness.
+  /// Per time node, a perturbation of the direct load inside the water
+  /// budget the run was driven by, frozen or migrating.
   std::vector<std::vector<double>> directLoad;
+  /// Per time node, perturbations of the run's direct load outside the
+  /// water budget and of the height of a layer on the solid surface
+  /// (Evolution::Forcing), frozen or migrating: about a migrating
+  /// trajectory the layer's place in the flotation is held, as the
+  /// shorelines are.
+  std::vector<std::vector<double>> directLoadOutsideWaterBudget;
+  std::vector<std::vector<double>> solidSurfaceChange;
+  /// Per time node, a perturbation of the prescribed tidal potential the
+  /// run was driven by, its coefficients on the surface (degree 2 and
+  /// up, kLowestTideDegree: a part below is refused), frozen or migrating: about a migrating trajectory the
+  /// shorelines are held, the tide's potential moving the sea level
+  /// over each node's ocean function.
+  std::vector<std::vector<std::complex<double>>> tide;
+  /// Per time node, a perturbation of the interior sources acting there
+  /// (Evolution::Forcing::sources and stressGluts: each node's point
+  /// sources and stress gluts, solver units), frozen or migrating. The
+  /// run is linear in them, so no trajectory is needed; the snapshots
+  /// carry the toroidal potential.
+  std::vector<std::vector<PointSource>> sources;
+  std::vector<std::vector<StressGlut>> stressGluts;
   /// Per time node, a perturbation of the ice thickness, grounded by the
-  /// node's ocean function relative to the first node's.
+  /// node's ocean function relative to the first node's: the load at node
+  /// n is rho_i (1 - C_n) dI_n - rho_i (1 - C) dI_0, C the background
+  /// state's ocean function, so the background's ice moves with the first
+  /// node's. About a migrating run whose start is solved under an ice
+  /// change (the ice at the first node other than the background's, the
+  /// background held), the derivative along the history alone is this
+  /// one plus the run along the direct load rho_i (1 - C) dI_0 at every
+  /// node; a direction zero at the first node means the same either way.
   std::vector<std::vector<double>> iceThickness;
   /// A perturbation of the initial sea level, which enters through the
   /// shorelines that moved: nothing under frozen shorelines.
@@ -72,21 +111,19 @@ struct TangentPerturbation {
   /// over the material's mesh in its units; needs the recorded forward
   /// trajectory.
   std::vector<std::vector<double>> itau;
-  /// A perturbation of the material's moduli and density, delta kappa,
-  /// delta mu and delta rho nodal over the mesh (MaterialDirection), the
-  /// branch moduli following as fixed fractions of the unrelaxed modulus
-  /// and the relaxation times held (compose with `itau` for a viscosity
-  /// held instead); a density direction moves the gravity
-  /// self-consistently and the forcings with it, the sea level engine's
-  /// own gravity and radius held (SeaLevelParameters::body_from_table;
-  /// docs/adjoints.md §16). Needs the recorded trajectory, the
-  /// internal variables at the GLL nodes and no rotational feedback.
-  MaterialDirection material;
+  /// A perturbation of the material's moduli: delta kappa and delta mu
+  /// at the memory points (PointMaterialDirection), the branch moduli
+  /// following as fixed fractions of the unrelaxed modulus and the
+  /// relaxation times held (compose with `itau` for a viscosity held
+  /// instead). Needs the recorded trajectory; taken under any rotational
+  /// feedback.
+  PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && iceThickness.empty() &&
-           initialSeaLevel.empty() && itau.empty() && material.kappa.empty() &&
-           material.mu.empty() && material.rho.empty();
+    return directLoad.empty() && directLoadOutsideWaterBudget.empty() &&
+           solidSurfaceChange.empty() && tide.empty() && sources.empty() &&
+           stressGluts.empty() && iceThickness.empty() &&
+           initialSeaLevel.empty() && itau.empty() && material.Empty();
   }
 };
 
@@ -95,16 +132,31 @@ struct TangentPerturbation {
 /// itau_uv along both for a parameterisation that is not linear in them
 /// (itau delta_u chi delta_v chi for the log viscosity; empty for a
 /// linear one), each as TangentPerturbation::itau, and the perturbations
-/// of the moduli along u and v (TangentPerturbation::material; the
-/// density refused). Under the sharp flotation rule the loads and the
-/// initial sea level enter no second derivative, so they are not taken
-/// here: their part of u and v is in the recorded tangent runs.
+/// of the moduli along u and v (TangentPerturbation::material). Under
+/// the sharp flotation rule the loads and the initial sea level enter no
+/// second derivative, so they are not taken here: their part of u and v
+/// is in the recorded tangent runs.
 struct SecondOrderDirection {
   std::vector<std::vector<double>> itauU;
   std::vector<std::vector<double>> itauV;
   std::vector<std::vector<double>> itauUV;
-  MaterialDirection materialU;
-  MaterialDirection materialV;
+  PointMaterialDirection materialU;
+  PointMaterialDirection materialV;
+};
+
+/// The toroidal systems' drive about a source-driven trajectory, for a
+/// perturbation of the relaxation times or the moduli.
+struct TangentToroidalDrive {
+  /// A stage's memory increment and force (the step's one stage under a
+  /// one-stage scheme).
+  std::function<std::pair<ToroidalViscoelastic::Fields,
+                          ToroidalViscoelastic::Fields>(
+      const ToroidalViscoelastic& toroidal, const detail::StageRef& stage)>
+      step{};
+  /// The start's own response (the moduli's).
+  std::function<ToroidalViscoelastic::Fields(
+      const ToroidalViscoelastic& toroidal)>
+      start{};
 };
 
 /**
@@ -112,40 +164,67 @@ struct SecondOrderDirection {
  *
  * Borrows the evolution as AdjointSolver does and leaves its state
  * untouched. The returned snapshots carry the perturbed responses at
- * every node (sea level change, displacement, potential, angular
- * velocity) and, when recording, the tangent-linear internal state with
+ * every node (sea level change, displacement, potential, the tangential
+ * displacement's potential, angular velocity) and, when recording, the tangent-linear internal state with
  * its strain and the node's load and centrifugal coefficients — what a
  * second-order run about this one reads.
  */
 class TangentLinearSolver {
  public:
   struct Options {
-    AdjointMethod method = AdjointMethod::Continuous;
+    /// Discrete (the default, as AdjointSolver's): the forward mode of
+    /// the stepped map; or Continuous (FirstOrderDrive). A second-order
+    /// sweep about the run takes the same method as the run. About an
+    /// evolution under Sdirk2 the run steps the tangent state by the
+    /// scheme's two stages, each driven about the forward stage's states at
+    /// the stage's length: by the backward Euler weight's derivative
+    /// (Discrete) or by backward Euler's continuous drive (Continuous),
+    /// which are one drive, so that the two methods give one run, to
+    /// rounding (docs/adjoints.md §1a). Along the forcing or the moduli
+    /// (which hold the relaxation times, and so the step's weights) the
+    /// two are one run under every scheme.
+    AdjointMethod method = AdjointMethod::Discrete;
     double rtol = 1e-9;
     int anderson_memory = 5;
     /// Keep the tangent-linear internal state (with its strain) and the
-    /// load and centrifugal coefficients on every snapshot.
+    /// load and centrifugal coefficients on every snapshot; under a
+    /// multi-stage scheme, each inner stage's too (Evolution::Snapshot::
+    /// stages, with the stage's state).
     bool record = false;
+    /// RunSecondOrder about an evolution whose background state is marked
+    /// calibrated under migrating shorelines (Evolution::Calibrated) holds
+    /// the initial sea level: it gives the second derivative with the
+    /// calibrated initial sea level held, where the calibrated run's own
+    /// (the initial sea level calibrated again along both directions) is
+    /// not built. It is refused there unless this states that the held one
+    /// is wanted. Run holds the initial sea level about any run, and
+    /// ComputeCalibratedTangent forms the calibrated run's first derivative
+    /// from it (InitialSeaLevel.hpp).
+    bool initial_sea_level_held = false;
     /// Called at the start of each step, with the node it steps to.
     std::function<void(std::size_t node)> on_node{};
   };
 
-  explicit TangentLinearSolver(const SeaLevelEvolution& evolution,
+  /// Refused for an evolution without gravity (Evolution.hpp).
+  explicit TangentLinearSolver(const Evolution& evolution,
                                Options options);
-  explicit TangentLinearSolver(const SeaLevelEvolution& evolution)
+  explicit TangentLinearSolver(const Evolution& evolution)
       : TangentLinearSolver(evolution, Options{}) {}
 
   /// The derivative of the run over `times` along `direction`. With an
   /// itau perturbation the recorded forward `trajectory` is required (one
   /// entry per node, from a run with record_stride, the gaps refilled by
-  /// forward steps under the recorded loads). With `oceanFunctions`, one
-  /// grid per node from a migrating run (OceanFunctionsOf its snapshots),
-  /// the run linearises about that trajectory instead of the frozen
-  /// background shorelines.
-  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> Run(
+  /// forward steps under the recorded loads). With `oceanFunctions` from
+  /// a migrating run (OceanFunctions::Of its snapshots), the run
+  /// linearises about that trajectory instead of the frozen background
+  /// shorelines; about a migrating run under Sdirk2 each step's first stage
+  /// is linearised about the stage's own ocean function
+  /// (OceanFunctions::stages), and ocean functions without them are
+  /// refused.
+  [[nodiscard]] std::vector<Evolution::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation& direction,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The second-order tangent-linear run: the second derivative of the
   /// run's responses along two directions u and v, about the forward
@@ -163,30 +242,46 @@ class TangentLinearSolver {
   /// trajectory (its full solution and its decayed memory with v's itau
   /// drive, which carries the mixed moduli–relaxation-time term) and of
   /// v's on u's, the start's alike (docs/adjoints.md §15). Symmetric
-  /// in u and v. pyslfp's `second_order_tangent_linear_ice_history` under
-  /// the sharp flotation rule, extended to the moduli.
-  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunSecondOrder(
+  /// in u and v. The two runs are by this solver's method
+  /// (Options::method), and a run of the other is refused; about a
+  /// calibrated migrating run the initial sea level is held, and refused
+  /// unless Options::initial_sea_level_held.
+  [[nodiscard]] std::vector<Evolution::Snapshot> RunSecondOrder(
       std::span<const double> times,
-      std::span<const SeaLevelEvolution::Snapshot> tangentU,
-      std::span<const SeaLevelEvolution::Snapshot> tangentV,
+      std::span<const Evolution::Snapshot> tangentU,
+      std::span<const Evolution::Snapshot> tangentV,
       const SecondOrderDirection& direction,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The memory increment of a step from `prev` to `next` — two states of
   /// the trajectory with their strains — for a perturbation of the inverse
   /// relaxation times at the memory points, bilinear in the two: the
   /// forward mode of the scheme's weights (Discrete), or the continuous
   /// drive q_k = (d - m_k) delta itau_k / itau_k discretised by the scheme
-  /// (Continuous). pyslfp's `_first_order_drive`.
+  /// (Continuous). `scheme` is a one-stage scheme (a stage's family under
+  /// a multi-stage one, `dt` the stage's length); under backward Euler the
+  /// two drives are one and `prev`'s strain is not read.
   [[nodiscard]] static std::map<int, std::vector<double>> FirstOrderDrive(
       const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
       double dt, const ViscoelasticState& prev, const ViscoelasticState& next,
       const std::vector<std::vector<double>>& ditauPoints);
  private:
-  using Direct = std::function<std::vector<double>(std::size_t node)>;
-  using Drive =
-      std::function<std::map<int, std::vector<double>>(std::size_t node, double dt)>;
+  /// A term of the direction at a stage of a step (detail::StageRef; the
+  /// first node is a stage of its own, ending there): a direct load on the
+  /// grid, a tide's coefficients.
+  using Direct =
+      std::function<std::vector<double>(const detail::StageRef& stage)>;
+  using Tide = std::function<std::vector<std::complex<double>>(
+      const detail::StageRef& stage)>;
+  using ToroidalDrive = TangentToroidalDrive;
+  /// The interior sources perturbed at a node.
+  using Sources = std::function<
+      std::pair<std::vector<PointSource>, std::vector<StressGlut>>(
+          std::size_t node)>;
+  /// A stage's memory increment.
+  using Drive = std::function<std::map<int, std::vector<double>>(
+      const detail::StageRef& stage)>;
 
   /// The loop the runs share: the forward problem with the trajectory's
   /// ocean functions prescribed, the direct load given per node (empty
@@ -195,16 +290,16 @@ class TangentLinearSolver {
   struct MaterialForcing;
   struct MaterialDrive;
   struct MaterialSecondDrive;
-  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> March(
-      std::span<const double> times,
-      std::span<const std::vector<double>> oceanFunctions,
-      const Direct& directAt, const Drive& drive,
-      MaterialForcing* material) const;
+  [[nodiscard]] std::vector<Evolution::Snapshot> March(
+      std::span<const double> times, const OceanFunctions& oceanFunctions,
+      const Direct& directAt, const Drive& drive, MaterialForcing* material,
+      const Tide& tideAt = {}, const Sources& sourcesAt = {},
+      const ToroidalDrive& toroidalDrive = {}, const Direct& outsideAt = {},
+      const Direct& layerAt = {}) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two
   /// perturbations of the inverse relaxation times at the memory points.
-  /// pyslfp's `_second_weight_drive`.
   [[nodiscard]] static std::map<int, std::vector<double>> SecondWeightDrive(
       const ViscoelasticOperator& op, Scheme scheme, double dt,
       const ViscoelasticState& prev, const ViscoelasticState& next,
@@ -214,13 +309,13 @@ class TangentLinearSolver {
   /// The material-unit step sizes of the time grid, and the evolution's
   /// column callables of recorded load and centrifugal coefficients.
   [[nodiscard]] static std::vector<double> StepSizes(
-      const SeaLevelEvolution& ev, std::span<const double> times);
+      const Evolution& ev, std::span<const double> times);
   [[nodiscard]] static std::function<LoadCallable(
       const std::vector<std::complex<double>>&)>
-  LoadColumnsOf(const SeaLevelEvolution& ev);
+  LoadColumnsOf(const Evolution& ev);
   [[nodiscard]] static std::function<LoadCallable(
       const std::vector<std::complex<double>>&)>
-  TideColumnsOf(const SeaLevelEvolution& ev);
+  TideColumnsOf(const Evolution& ev);
 
   /// The material drive of a step: the per-dt effective variation, the
   /// force -(dK_eff) x on the base step's full solution plus the memory
@@ -228,10 +323,10 @@ class TangentLinearSolver {
   /// and the effective table's Love-number derivatives (the sea level
   /// closure's response channels), cached per dt.
   [[nodiscard]] std::shared_ptr<MaterialDrive> MakeMaterialDrive(
-      const MaterialDirection& d, const ForwardTrajectory& trajectory,
+      const PointMaterialDirection& d, const ForwardTrajectory& trajectory,
       std::span<const double> times) const;
 
-  const SeaLevelEvolution* evolution_;
+  const Evolution* evolution_;
   Options options_;
 };
 

@@ -1,0 +1,18 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 32},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 85},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
+  },
+  "ocean": {
+    "at": "start",
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "checkpoint": {"directory": "out/sea_level_1d/checkpoints", "every": 6},
+  "output": {"surface": "out/sea_level_1d/sea_level_1d.nc"}
+}

@@ -19,18 +19,17 @@
  * caller's units (the drivers' solver units, with `a` the solver's
  * radius).
  *
- * The decay time follows Al-Attar & Tromp (2014, Appendix C), the
- * machinery of pyslfp's `fit_decay_time`: the series is fitted as
- * a e^(-s t) + b, the model times joining the parameters under Gaussian
- * penalties towards the nominal ones where the timing uncertainty is
- * non-zero, and the datum's exact sensitivity to the series comes from
- * differentiating the fit's stationarity, turning the fitted 1 / s into
- * per-node weights on the series — behind which every kernel driver
- * applies unchanged. Only the ratio of the two uncertainties shapes the
- * fit and the weights. The window must hold a decay: rebound series
- * look exponential near the centre of a former ice sheet and only after
- * the melting has ceased, and a window constraining no decay is
- * refused.
+ * The decay time follows Al-Attar & Tromp (2014, Appendix C): the series
+ * is fitted as a e^(-s t) + b, the model times joining the parameters
+ * under Gaussian penalties towards the nominal ones where the timing
+ * uncertainty is non-zero, and the datum's exact sensitivity to the
+ * series comes from differentiating the fit's stationarity, turning the
+ * fitted 1 / s into per-node weights on the series — behind which every
+ * kernel driver applies unchanged. Only the ratio of the two
+ * uncertainties shapes the fit and the weights. The window must hold a
+ * decay: rebound series look exponential near the centre of a former ice
+ * sheet and only after the melting has ceased, and a window constraining
+ * no decay is refused.
  */
 
 #include <array>
@@ -47,13 +46,34 @@ namespace sl3dpp {
 
 // -- spatial duals ----------------------------------------------------------
 
-/// A Gaussian cap in great-circle distance about `site`, of the given
-/// `width` in radians, normalised to unit physical surface integral on a
-/// sphere of radius `a`: paired with a field it reads the cap-weighted
-/// mean, in the field's own unit.
+/// The mean over a Gaussian cap w(d) = exp(-d^2 / (2 width^2)) about
+/// `site` (d the great-circle distance, `width` in radians), as a dual on
+/// a sphere of radius `a`: the cap's band-limited kernel
+///   sum_l lambda_l (2l + 1) P_l(cos d) / (4 pi a^2),  l = 0 .. lmax,
+/// lambda_l the cap's degree weights (CapMeanWeights), of unit physical
+/// surface integral. Paired with a field of degree at most the grid's band
+/// it reads the field's mean over the cap about the site exactly, at every
+/// width, in the field's own unit — the field smoothed over the cap
+/// (CapMeanWeights) read at the site; a field beyond the band is read
+/// through its expansion on the grid. The kernel is the cap's projection
+/// on the band, which rings beyond the cap where the band does not
+/// resolve it (as the point kernel, PointDual, does).
 [[nodiscard]] std::vector<double> CapMeanDual(const SurfaceGrid& grid, double a,
                                               GeographicPoint site,
                                               double width);
+
+/// The degree weights of the mean over CapMeanDual's cap taken about
+/// every point, lambda_l for l = 0 to lmax. By Funk and Hecke the mean of
+/// a field of degree at most lmax over the cap about any point is the
+/// field's expansion with degree l weighted by
+///   lambda_l = int_0^pi w(d) P_l(cos d) sin d dd
+///              / int_0^pi w(d) sin d dd,  w(d) = exp(-d^2 / (2 width^2)),
+/// synthesised there: the field convolved over the sphere with the cap
+/// normalised to unit integral (lambda_0 = 1). The integrals are taken by
+/// Gauss-Legendre quadrature in d over [0, min(pi, 12 width)], past which
+/// w is below e^-72 of its peak, on lmax + 128 nodes: exact to rounding.
+/// CapMeanDual is the dual reading this mean at one point.
+[[nodiscard]] std::vector<double> CapMeanWeights(int lmax, double width);
 
 /// The band-limited point evaluation at `site`: the grid's reproducing
 /// kernel sum_l (2l + 1) P_l(cos gamma) / (4 pi a^2) over the grid's
@@ -81,11 +101,148 @@ namespace sl3dpp {
 // -- measurements -----------------------------------------------------------
 
 /// The field a surface dual pairs with.
-enum class FieldChannel { SeaLevel, Displacement, Potential };
+enum class FieldChannel {
+  SeaLevel,
+  Displacement,
+  Potential,
+  /// The potential V of the tangential displacement.
+  TangentialPotential
+};
 
 /// The `Measurement` of one node whose named channel carries `dual`.
 [[nodiscard]] Measurement FieldMeasurement(FieldChannel channel,
                                            std::vector<double> dual);
+
+// -- displacement measurements ----------------------------------------------
+//
+// A measurement of the surface displacement is a vector weight w on the
+// surface, J = a^2 int w . u dOmega, with u = U r + grad_1 V - r x grad_1 W
+// (the gradient that of the unit sphere, V and W lengths). Its radial
+// part is the dual of U; its tangential part gives the duals of V and W.
+// In the continuous sweeps the weight is an adjoint traction, -w. The
+// weight is given as a vector field on the grid, or, to read the
+// displacement at one point along one direction, by the point and the
+// direction.
+//
+// The frame. A rigid rotation of a solid region costs no strain, so the
+// toroidal degree 1 of a solution is fixed only by the solver's gauge
+// (ToroidalOperator), and a horizontal displacement is defined only
+// relative to a frame. The measurements here read the displacement in
+// the frame of NO NET ROTATION OF THE SURFACE: the degree-1 part of W at
+// the surface, the rigid rotation u = c x r, is left out of their duals,
+// so that they do not depend on the gauge and their adjoint tractions
+// apply no torque. NetRotation, WithoutNetRotation and
+// RigidRotationPotential move a toroidal potential between frames.
+// BaselineMeasurement and AngleMeasurement read changes of length and of
+// angle between sites, which no rigid motion alters and no frame enters.
+
+/// A vector field on the surface by its components to the east, to the
+/// north and upwards, each a field on the grid; an empty component is
+/// absent.
+struct SurfaceVectorField {
+  std::vector<double> east;
+  std::vector<double> north;
+  std::vector<double> up;
+};
+
+/// The displacement u = U r + grad_1 V - r x grad_1 W as a vector field,
+/// from the fields U, V and W on the grid (an empty one is absent). The
+/// tangential part goes through the canonical components
+/// u^(+-) = sqrt(l (l + 1) / 2) (V_lm +- i W_lm) of the generalised
+/// spherical harmonics of upper index +-1 (Phinney & Burridge 1973;
+/// Dahlen & Tromp 1998, appendix C), so the grid must carry upper index 1
+/// (SurfaceGrid::Options::nmax).
+[[nodiscard]] SurfaceVectorField DisplacementField(
+    const SurfaceGrid& grid, std::span<const double> U,
+    std::span<const double> V, std::span<const double> W);
+
+/// The rigid rotation in a toroidal potential W on the grid: the vector
+/// c, in W's unit, of its degree-1 part c . r, whose displacement
+/// -r x grad_1 (c . r) is c x r (r the unit radial vector; c over the
+/// radius is the rotation's angle). Cartesian components, z the polar
+/// axis and x through the zero of longitude.
+[[nodiscard]] std::array<double, 3> NetRotation(const SurfaceGrid& grid,
+                                                std::span<const double> W);
+
+/// The toroidal potential c . r of the rigid rotation u = c x r, on the
+/// grid: added to a W it moves the displacement into the frame that
+/// turns by -c against the one it was in.
+[[nodiscard]] std::vector<double> RigidRotationPotential(
+    const SurfaceGrid& grid, std::array<double, 3> c);
+
+/// W less its rigid rotation: the toroidal potential in the frame of no
+/// net rotation of the surface, in which the measurements below read
+/// the displacement.
+[[nodiscard]] std::vector<double> WithoutNetRotation(
+    const SurfaceGrid& grid, std::span<const double> W);
+
+/// The `Measurement` of the displacement against a vector weight w,
+/// J = a^2 int w . u dOmega, the displacement taken in the frame of no
+/// net rotation of the surface (the dual of W has no degree 1): the
+/// upward component is the dual of U, and
+/// the tangential ones, expanded in their canonical components
+/// w^(+-)_lm, give the duals of V and W algebraically, with coefficients
+/// sqrt(l (l + 1) / 2) (w^+ + w^-)_lm and -i sqrt(l (l + 1) / 2)
+/// (w^+ - w^-)_lm. The grid must carry upper index 1. The weight carries
+/// the 1 / a^2 of the physical surface integral, as the scalar duals do.
+[[nodiscard]] Measurement DisplacementMeasurement(
+    const SurfaceGrid& grid, const SurfaceVectorField& weight);
+
+/// A direction at a point of the surface, by its components to the
+/// east, to the north and upwards; it need not be a unit vector (a
+/// line-of-sight direction is one, and the three axes read the
+/// components).
+struct SurfaceDirection {
+  double east = 0.0;
+  double north = 0.0;
+  double up = 0.0;
+};
+
+/// The `Measurement` of the displacement at `site` along `direction`,
+/// band-limited as PointDual is: paired with a band-limited displacement
+/// it reads direction . u at the site exactly, in the displacement's
+/// unit. The upward part is PointDual on the radial displacement; the
+/// horizontal part is the derivative of the grid's reproducing kernel
+/// along the direction, on V and (turned a quarter) on W, the latter
+/// from degree 2: the displacement is read in the frame of no net
+/// rotation of the surface.
+[[nodiscard]] Measurement PointDisplacementMeasurement(
+    const SurfaceGrid& grid, double a, GeographicPoint site,
+    SurfaceDirection direction);
+
+/// The `Measurement` of the displacement smoothed over CapMeanDual's cap
+/// as a vector field, read at the cap's centre `site` along `direction`
+/// (the components at the centre). The displacement is smoothed through
+/// its potentials: U, V and W each with degree l weighted by the cap's
+/// degree weights lambda_l (CapMeanWeights), the smoothed displacement
+/// that of the smoothed potentials, as `sl3d solve`'s output.smoothing
+/// smooths the horizontal displacement. Its upward part is the cap mean
+/// of U (CapMeanDual); its horizontal part is PointDisplacementMeasurement's
+/// with the reproducing kernel's degree l weighted by lambda_l, so paired
+/// with a band-limited displacement it reads direction . u_smoothed at the
+/// centre exactly, at every width, in the frame of no net rotation of the
+/// surface. Not the cap mean of the components in each point's frame,
+/// which turn across the cap.
+[[nodiscard]] Measurement CapDisplacementMeasurement(
+    const SurfaceGrid& grid, double a, GeographicPoint site, double width,
+    SurfaceDirection direction);
+
+/// The `Measurement` of the change of the straight-line distance between
+/// two sites of the surface, e . (u(to) - u(from)) with e the unit
+/// vector from the one to the other, in the displacement's unit. No
+/// rigid motion changes it, so it needs no frame. The sites must differ.
+[[nodiscard]] Measurement BaselineMeasurement(const SurfaceGrid& grid, double a,
+                                              GeographicPoint from,
+                                              GeographicPoint to);
+
+/// The `Measurement` of the change of the angle at `vertex` between the
+/// straight lines to `first` and to `second`, in radians when the
+/// displacement is in the unit of `a`. No rigid motion changes it. The
+/// three sites must not lie on one line.
+[[nodiscard]] Measurement AngleMeasurement(const SurfaceGrid& grid, double a,
+                                           GeographicPoint vertex,
+                                           GeographicPoint first,
+                                           GeographicPoint second);
 
 /// A component of the angular-velocity perturbation: X and Y drive
 /// polar motion, Z the length of day.

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -194,11 +195,53 @@ TEST(LateralGate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   }
 }
 
-TEST(Lateral, KernelDensitiesUndoTheRadialQuadrature) {
-  // VolumeDensity and RadialDensity of a Kernels3D-layout field: the
-  // per-volume values times each node's radial weight and r^2 give the
-  // field back, and the radial density times the weight is the angular
-  // integral, so an angle-uniform delta pairs as sum w k delta.
+TEST(Lateral, ShortestRelaxationIsOverTheVolume) {
+  // Viscoelastic3D::ShortestRelaxation over every memory node's grid.
+  // Without a lateral viscosity it is the reference's, to the bit (each
+  // inverse time the reference's times exp(-0) = 1), and not lateral.
+  // Under delta = 0.3 cos(theta), which depends on neither the radius nor
+  // the longitude, it is at the reference's node, at the largest
+  // colatitude of the node's grid (delta most negative there) and the
+  // least longitude (the ties' rule), exp(0.3 cos theta) times the
+  // reference's.
+  const auto body = Body::Make();
+  const Viscoelastic3D flat(body.rheology, kLmax,
+                            [](double, double, double) { return 0.0; });
+  const auto reference = flat.Reference().ShortestRelaxation();
+  const auto uniform = flat.ShortestRelaxation();
+  EXPECT_EQ(uniform.time, reference.time);
+  EXPECT_EQ(uniform.branch, reference.branch);
+  EXPECT_EQ(uniform.element, reference.element);
+  EXPECT_EQ(uniform.layer, reference.layer);
+  EXPECT_NEAR(uniform.radius, reference.radius, 1e-15);
+  EXPECT_FALSE(uniform.lateral);
+  EXPECT_EQ(uniform.colatitude, 0.0);
+
+  const Viscoelastic3D varying(
+      body.rheology, kLmax,
+      [](double, double theta, double) { return 0.3 * std::cos(theta); });
+  const auto site = varying.ShortestRelaxation();
+  EXPECT_TRUE(site.lateral);
+  EXPECT_EQ(site.element, reference.element);
+  EXPECT_NEAR(site.radius, reference.radius, 1e-15);
+  const auto& coupling = varying.Coupling();
+  auto node = 0;
+  while (coupling.RadiusOfNode(node) != site.radius) ++node;
+  const auto& grid = coupling.GridOf(node);
+  EXPECT_EQ(site.colatitude, grid.CoLatitudes().back());
+  EXPECT_EQ(site.longitude, grid.Longitudes().front());
+  EXPECT_NEAR(site.time,
+              reference.time * std::exp(0.3 * std::cos(site.colatitude)),
+              1e-14 * site.time);
+  EXPECT_LT(site.time, 0.8 * reference.time);
+}
+
+TEST(Lateral, KernelPairingsCarryTheVolumeWeights) {
+  // A Kernels3D-layout field is a density per unit volume: VolumePairing
+  // restores each node's radial weight and r^2 to the angular integral,
+  // and SphericalMean is the angular integral over 4 pi, so an
+  // angle-uniform delta pairs as sum 4 pi w r^2 k delta
+  // (VolumePairingOfMeans) — the same as the field's own pairing.
   const auto body = Body::Make();
   Viscoelastic3D op(body.rheology, kLmax,
                     [](double, double, double) { return 0.0; });
@@ -207,21 +250,43 @@ TEST(Lateral, KernelDensitiesUndoTheRadialQuadrature) {
   auto kernel = std::vector<double>(
       static_cast<std::size_t>(coupling.NodeCount()) * fieldSize);
   for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] = Noise(i);
-  const auto volume = VolumeDensity(coupling, kernel);
-  const auto radial = RadialDensity(coupling, kernel);
-  ASSERT_EQ(radial.size(), static_cast<std::size_t>(coupling.NodeCount()));
+  auto direction = std::vector<double>(kernel.size());
+  for (auto i = std::size_t{0}; i < direction.size(); ++i) {
+    direction[i] = Noise(i + kernel.size());
+  }
+  const auto mean = SphericalMean(coupling, kernel);
+  ASSERT_EQ(mean.size(), static_cast<std::size_t>(coupling.NodeCount()));
+  auto expected = 0.0, magnitude = 0.0;
+  auto uniform = std::vector<double>(kernel.size());
+  auto perNode = std::vector<double>(mean.size());
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto r = coupling.RadiusOfNode(node);
     const auto w = coupling.WeightOfNode(node);
     const auto at = static_cast<std::size_t>(node) * fieldSize;
+    auto product = std::vector<double>(fieldSize);
+    auto size = std::vector<double>(fieldSize);
     for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-      EXPECT_NEAR(volume[at + x] * w * r * r, kernel[at + x], 1e-13);
+      product[x] = kernel[at + x] * direction[at + x];
+      size[x] = std::abs(kernel[at + x]) * (std::abs(direction[at + x]) + 1.0);
     }
+    expected += w * r * r * coupling.Grid().Integrate(product);
+    magnitude += w * r * r * coupling.Grid().Integrate(size);
     const auto slice = std::span(kernel).subspan(at, fieldSize);
-    EXPECT_NEAR(radial[node] * w, coupling.Grid().Integrate(slice), 1e-13);
+    EXPECT_NEAR(mean[node] * 4.0 * std::numbers::pi,
+                coupling.Grid().Integrate(slice), 1e-13);
+    perNode[node] = 0.5 + 0.1 * node;
+    for (auto x = std::size_t{0}; x < fieldSize; ++x) {
+      uniform[at + x] = perNode[node];
+    }
   }
-  EXPECT_THROW(static_cast<void>(VolumeDensity(
-                   coupling, std::span(kernel).first(kernel.size() - 1))),
+  const auto paired = VolumePairing(coupling, kernel, direction);
+  EXPECT_NEAR(paired, expected, 1e-13 * magnitude);
+  const auto ofMeans = VolumePairingOfMeans(coupling, mean, perNode);
+  EXPECT_NEAR(ofMeans, VolumePairing(coupling, kernel, uniform),
+              1e-13 * magnitude);
+  EXPECT_THROW(static_cast<void>(VolumePairing(
+                   coupling, std::span(kernel).first(kernel.size() - 1),
+                   direction)),
                std::invalid_argument);
 }
 
@@ -339,6 +404,110 @@ TEST(Lateral, ThreadedStepMatchesSerial) {
   EXPECT_EQ(diff, 0.0);
 }
 
+TEST(Lateral, CacheSizeLeavesTheStepUnchanged) {
+  // Options::cache_bytes reaches the coupling's grid, and a cache small
+  // enough that the batched transforms over the memory nodes take smaller
+  // chunks than under the default (16 KiB: 7 spin -2 fields at a time
+  // against 63, so the chunks fall differently through the batch) leaves
+  // two steps as they are under the default: their iteration counts the
+  // same, and their solutions and the memory they leave equal to
+  // rounding. Each operator's grid plans its own transforms, and two
+  // plans may sum in different orders, so the last bits may differ; a
+  // fault in the chunking would differ in the leading digits.
+  constexpr auto kSmall = std::size_t{16} << 10;
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto delta = [](double, double theta, double phi) {
+    return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto iterations = std::vector<int>{};
+  auto run = [&](std::size_t cache) {
+    Viscoelastic3D::Options options;
+    options.cache_bytes = cache;
+    Viscoelastic3D op(body.rheology, kLmax, delta, options);
+    const auto& coupling = op.Coupling();
+    const auto& grid = coupling.Grid();
+    EXPECT_EQ(grid.Grid().ChunkingPolicy(),
+              cache > 0 ? GSHTrans::Chunking::ForCache(
+                              static_cast<GSHTrans::Chunking::Int>(cache))
+                        : GSHTrans::Chunking::Automatic());
+    if (cache > 0) {
+      // the chunk of a spin -2 batch (one copy of its block: a stored
+      // table) against the default's and the batch's
+      const auto block = static_cast<GSHTrans::Chunking::Int>(
+          sizeof(Complex) * grid.SpinCoefficientSize(-2));
+      const auto chunk = grid.Grid().ChunkingPolicy().Count(block, 1);
+      EXPECT_LT(chunk, GSHTrans::Chunking::Automatic().Count(block, 1));
+      EXPECT_LT(chunk, coupling.NodeCount());
+    }
+    auto state = op.ZeroState();
+    Viscoelastic3D::Solutions solutions;
+    for (auto i = 0; i < 2; ++i) {
+      auto result = op.Step(state, tau, Scheme::ExponentialTrapezoid, load);
+      EXPECT_TRUE(result.info.converged);
+      iterations.push_back(result.info.iterations);
+      state = std::move(result.state);
+      solutions = std::move(result.solutions);
+    }
+    return std::pair{std::move(state), std::move(solutions)};
+  };
+  const auto [standardState, standard] = run(0);
+  const auto [smallState, small] = run(kSmall);
+  EXPECT_EQ(iterations[0], iterations[2]);
+  EXPECT_EQ(iterations[1], iterations[3]);
+
+  // the largest difference of two arrays over the largest value of the
+  // first
+  constexpr auto kRounding = 1e-13;
+  auto departure = [](const auto& x, const auto& y) {
+    EXPECT_EQ(x.size(), y.size());
+    auto worst = 0.0, top = 0.0;
+    for (auto i = std::size_t{0}; i < std::min(x.size(), y.size()); ++i) {
+      worst = std::max(worst, std::abs(x[i] - y[i]));
+      top = std::max(top, std::abs(x[i]));
+    }
+    return std::pair{worst, top};
+  };
+  auto scale = 0.0;
+  auto compare = [&](const std::map<int, std::vector<Complex>>& a,
+                     const std::map<int, std::vector<Complex>>& b) {
+    ASSERT_EQ(a.size(), b.size());
+    // against the largest value of any degree: a degree the load does not
+    // reach holds rounding alone
+    auto top = 0.0;
+    for (const auto& [l, x] : a) {
+      for (auto c : x) top = std::max(top, std::abs(c));
+    }
+    scale = std::max(scale, top);
+    for (const auto& [l, x] : a) {
+      EXPECT_LE(departure(x, b.at(l)).first, kRounding * top) << "degree " << l;
+    }
+  };
+  compare(standard.spheroidal, small.spheroidal);
+  compare(standard.toroidal, small.toroidal);
+  EXPECT_GT(scale, 0.0);
+  // and the memory the steps leave, branch by branch
+  ASSERT_EQ(standardState.m.size(), smallState.m.size());
+  for (auto k = std::size_t{0}; k < standardState.m.size(); ++k) {
+    auto top = departure(standardState.m[k].r, smallState.m[k].r).second;
+    for (auto c = 0; c < 2; ++c) {
+      top = std::max(
+          top, departure(standardState.m[k].c[c], smallState.m[k].c[c]).second);
+    }
+    EXPECT_GT(top, 0.0) << "branch " << k;
+    for (auto c = 0; c < 2; ++c) {
+      EXPECT_LE(departure(standardState.m[k].c[c], smallState.m[k].c[c]).first,
+                kRounding * top)
+          << "branch " << k << " component " << c;
+    }
+    EXPECT_LE(departure(standardState.m[k].r, smallState.m[k].r).first,
+              kRounding * top)
+        << "branch " << k;
+  }
+}
+
+
 TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
   // A step that is done with finishes into its own buffers (the grid
   // workspace becomes the strain, the decayed memory advances in place);
@@ -410,6 +579,7 @@ TEST(Lateral, RecycledArraysGiveBitwiseTheFreshSteps) {
   };
   const auto fresh = run(false);
   const auto recycled = run(true);
+  // one process, operators of one configuration: the same transforms
   ASSERT_EQ(fresh.m.size(), recycled.m.size());
   for (auto k = std::size_t{0}; k < fresh.m.size(); ++k) {
     EXPECT_EQ(fresh.m[k].c[0], recycled.m[k].c[0]) << "branch " << k;
@@ -462,6 +632,7 @@ TEST(Lateral, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
   EXPECT_TRUE(weak.info.converged);
   EXPECT_EQ(weak.info.mixedPasses, 0);
   EXPECT_EQ(weak.info.iterations, weakPicard.info.iterations);
+  // one process, the same transforms: bitwise
   EXPECT_EQ(gap(weak.solutions, weakPicard.solutions), 0.0);
 
   const auto slow = second(10.0, 5, 0.5);
@@ -691,6 +862,7 @@ TEST(Lateral, OpenStepsOutliveTheCacheAndStepsMayRunConcurrently) {
       options);
   const auto scheme = Scheme::ExponentialTrapezoid;
   const auto state = op.Step(op.ZeroState(), tau, scheme, load).state;
+  // one process, operators of one configuration, the same transforms: bitwise
   auto same = [](const Viscoelastic3D::State& a,
                  const Viscoelastic3D::State& b) {
     return a.m[0].c[0] == b.m[0].c[0] && a.m[0].c[1] == b.m[0].c[1] &&

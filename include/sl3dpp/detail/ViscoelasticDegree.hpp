@@ -20,6 +20,7 @@
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/ToroidalOperator.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp {
@@ -55,6 +56,8 @@ struct ViscoelasticOperator::Degree {
   std::vector<int> Udof, Vdof;  // (ne, i), -1 absent
   std::vector<std::vector<double>> mu, itau;  // per branch, (ne, p)
   std::vector<double> loadVec, tideVec;
+  /// DegreeOperator::TideSelf of tideVec's potential.
+  double tideSelf = 0.0;
   std::vector<double> momentRow;  // degree 0 only
 
   /// pointMu and pointItau are the branch arrays at the memory points
@@ -73,6 +76,7 @@ struct ViscoelasticOperator::Degree {
                {.eps = options.eps,
                 .truncation = options.truncation,
                 .point_shear = elasticShear,
+                .gravitating = options.gravitating,
                 .cuts = options.radial_cuts}),
         points(&memoryPoints) {
     const auto& mesh = rheology.BaseMaterial().Mesh();
@@ -134,6 +138,7 @@ struct ViscoelasticOperator::Degree {
     }
     loadVec = system.Load();
     tideVec = system.Tide(l == 0 ? 2 : -1);
+    tideSelf = system.TideSelf(l == 0 ? 2 : -1);
     if (l == 0) {
       // The inertia moment is a displacement integral over the whole
       // subset (not the memory window): the nodes' own quadrature,
@@ -345,6 +350,9 @@ struct ViscoelasticOperator::Flavour {
   std::vector<double> pointShearModulus;
   PointShear pointShear;
   std::map<int, DegreeOperator> systems;
+  /// The toroidal effective systems (ToroidalViscoelastic), kept here so
+  /// they live exactly as long as the material they borrow.
+  std::map<int, ToroidalOperator> toroidal;
   std::map<int, std::vector<double>> units;  // (ndof x 2): load, tide
   /// (ndof x 2): the traction-only and attraction-only pieces of the
   /// unit surface load — the continuous adjoint's jump channels.

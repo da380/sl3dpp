@@ -4,10 +4,8 @@
  * @file SeaLevel.hpp
  * @brief The sea level engine: the gravitationally consistent sea level
  * equation — linear, generalised, or nonlinear with migrating shorelines,
- * with the rotational feedbacks — for whatever Love numbers it is given.
- * Corresponds to pyslfp's `core.sea_level` (its docstrings and
- * `pyslfp_theory.tex` are the authoritative statements), on GSHTrans
- * fields.
+ * with the rotational feedbacks — for whatever Love numbers it is given,
+ * on GSHTrans fields.
  *
  * This is an internal component and works non-dimensionally throughout
  * (the SI user boundary is Fingerprint.hpp): the constructor converts the
@@ -15,27 +13,31 @@
  * table's radius, and every method's fields, coefficients and scalars are
  * non-dimensional under SolverScales().
  *
- * Numerical scheme, as in pyslfp: both solvers iterate on the surface
- * load; within each iteration the sea level change is synthesised from
- * the load coefficients with the combined factor -(h_l + k_l / g), the
- * rotational feedback is solved in closed form at degree 2 (transverse at
- * order 1, axial at order 0 with its degree-0 part through the axial Love
+ * Numerical scheme: both solvers iterate on the surface load; within each
+ * iteration the sea level change is synthesised from the load
+ * coefficients with the combined factor -(h_l + k_l / g), the rotational
+ * feedback is solved in closed form at degree 2 (transverse at order 1,
+ * axial at order 0 with its degree-0 part through the axial Love
  * numbers), and mass is conserved by a uniform shift over the oceans. The
- * linear fixed point is accelerated by Anderson mixing on the load
- * coefficients; the nonlinear solver recomputes the flotation ocean
- * function each pass (Kendall-style migration). The adjoint solve is the
- * exact transpose of the generalised solve's input channels, run through
- * the same mixer.
+ * tangential displacement, which the sea level does not see, is formed
+ * from the converged load and angular velocity by the tangential Love
+ * numbers, as its potential V. The linear fixed point is accelerated by
+ * Anderson mixing on the load coefficients; the nonlinear solver
+ * recomputes the flotation ocean function each pass (Kendall-style
+ * migration). The adjoint solve is the exact transpose of the generalised
+ * solve's input channels, run through the same mixer.
  *
- * The rotation block's algebra is pyslfp's verbatim, carried on the real
- * (cos, sin) coefficient pairs of the pyshtools basis; the conversions to
- * GSHTrans's complex basis live in ShConventions.hpp and are orthogonal
- * for the pairing used, so the adjoint identities survive them.
+ * The rotation block's algebra is carried on the real (cos, sin)
+ * coefficient pairs of the pyshtools basis; the conversions to GSHTrans's
+ * complex basis live in ShConventions.hpp and are orthogonal for the
+ * pairing used, so the adjoint identities survive them.
  */
 
 #include <array>
 #include <complex>
+#include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "sl3dpp/LoveNumbers.hpp"
@@ -44,14 +46,11 @@
 
 namespace sl3dpp {
 
-/// Physical parameters of the rotating body, SI (pyslfp's
-/// `EarthModelParameters` defaults). With `body_from_table` (the default)
-/// the sea-floor radius and surface gravity are replaced by the Love
-/// table's values on construction of the solver (pyslfp's `with_body`),
-/// so the body and its response agree; without it they are the
-/// parameters given — the engine's gravity an independent parameter, as
-/// the material derivatives in the density treat it (docs/adjoints.md
-/// §16).
+/// Physical parameters of the rotating body, SI, the Earth's by default.
+/// With `body_from_table` (the default) the sea-floor radius and surface
+/// gravity are replaced by the Love table's values on construction of the
+/// solver, so the body and its response agree; without it they are the
+/// parameters given — the engine's gravity an independent parameter.
 struct SeaLevelParameters {
   double equatorial_radius = 6378137.0;
   double polar_radius = 6356752.0;
@@ -77,16 +76,36 @@ struct SeaLevelParameters {
     SeaLevelParameters parameters, double fluid_tidal_number,
     double non_hydrostatic_fraction = 0.008);
 
-/// The sea level of a state from its topography T and ice thickness I, by
-/// pyslfp's construction, which the sl3d program applies to the states it
-/// reads: -T over the ocean floor (T < 0) and -T + I over land, raised by
-/// the floating fraction (ice density / water density) of any ice standing
-/// on the ocean floor. T and I as pyslfp's `export_ice_history` writes them
-/// from ICE-5G/6G/7G; any consistent units (SI for Fingerprint, the
-/// solver's for SeaLevelSolver::MakeState). Refused when the sizes differ.
+/// The sea level of a state from its topography T and ice thickness I, as
+/// the sl3d program forms it for the states it reads: -T over the ocean
+/// floor (T < 0) and -T + I over land, raised by the floating fraction
+/// (ice density / water density) of any ice standing on the ocean floor.
+/// T and I as pyslfp's `export_ice_history` writes them from
+/// ICE-5G/6G/7G; any consistent units (SI for Fingerprint, the solver's
+/// for GRDSolver::MakeState). Refused when the sizes differ.
 [[nodiscard]] std::vector<double> SeaLevelFromTopography(
     std::span<const double> topography, std::span<const double> iceThickness,
     const SeaLevelParameters& parameters = {});
+
+/// The lowest degree of a prescribed tidal potential. Tides are taken
+/// relative to the centre of mass: a degree-0 potential exerts no force,
+/// and a degree-1 potential is a uniform field that accelerates the
+/// whole body and deforms none of it (its tidal response is zero in that
+/// frame). Every route by which a tide enters the library (the sea level
+/// solves, the evolutions, the operators' tide channels, the
+/// tangent-linear directions) refuses a nonzero coefficient below this
+/// degree, and every tide kernel and tide dual is zero there.
+inline constexpr int kLowestTideDegree = 2;
+
+/// Throws std::invalid_argument, naming the vector `what`, when a
+/// coefficient vector in SurfaceGrid's layout has a nonzero coefficient
+/// below kLowestTideDegree; entries past its end are not read.
+void RequireTideDegrees(std::span<const std::complex<double>> coefficients,
+                        std::string_view what = "a prescribed tidal potential");
+
+/// Zeroes a coefficient vector's entries below kLowestTideDegree (a tide
+/// kernel's, a tide dual's); entries past its end are not touched.
+void ZeroBelowTideDegrees(std::span<std::complex<double>> coefficients);
 
 /// Which parts of the rotational feedback are solved. The transverse fixed
 /// point requires moments of inertia sustaining more oblateness than the
@@ -94,7 +113,7 @@ struct SeaLevelParameters {
 /// component along the rotation axis.
 enum class RotationalFeedback { None, Axial, Full };
 
-class SeaLevelSolver {
+class GRDSolver {
  public:
   struct Options {
     double rtol = 1e-9;
@@ -105,7 +124,7 @@ class SeaLevelSolver {
 
   /// The grid is copied in; the SI table and parameters are converted to
   /// the solver's non-dimensional scheme here, once.
-  SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
+  GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
                  SeaLevelParameters parameters);
 
   [[nodiscard]] const SurfaceGrid& Grid() const { return grid_; }
@@ -154,21 +173,39 @@ class SeaLevelSolver {
   [[nodiscard]] std::array<double, 3> CentrifugalDual(
       std::span<const std::complex<double>> tideDual) const;
 
+  /// The degree-0 inertia moment of a surface mass density on the
+  /// solver's sphere, in GeneralisedForcing::inertiaMomentChange's
+  /// measure: a^2 / 2 times its mass. The solve adds it itself for a
+  /// direct load and for the attraction piece of a split load
+  /// (GeneralisedForcing::potentialLoad), whose mass it is; a caller that
+  /// gives the body's answer to such a piece as ready responses gives
+  /// this beside the body's moment.
+  [[nodiscard]] double SurfaceMassMoment(std::span<const double> density) const;
+
   // -- the surface state ------------------------------------------------------
 
   /**
    * @brief A snapshot of ice thickness and sea level (non-dimensional),
    * with the ocean function the flotation condition rho_w SL - rho_i I > 0
    * implies and its area. `forcedLand` marks points held at C = 0
-   * whatever the flotation says (pyslfp masks the Caspian this way); the
-   * state keeps it, so the nonlinear solve's migrating shorelines respect
-   * it too (empty: none).
+   * whatever the flotation says (a landlocked depression such as the
+   * Caspian); the state keeps it, so the nonlinear solve's migrating
+   * shorelines respect it too (empty: none).
    *
    * The ocean function need not be the flotation one: a state may carry a
    * prescribed C (the frozen shorelines of a calibrated initial state,
    * InitialSeaLevel.hpp), with oceanArea its integral. The linear solves
    * read C and its area only, never the sea level; the nonlinear solve
    * starts from the state's C and re-derives it by flotation.
+   *
+   * A state whose ocean function vanishes everywhere (oceanArea zero) is
+   * a body WITHOUT an ocean: the linear solve and its adjoint then carry
+   * no water load and no conservation of water, and are the response of
+   * the solid body to the forcing with the rotational feedback asked
+   * for, closed in one pass; the "sea level change" returned is then
+   * -(u + phi / g) with the centrifugal potential in phi, the change of
+   * an equipotential's height above the surface with no uniform shift.
+   * The nonlinear solve refuses such a state.
    */
   struct State {
     std::vector<double> iceThickness;
@@ -182,6 +219,32 @@ class SeaLevelSolver {
                                 std::vector<double> seaLevel,
                                 std::span<const char> forcedLand = {}) const;
 
+  /// The state of a body without an ocean: no ice, no sea level, the
+  /// ocean function zero everywhere.
+  [[nodiscard]] State NoOceanState() const;
+
+  // -- loads
+  // -------------------------------------------------------------------
+  //
+  // The DIRECT load is the part of the surface load that is given,
+  // whatever its source (ice, sediment, a change of the ocean's density
+  // or dynamics): a mass per unit area. The INDUCED load is the part the
+  // response makes, rho_w C times the relative sea level change. Their
+  // sum is the total load, or the load. These helpers make direct loads
+  // from the quantities they are usually given as, on a state's ocean
+  // function, all in the solver's units.
+
+  /// The direct load of a change of ice thickness: rho_i (1 - C) Delta I,
+  /// the grounded ice alone.
+  [[nodiscard]] std::vector<double> DirectLoadFromIceThicknessChange(
+      const State& state, std::span<const double> iceThicknessChange) const;
+
+  /// The load of a sea level change over the oceans, rho_w C Delta SL:
+  /// the direct load of a given change (an ocean-dynamic one, say), and
+  /// the induced load of the relative sea level change of a solve.
+  [[nodiscard]] std::vector<double> LoadFromSeaLevelChange(
+      const State& state, std::span<const double> seaLevelChange) const;
+
   // -- the generalised linear solve
   // ---------------------------------------------
 
@@ -190,13 +253,61 @@ class SeaLevelSolver {
   /// coefficient-space responses joined with no Love number applied (a
   /// viscoelastic step's memory field).
   struct GeneralisedForcing {
+    /// The direct load that ENTERS THE WATER BUDGET, a mass per unit area
+    /// (grounded ice, a hydrological load): its mass leaves or joins the
+    /// ocean, so the uniform part of the sea level change conserves it.
     std::vector<double> directLoad;
+    /// A direct load OUTSIDE THE WATER BUDGET (sediment, any other mass):
+    /// it loads the body as directLoad does and exchanges no water with
+    /// the ocean. Such loads should conserve mass among themselves; one
+    /// with a net mass is taken as it is, the body's mass changing.
+    std::vector<double> directLoadOutsideWaterBudget;
+    /// A change of the height of the solid surface that is not the
+    /// body's deformation: a layer laid on it (sediment: its mass over
+    /// its density), positive upwards. The sea level, measured from the
+    /// solid surface, changes by minus this, the water it displaces
+    /// going elsewhere; it enters nothing else, and is not in the
+    /// displacement returned. The layer's mass is a direct load beside
+    /// it. By convention ice is no such layer: the solid surface is the
+    /// surface with the whole water layer, ice included, stripped.
+    std::vector<double> solidSurfaceChange;
     std::vector<double> displacementLoad;
     std::vector<double> potentialLoad;
+    /// A tangential traction on the surface, given by its potential tau
+    /// in the units of a load: the traction is -g grad_1 tau, as
+    /// displacementLoad is the normal traction -g times its field. The
+    /// body answers through the tangential-traction numbers h_v, l_v,
+    /// k_v; a degree-0 part is nothing. With displacementLoad, the
+    /// continuous adjoint's channel for a displacement measurement of
+    /// vector weight w: the two take minus the weight's radial part and
+    /// minus its tangential part's potential.
+    std::vector<double> tangentialTraction;
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
+    /// The ready response of the tangential displacement's potential, as
+    /// the two above: it is joined to the potential returned and feeds
+    /// nothing back.
+    std::vector<std::complex<double>> tangentialResponse;
+    /// The ready toroidal potential W of the tangential displacement
+    /// (a 3D step's lateral part, or a source's): the sea level does not
+    /// see it and no Love number makes it, so it is only carried to the
+    /// response. Empty: none, and none returned.
+    std::vector<std::complex<double>> toroidalResponse;
+    /// The ready degree-0 inertia moment, int rho u . x dV (half the
+    /// change of int rho r^2 dV) of what the ready responses moved, with
+    /// any mass whose body response they carry (SurfaceMassMoment): the
+    /// trace term of the axial rotational feedback, beside the moments
+    /// the solve forms for its own loads.
     double inertiaMomentChange = 0.0;
     std::array<double, 3> angularMomentumChange{0.0, 0.0, 0.0};
+    /// A prescribed tidal potential, its coefficients on the surface: the
+    /// body answers through the tidal Love numbers of every degree, as it
+    /// does to the centrifugal potential of the rotation, and the
+    /// potential itself moves the equipotentials (it is in the relative
+    /// sea level change, and not in the potential returned, which is the
+    /// body's own perturbation). Degrees from 2 up (kLowestTideDegree); a
+    /// degree-0 or degree-1 part is refused.
+    std::vector<std::complex<double>> tide;
     /// An override of the state's ocean function (linearising about a
     /// migrating-shoreline trajectory, or a smooth benchmark C).
     std::vector<double> oceanFunctionOverride;
@@ -204,10 +315,26 @@ class SeaLevelSolver {
   };
 
   struct Response {
-    std::vector<double> seaLevelChange;
+    std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
+    /// The potential V of the tangential displacement, the displacement
+    /// its surface gradient: the answer of the tangential Love numbers to
+    /// the load, the load channels, the prescribed tide and the
+    /// centrifugal potential, and the ready response joined. It has no
+    /// degree-0 part.
+    std::vector<double> tangentialPotential;
+    /// The toroidal potential W of the tangential displacement,
+    /// u_t = grad_1 V - r x grad_1 W: the ready response's field. Empty
+    /// when the forcing gave none (a radial model under a load and a
+    /// tide has no toroidal displacement).
+    std::vector<double> toroidalPotential;
     std::array<double, 3> angularVelocity{0.0, 0.0, 0.0};
+    /// The uniform part the water's conservation adds to the sea level
+    /// change (zero without an ocean): the relative sea level change
+    /// less this is the change before the conservation is imposed, the
+    /// output conjugate to a load outside the water budget.
+    double uniformShift = 0.0;
     int iterations = 0;
     double error = 0.0;
     bool converged = true;
@@ -240,21 +367,40 @@ class SeaLevelSolver {
   /// product. Must use the ocean function and rotation setting of the
   /// forward solve being transposed.
   struct AdjointForcing {
-    std::vector<double> seaLevelDual;
+    std::vector<double> relativeSeaLevelDual;
     std::vector<double> displacementDual;
     std::vector<double> potentialDual;
+    /// The dual of the tangential displacement's potential V, a density
+    /// as the others; the dual of a tangential displacement measurement
+    /// is minus the surface divergence of its vector density.
+    std::vector<double> tangentialPotentialDual;
+    /// The dual of the toroidal potential W; it is carried to the dual of
+    /// the ready channel and enters nothing else.
+    std::vector<double> toroidalPotentialDual;
     std::array<double, 3> angularVelocityDual{0.0, 0.0, 0.0};
     std::vector<double> oceanFunctionOverride;
     RotationalFeedback rotation = RotationalFeedback::Full;
   };
 
   /// The duals of the generalised solve's input channels: the direct load
-  /// (a grid density), the two response channels (coefficients, paired by
-  /// the L2 coefficient pairing) and the inertia moment.
+  /// (a grid density), the three response channels (coefficients, paired
+  /// by the L2 coefficient pairing) and the inertia moment.
   struct AdjointResponse {
     std::vector<double> directLoadDual;
+    /// The dual of a direct load outside the water budget: the direct
+    /// load's less the uniform term of the water's conservation.
+    std::vector<double> directLoadOutsideWaterBudgetDual;
+    /// The dual of a change of the solid surface's height, a grid
+    /// density as the direct load's.
+    std::vector<double> solidSurfaceChangeDual;
     std::vector<std::complex<double>> displacementResponseDual;
     std::vector<std::complex<double>> potentialResponseDual;
+    std::vector<std::complex<double>> tangentialResponseDual;
+    /// Empty when no toroidal dual was given.
+    std::vector<std::complex<double>> toroidalResponseDual;
+    /// The dual of the prescribed tidal potential's coefficients, paired
+    /// as the response channels' are; zero below kLowestTideDegree.
+    std::vector<std::complex<double>> tideDual;
     double inertiaMomentDual = 0.0;
     int iterations = 0;
     double error = 0.0;
@@ -272,21 +418,56 @@ class SeaLevelSolver {
   // -- the nonlinear (migrating shoreline) solve
   // ------------------------------------
 
+  /// The forcings of the nonlinear solve, all non-dimensional and all
+  /// changes from the state given; an empty vector is an absent channel.
+  /// The surface loads and the tide have the properties they have in the
+  /// linear solve (GeneralisedForcing), and the ice one more: it enters
+  /// the flotation condition that places the shorelines.
   struct NonlinearForcing {
+    /// The change of ice thickness. Its grounded part is a direct load
+    /// inside the water budget, on the ocean function the solve finds.
     std::vector<double> iceThicknessChange;
-    std::vector<double> sedimentThicknessChange;
+    /// A direct load that enters the water budget (a hydrological load).
+    std::vector<double> directLoad;
+    /// A direct load outside the water budget (sediment, any other mass).
+    std::vector<double> directLoadOutsideWaterBudget;
+    /// A change of the height of the solid surface that is not the
+    /// body's deformation (a sediment layer: its mass over its density):
+    /// the sea level changes by minus this, and so the shorelines move
+    /// with it. The layer's mass is a direct load beside it.
+    std::vector<double> solidSurfaceChange;
+    /// A given change of the sea surface over the oceans (an
+    /// ocean-dynamic one): it is in the final state's sea level and its
+    /// water in the load, and not in the change returned.
     std::vector<double> dynamicSeaLevelChange;
-    /// Non-dimensional; negative means the default 2300 kg m^-3.
-    double sedimentDensity = -1.0;
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
+    std::vector<std::complex<double>> tangentialResponse;
+    std::vector<std::complex<double>> toroidalResponse;
     double inertiaMomentChange = 0.0;
+    /// A prescribed tidal potential, its coefficients on the surface, as
+    /// GeneralisedForcing::tide: the body answers it through the tidal
+    /// Love numbers, and the potential itself moves the equipotentials,
+    /// so it is in the sea level change, and so in the flotation that
+    /// places the shorelines, and not in the potential returned. Degrees
+    /// from 2 up (kLowestTideDegree); a degree-0 or degree-1 part is
+    /// refused.
+    std::vector<std::complex<double>> tide;
     RotationalFeedback rotation = RotationalFeedback::Full;
+    /// The points held at C = 0 whatever the flotation at this solve, in
+    /// the place of the state's `forcedLand` (empty: none held); absent,
+    /// the state's. A land mask that changes in time gives each solve its
+    /// own; the final state keeps the one the solve held.
+    std::optional<std::vector<char>> forcedLand;
   };
 
   struct NonlinearResponse {
     State finalState;
     Response response;
+    /// The surface load the final state carries relative to the state
+    /// given, direct and induced: the grounded ice, the ocean's water and
+    /// the direct loads, as m >= 0 coefficients.
+    std::vector<std::complex<double>> loadCoefficients;
   };
 
   [[nodiscard]] NonlinearResponse SolveNonlinear(
@@ -310,11 +491,18 @@ class SeaLevelSolver {
   SeaLevelParameters parameters_;  // as given (SI)
   // Non-dimensional Love arrays, degree 0..lmax: channel sums and splits.
   std::vector<double> h_, k_, hU_, kU_, hPhi_, kPhi_;
+  std::vector<double> ht_, kt_;  // the tidal numbers, per degree
+  // The tangential numbers: the load's (channel sum and splits) and the
+  // tide's, zero at degree 0.
+  std::vector<double> l_, lU_, lPhi_, lt_;
+  // The tangential traction's numbers, zero at degree 0.
+  std::vector<double> hV_, lV_, kV_;
   std::vector<double> slcFactor_;  // -(h + k / g), per degree
   // Degree-2 and axial numbers.
   double h2_ = 0, k2_ = 0, ht2_ = 0, kt2_ = 0;
   double hc_ = 0, kc_ = 0, mu_ = 0, mphi_ = 0, mc_ = 0;
-  // Non-dimensional parameters and the rotation factors (pyslfp's names).
+  // Non-dimensional parameters and the rotational feedback factors, as the
+  // constructor forms them.
   double g_ = 0, waterDensity_ = 0, iceDensity_ = 0, radius_ = 0;
   double rotationFactor_ = 0, inertiaFactor_ = 0;
   double axialRotationFactor_ = 0, axialInertiaFactor_ = 0;

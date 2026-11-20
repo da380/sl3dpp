@@ -61,10 +61,13 @@ ElasticPerturbation3D::ElasticPerturbation3D(const Material& material, int lmax,
                  .truncation = options.truncation,
                  .oversampling = options.oversampling,
                  .parallel = options.parallel,
+                 .cache_bytes = options.cache_bytes,
                  .memory_points = MemoryPointSet::Gll,
-                 // The strain components of the spherical decomposition
-                 // divide by r, so the element holding the centre carries
-                 // no nodes: a perturbation starts above it.
+                 // The nodes are GLL nodes, and the first of the element
+                 // holding the centre is r = 0, where the spherical
+                 // components (divided by the radius) are not evaluated:
+                 // the nodes, and a perturbation, start above that
+                 // element.
                  .elements = {material.Mesh().Left(0) == 0.0 ? 1 : 0, -1}}) {
   if (lmax < 0) throw std::invalid_argument("lmax must be non-negative");
 }
@@ -364,6 +367,12 @@ ElasticPerturbation3D::Forces ElasticPerturbation3D::TideForces(
   if (amplitudes.size() != grid.CoefficientSize()) {
     throw std::invalid_argument("a tidal potential lives on the lmax grid");
   }
+  if (lmax_ >= 1 && (amplitudes[SurfaceGrid::Index(1, 0)] != 0.0 ||
+                     amplitudes[SurfaceGrid::Index(1, 1)] != 0.0)) {
+    throw std::invalid_argument(
+        "a tidal potential has no degree-1 part: tides are taken relative "
+        "to the centre of mass");
+  }
   Forces out;
   for (auto l = 0; l <= lmax_; ++l) {
     const auto& op = Spheroidal(l);
@@ -498,7 +507,7 @@ ElasticPerturbation3D::SurfaceToroidal(const Solutions& x) const {
   return out;
 }
 
-ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
+ElasticPerturbation3D::ModuliFields ElasticPerturbation3D::ForceTranspose(
     const Solutions& y, const Solutions& x) const {
   const auto& coupling = coupling_;
   const auto values = coupling.GridValueCount();
@@ -527,7 +536,7 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
   const auto ex = strainOf(x);
   const auto Dy = dilatationOf(y);
   const auto Dx = dilatationOf(x);
-  Kernels out;
+  ModuliFields out;
   out.kappa.assign(values, 0.0);
   out.mu.assign(values, 0.0);
   detail::ForEach(options_.parallel, nodes, [&](std::size_t n) {
@@ -535,12 +544,11 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
     const auto base = coupling.FieldOffset(rn);
     const auto size = coupling.FieldSizeOf(rn);
     const auto rr = coupling.RadiusOfNode(rn);
-    const auto wq = coupling.WeightOfNode(rn);
     for (auto xg = std::size_t{0}; xg < size; ++xg) {
       const auto i = base + xg;
-      out.kappa[i] = wq * Dy[i] * Dx[i];
-      out.mu[i] = wq * rr * rr *
-                  (12.0 * ey.r[i] * ex.r[i] +
+      // per unit volume: the node's weight w r^2 divided out
+      out.kappa[i] = Dy[i] * Dx[i] / (rr * rr);
+      out.mu[i] = (12.0 * ey.r[i] * ex.r[i] +
                    8.0 * (ey.c[1][i] * std::conj(ex.c[1][i])).real() +
                    4.0 * (ey.c[0][i] * std::conj(ex.c[0][i])).real());
     }

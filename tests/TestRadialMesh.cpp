@@ -142,7 +142,8 @@ TEST(RadialMesh, NodalFieldsCarryOneSidedValues) {
   EXPECT_NEAR(rho[below * n + (n - 1)], lower, 1e-12);
   EXPECT_NEAR(rho[(below + 1) * n + 0], upper, 1e-12);
 
-  // Nodal gravity matches the model's at the nodes.
+  // Nodal gravity matches the model's at the nodes: the same evaluation,
+  // to the last bits.
   auto gravity = mesh.NodalGravity(model);
   const auto radii = mesh.Radii();
   for (auto i = std::size_t{0}; i < radii.size(); i += 7) {

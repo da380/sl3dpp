@@ -73,11 +73,11 @@ option(SL3DPP_WITH_MPI
 include(FetchContent)
 
 set(SL3DPP_NUMERICCONCEPTS_PIN "e5ec506ab510b0790f94dded6196ab4df8979259")
-set(SL3DPP_GAUSSQUAD_PIN "c95bac5339e47ee6d8722dd15f1ab7cb031382bd")
-set(SL3DPP_INTERPOLATION_PIN "43619e2627fe302e244d321c994d5b5cc717cd74")
-set(SL3DPP_FFTWPP_PIN "b3af30eaf3f06760cd1d97df4386af1a0c75dd76")
+set(SL3DPP_GAUSSQUAD_PIN "bd4f51c2330dfd4901b141e61f8a136f70e96d2a")
+set(SL3DPP_INTERPOLATION_PIN "0935579fbfc69fea3ddf9850abb691d56a5514b9")
+set(SL3DPP_FFTWPP_PIN "aca248ba98cd3e4e73cb3713c6da5882678003b5")
 set(SL3DPP_GSHTRANS_PIN "c71313c52cd22a53b48b25302ab4afc20e158e32")
-set(SL3DPP_PLANETMODEL_PIN "8cc20e95894cbd61a83b9860119250fe69acb3a8")  # v1.5.0
+set(SL3DPP_PLANETMODEL_PIN "e43027b5e142363a5fa89a6ec3ad940ccdbdbbf2")  # v2.1.1
 
 # The revision each library is fetched at: the override when one is set,
 # else the pin.
@@ -167,6 +167,7 @@ add_library(sl3dpp STATIC
   src/AdjointSecondOrder.cpp
   src/AdjointDiscrete3D.cpp
   src/ElasticPerturbation3D.cpp
+  src/LateralKernels.cpp
   src/TangentLinear.cpp
   src/TangentLinear3D.cpp
   src/BandSolvers.cpp
@@ -183,15 +184,22 @@ add_library(sl3dpp STATIC
   src/io/FieldHistory.cpp
   src/io/ModelViscosity.cpp
   src/io/ModelModuli.cpp
+  src/io/ModelField.cpp
+  src/io/TrajectoryStore.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
   src/Measurements.cpp
+  src/Fault.cpp
+  src/PointSource.cpp
+  src/ToroidalViscoelastic.cpp
   src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp
   src/SeaLevel.cpp
   src/Shorelines.cpp
+  src/StepRecipe.cpp
   src/ToroidalOperator.cpp
+  src/TrajectoryCursor.cpp
   src/Version.cpp
   src/Viscoelastic.cpp
   src/Viscoelastic3D.cpp)

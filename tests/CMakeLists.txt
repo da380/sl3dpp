@@ -32,6 +32,14 @@ sl3dpp_add_test(TestAdjoint)
 sl3dpp_add_test(TestAdjoint3D)
 sl3dpp_add_test(TestTangentLinear)
 sl3dpp_add_test(TestSecondOrderAdjoint)
+sl3dpp_add_test(TestTrajectoryCursor)
+sl3dpp_add_test(TestStaticDerivatives)
+sl3dpp_add_test(TestLateralKernels)
+sl3dpp_add_test(TestUnevenSteps)
+sl3dpp_add_test(TestSdirk2Derivatives)
+sl3dpp_add_test(TestSdirk2Continuous)
+sl3dpp_add_test(TestMigratingDerivatives)
+sl3dpp_add_test(TestMigratingTide)
 sl3dpp_add_test(TestTangentLinear3D)
 sl3dpp_add_test(TestSecondOrderAdjoint3D)
 sl3dpp_add_test(TestDiscreteAdjoint3D)
@@ -46,24 +54,54 @@ sl3dpp_add_test(TestFixtures)
 sl3dpp_add_test(TestMemoryPoints)
 sl3dpp_add_test(TestEvolutionResume)
 sl3dpp_add_test(TestMeasurements)
+sl3dpp_add_test(TestPointSource)
+sl3dpp_add_test(TestFault)
+sl3dpp_add_test(TestWithoutGravity)
 if(TARGET sl3d_app)
   sl3dpp_add_test(TestApps)
   target_link_libraries(TestApps PRIVATE sl3d_app)
+  sl3dpp_add_test(TestAppsFaultFile)
+  target_link_libraries(TestAppsFaultFile PRIVATE sl3d_app)
+  sl3dpp_add_test(TestAppsDecks)
+  target_link_libraries(TestAppsDecks PRIVATE sl3d_app)
+  sl3dpp_add_test(TestAppsTangent)
+  target_link_libraries(TestAppsTangent PRIVATE sl3d_app)
+  sl3dpp_add_test(TestAppsSecondOrder)
+  target_link_libraries(TestAppsSecondOrder PRIVATE sl3d_app)
+endif()
+# The program refuses the words that are not commands but name what one
+# runs, the message naming the command to run instead.
+if(TARGET sl3d)
+  foreach(pair IN ITEMS sea-level:solve response:solve kernel1d:kernel)
+    string(REPLACE ":" ";" pair "${pair}")
+    list(GET pair 0 word)
+    list(GET pair 1 command)
+    add_test(NAME AppsProgram.RefusesTheWord.${word}
+             COMMAND $<TARGET_FILE:sl3d> ${word} config.json)
+    set_tests_properties(AppsProgram.RefusesTheWord.${word} PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        "^sl3d: \"${word}\" is not a command: [^\n]*`sl3d ${command} <config.json>`")
+  endforeach()
 endif()
 sl3dpp_add_test(TestFieldHistory)
 sl3dpp_add_test(TestModelViscosity)
 sl3dpp_add_test(TestModelModuli)
+sl3dpp_add_test(TestModelField)
 sl3dpp_add_test(TestKernelWriter)
+sl3dpp_add_test(TestTrajectoryStore)
 sl3dpp_add_test(TestUnitsParity)
 sl3dpp_add_test(TestGaussMemory)
 sl3dpp_add_test(TestGaussMemory3D)
 sl3dpp_add_test(TestInitialSeaLevel)
+sl3dpp_add_test(TestCalibratedKernels)
 sl3dpp_add_test(TestSubstructure)
 sl3dpp_add_test(TestNodeBlocks)
 sl3dpp_add_test(TestRadialRanks)
 
 # The distributed solves, under mpiexec on 2, 3 and 4 ranks (one thread
-# each), when the library is built with SL3DPP_WITH_MPI.
+# each), when the library is built with SL3DPP_WITH_MPI. Each program is
+# told the rank count asked of mpiexec and ends where its world holds
+# another (RankListener.hpp).
 if(SL3DPP_WITH_MPI)
   add_executable(TestDistributed TestDistributed.cpp)
   target_link_libraries(TestDistributed PRIVATE sl3dpp::sl3dpp GTest::gtest)
@@ -75,8 +113,23 @@ if(SL3DPP_WITH_MPI)
               ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestDistributed>
               ${MPIEXEC_POSTFLAGS})
     set_tests_properties(Distributed.Ranks${ranks} PROPERTIES
-      ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
+      ENVIRONMENT "OMP_NUM_THREADS=1;SL3DPP_TEST_RANKS=${ranks}"
+      PROCESSORS ${ranks})
   endforeach()
+  # A fatal failure on one rank ends every rank (RankListener.hpp) where
+  # the others would wait on its collectives: the test that throws on the
+  # first rank alone ends, the listener's words in its output, well inside
+  # its time.
+  add_test(NAME Distributed.AFailureOnOneRankEndsEveryRank
+    COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+            ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestDistributed>
+            --gtest_also_run_disabled_tests
+            --gtest_filter=Distributed.DISABLED_AThrowOnOneRankEndsEveryRank
+            ${MPIEXEC_POSTFLAGS})
+  set_tests_properties(Distributed.AFailureOnOneRankEndsEveryRank PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;SL3DPP_TEST_RANKS=2"
+    PROCESSORS 2 TIMEOUT 60
+    PASS_REGULAR_EXPRESSION "every rank is ended: the other ranks would wait")
   # ... and sl3d's 3D commands over 2 and 3 ranks.
   if(TARGET sl3d_app)
     add_executable(TestAppsDistributed TestAppsDistributed.cpp)
@@ -89,7 +142,8 @@ if(SL3DPP_WITH_MPI)
                 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestAppsDistributed>
                 ${MPIEXEC_POSTFLAGS})
       set_tests_properties(AppsDistributed.Ranks${ranks} PROPERTIES
-        ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
+        ENVIRONMENT "OMP_NUM_THREADS=1;SL3DPP_TEST_RANKS=${ranks}"
+        PROCESSORS ${ranks})
     endforeach()
   endif()
 endif()

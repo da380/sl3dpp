@@ -1,13 +1,16 @@
 """The viscoelastic GIA example: run ExampleEvolution first, then
-`poetry run python plot_evolution.py` from build/examples."""
+`poetry run python plot_evolution.py` from build/examples. Reads
+output/library/evolution/evolution.txt and writes
+figures/library/evolution.png."""
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plotutil import Example, world_map, mark_sites, plot_field
+from plotutil import (Example, library_figure, library_output, mark_sites,
+                      plot_field, save_figure, world_map)
 
-ex = Example("evolution.txt")
+ex = Example(library_output("evolution", "evolution.txt"))
 fig = plt.figure(figsize=(11, 7))
 
 # The site histories: elastic jump during the melt, viscous creep after.
@@ -50,5 +53,4 @@ fig.colorbar(mesh, ax=ax, shrink=0.7)
 
 fig.suptitle("1D viscoelastic GIA: West Antarctic melt over 5 kyr, relaxation to 15 kyr")
 fig.tight_layout()
-fig.savefig("evolution.png", dpi=180)
-print("wrote evolution.png")
+save_figure(fig, library_figure("evolution"))

@@ -1,0 +1,283 @@
+"""Shared pieces of the make_*.py scripts, which write inputs for the sl3d
+program with planetmodel and pyslfp: the two radial deck formats sl3d
+reads, a deck read back as a planetmodel model, an angular grid from
+latitude and longitude arrays, the surface files of ice histories,
+present-day states and loads, each written beside its target and replacing
+it only where the content changed (keep_unchanged), and the check that a
+pyslfp data set is on disk before anything is downloaded.
+
+Every path is relative to the current directory, build/examples, whose
+data/ holds the examples' inputs (docs/sl3d-configs.md describes the
+files sl3d reads).
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+from planetmodel import (MAXWELL, AngularGrid, DeckFormat, Dimensions,
+                         MaxwellDeckModel, constant_field, equiangular,
+                         read_deck, sample_deck, write_deck)
+from planetmodel.surfacefile import SurfaceVariable, write_surface
+from planetmodel.units import LENGTH, Scales
+
+DATA = Path("data")
+KYR = 1.0e3 * 365.25 * 86400.0  # s: sl3d's kiloyear, of 365.25-day years
+SURFACE_DENSITY = Dimensions(mass=1, length=-2)  # kg m^-2
+
+# sl3d's "elastic" deck: r rho vpv vsv vph vsh eta, SI, no header lines.
+ELASTIC = DeckFormat(("rho", "vpv", "vsv", "vph", "vsh", "eta"),
+                     name="elastic", header_lines=0)
+
+
+def wrote(path, what: str = "") -> Path:
+    """Says that a file was written."""
+    print(f"wrote {path}" + (f" ({what})" if what else ""))
+    return Path(path)
+
+
+# ------------------------------------------------- unchanged inputs kept
+def _netcdf_content(group, root: bool = True) -> dict:
+    """A netCDF group's content, comparable: its attributes (the root's
+    `created` stamp aside), dimensions, variables (type, dimensions,
+    attributes, values) and subgroups."""
+    out = {}
+    for name in group.ncattrs():
+        if root and name == "created":
+            continue
+        out[f"attribute {name}"] = repr(group.getncattr(name))
+    for name, dim in group.dimensions.items():
+        out[f"dimension {name}"] = len(dim)
+    for name, var in group.variables.items():
+        var.set_auto_maskandscale(False)
+        values = np.asarray(var[...])
+        out[f"variable {name}"] = (
+            str(var.dtype), var.dimensions,
+            tuple((a, repr(var.getncattr(a))) for a in var.ncattrs()),
+            values.tobytes() if values.dtype != object else repr(values.tolist()))
+    for name, sub in group.groups.items():
+        for key, value in _netcdf_content(sub, False).items():
+            out[f"{name}/{key}"] = value
+    return out
+
+
+def same_but_created(a, b) -> bool:
+    """Whether two files hold the same content: two netCDF files the same
+    dimensions, variables, values and attributes but for the root group's
+    `created` stamp; any other two the same bytes."""
+    a, b = Path(a), Path(b)
+    if a.suffix != ".nc":
+        return a.read_bytes() == b.read_bytes()
+    from netCDF4 import Dataset
+    with Dataset(a) as first, Dataset(b) as second:
+        return _netcdf_content(first) == _netcdf_content(second)
+
+
+def keep_unchanged(path, write) -> tuple[Path, bool]:
+    """Writes a generated input through `write(target)` beside `path`
+    (<stem>.new<suffix>) and replaces `path` with it only when the content
+    changed (same_but_created): an unchanged input keeps its bytes, and so
+    the hash a run takes of its inputs, and the run's checkpoints and
+    trajectory stores stay its own. Returns the path and whether it was
+    replaced."""
+    path = Path(path)
+    beside = path.with_name(f"{path.stem}.new{path.suffix}")
+    write(beside)
+    if path.exists() and same_but_created(beside, path):
+        beside.unlink()
+        print(f"kept, unchanged, {path}")
+        return path, False
+    beside.replace(path)
+    return path, True
+
+
+# ------------------------------------------------------------------ decks
+def with_viscosity(model, layers, viscosity: float):
+    """The model with a constant viscosity (Pa s) on the layers given, each
+    made isotropic first, its moduli replaced by their Voigt averages: sl3d
+    makes every layer holding a viscosity a Maxwell body, and refuses one
+    that is transversely isotropic."""
+    iso = model.isotropic()
+    for i in layers:
+        for name in ("kappa", "mu"):
+            model = model.with_field(i, name, iso.layer(i)[name], replace=True)
+        model = model.with_field(i, "viscosity",
+                                 constant_field(model.layer(i).interval,
+                                                viscosity, name="viscosity"))
+    return model
+
+
+def write_decks(model, stem) -> tuple[Path, Path]:
+    """The model as sl3d's two radial decks: <stem>.gia.deck, planetmodel's
+    Maxwell (GIA) format with the viscosity `nan` in elastic and fluid
+    layers ("format": "maxwell"), and <stem>.elastic.deck, the elastic
+    structure alone ("format": "elastic")."""
+    gia, _ = keep_unchanged(f"{stem}.gia.deck", lambda target: write_deck(
+        target, sample_deck(model, MAXWELL.columns), MAXWELL))
+    elastic, _ = keep_unchanged(f"{stem}.elastic.deck", lambda target: write_deck(
+        target, sample_deck(model, ELASTIC.columns), ELASTIC))
+    return wrote(gia), wrote(elastic)
+
+
+def maxwell_times(path):
+    """The Maxwell times of a Maxwell (GIA) deck's viscous layers, those of
+    one viscosity next to each other taken together, from the surface
+    down: (top depth km, bottom depth km, viscosity Pa s, shortest and
+    longest Maxwell time eta / mu over the knots in years), mu the Voigt
+    average shear modulus."""
+    data = np.genfromtxt(path, skip_header=2, comments="#")
+    r, rho, vpv, vsv, vph, vsh, eta, viscosity = data.T
+    big_a, big_c = rho * vph**2, rho * vpv**2
+    big_l, big_n = rho * vsv**2, rho * vsh**2
+    big_f = eta * (big_a - 2.0 * big_l)
+    mu = (big_a + big_c - 2.0 * big_f + 5.0 * big_n + 6.0 * big_l) / 15.0
+    tau = viscosity / mu / (KYR / 1.0e3)
+    surface = r[-1]
+    groups = []  # (bottom radius, top radius, viscosity, shortest, longest)
+    for knots in np.split(np.arange(r.size),
+                          np.flatnonzero(np.diff(r) == 0.0) + 1):
+        if not np.all(np.isfinite(viscosity[knots])):
+            continue
+        group = (r[knots[0]], r[knots[-1]], viscosity[knots[0]],
+                 tau[knots].min(), tau[knots].max())
+        if groups and groups[-1][2] == group[2] and groups[-1][1] == group[0]:
+            last = groups[-1]
+            group = (last[0], group[1], group[2], min(last[3], group[3]),
+                     max(last[4], group[4]))
+            groups[-1] = group
+        else:
+            groups.append(group)
+    return [((surface - hi) / 1e3, (surface - lo) / 1e3, float(v),
+             float(shortest), float(longest))
+            for lo, hi, v, shortest, longest in reversed(groups)]
+
+
+def read_deck_model(path):
+    """A deck sl3d reads, as a planetmodel model, its format from its name:
+    *.elastic.deck the six columns with no header, anything else the
+    Maxwell format (two header lines, a remark after the column names
+    allowed, as data/prem8.gia.deck has)."""
+    if Path(path).name.endswith(".elastic.deck"):
+        return MaxwellDeckModel(read_deck(path, ELASTIC), kinds={})
+    return MaxwellDeckModel(read_deck(path, MAXWELL.columns, header_lines=2))
+
+
+# ------------------------------------------------------- surface files
+def distance_deg(lat, lon, lat0: float, lon0: float):
+    """Great-circle distance in degrees from (lat0, lon0), all in degrees."""
+    lat, lon = np.deg2rad(lat), np.deg2rad(lon)
+    lat0, lon0 = np.deg2rad(lat0), np.deg2rad(lon0)
+    c = (np.sin(lat) * np.sin(lat0)
+         + np.cos(lat) * np.cos(lat0) * np.cos(lon - lon0))
+    return np.rad2deg(np.arccos(np.clip(c, -1.0, 1.0)))
+
+
+def grid_from_latlon(lat_deg, lon_deg):
+    """The planetmodel grid of a regular latitude-longitude grid given by
+    its two axes in degrees, in any order (latitude ascending or
+    descending, longitude in [-180, 180) or [0, 360)), and a function that
+    reorders an (..., nlat, nlon) array onto it (colatitude increasing,
+    longitude increasing from its smallest value in [0, 360))."""
+    lat, lon = np.asarray(lat_deg, float), np.asarray(lon_deg, float)
+    flip = lat[0] < lat[-1]
+    wrapped = np.mod(lon, 360.0)
+    roll = int(np.argmin(wrapped))
+    theta = np.deg2rad(90.0 - (lat[::-1] if flip else lat))
+    phi = np.deg2rad(np.roll(wrapped, -roll))
+    grid = equiangular(lat.size, lon.size, phi0=float(phi[0]))
+    if not (np.allclose(grid.colatitudes, theta, atol=1e-12)
+            and np.allclose(grid.longitudes, phi, atol=1e-12)):
+        grid = AngularGrid(theta, phi)  # not cell-centred: a custom grid
+
+    def orient(a):
+        a = np.asarray(a, float)
+        return np.roll(a[..., ::-1, :] if flip else a, -roll, axis=-1)
+
+    return grid, orient
+
+
+def write_ice_history(path, grid, dates_kyr_bp, ice_thickness, topography,
+                      *, title: str):
+    """An ice history sl3d reads as a `thickness` term of
+    `forcing.ice_change` (and, holding the topography, as the state's
+    `ocean.ice` and `ocean.topography` at one date): node fields in metres,
+    linear in time, on a time axis in kiloyears relative to the present
+    (negative in the past) as pyslfp's export_ice_history writes. The arrays are
+    (ntime, nlat, nlon) on the grid, the dates in kyr BP in any order, at
+    least two of them."""
+    dates = np.asarray(dates_kyr_bp, float)
+    order = np.argsort(-dates)  # oldest first: the time axis increases
+    node = dict(support="node", time_interpolation="linear",
+                dimensions=LENGTH)
+    fields = {
+        "ice_thickness": SurfaceVariable(np.asarray(ice_thickness)[order],
+                                         meaning="ice thickness", **node),
+        "topography": SurfaceVariable(
+            np.asarray(topography)[order],
+            meaning="surface height above sea level, the ice included",
+            **node)}
+    return keep_unchanged(path, lambda target: write_surface(
+        target, grid, fields=fields, title=title, source=Path(__file__).name,
+        time=-dates[order], scales=Scales(time=KYR),
+        meta={"time": "kiloyears relative to the present, "
+                      "negative in the past"}))[0]
+
+
+def write_state(path, grid, ice_thickness, topography, *, title: str):
+    """A present-day state sl3d reads as `ocean.ice` and
+    `ocean.topography`: static `ice_thickness` and `topography`, metres,
+    (nlat, nlon) on the grid."""
+    fields = {
+        "ice_thickness": SurfaceVariable(ice_thickness, dimensions=LENGTH,
+                                         meaning="ice thickness"),
+        "topography": SurfaceVariable(
+            topography, dimensions=LENGTH,
+            meaning="surface height above sea level, the ice included")}
+    return keep_unchanged(path, lambda target: write_surface(
+        target, grid, fields=fields, title=title,
+        source=Path(__file__).name))[0]
+
+
+def write_load(path, grid, load, *, times_kyr=None, title: str):
+    """A surface mass density (kg m^-2) for a `field` load term of `sl3d
+    solve`, named `load`: static, (nlat, nlon), or with `times_kyr` a
+    node field linear in time, (ntime, nlat, nlon), on a time axis in
+    kiloyears."""
+    if times_kyr is None:
+        variable = SurfaceVariable(load, dimensions=SURFACE_DENSITY,
+                                   meaning="surface mass density")
+        return keep_unchanged(path, lambda target: write_surface(
+            target, grid, fields={"load": variable}, title=title,
+            source=Path(__file__).name))[0]
+    variable = SurfaceVariable(load, support="node",
+                               time_interpolation="linear",
+                               dimensions=SURFACE_DENSITY,
+                               meaning="surface mass density")
+    return keep_unchanged(path, lambda target: write_surface(
+        target, grid, fields={"load": variable}, title=title,
+        source=Path(__file__).name, time=np.asarray(times_kyr, float),
+        scales=Scales(time=KYR),
+        meta={"time": "kiloyears on the run's clock"}))[0]
+
+
+# --------------------------------------------------------- data on disk
+# The unpacked sizes of pyslfp's ice data sets, for the message below.
+PYSLFP_SIZES = {"ICE7G": "about 24 MB to download, 37 MB unpacked",
+                "ICE6G": "72 MB unpacked", "ICE5G": "30 MB unpacked"}
+
+
+def need_pyslfp_data(key: str, download: bool) -> None:
+    """Stops, saying what would be downloaded and where, unless pyslfp's
+    data set `key` (ICE7G, ICE6G, ICE5G) is already on disk or `download`
+    allows pyslfp to fetch it."""
+    from pyslfp.data.config import DATADIR
+    from pyslfp.data.downloader import DATASET_URLS, FOLDER_MAP
+
+    folder = DATADIR / FOLDER_MAP[key]
+    if download or (folder.is_dir() and any(folder.iterdir())):
+        return
+    raise SystemExit(
+        f"pyslfp's {key} data are not in {folder}. Getting them downloads "
+        f"{DATASET_URLS[key]} ({PYSLFP_SIZES.get(key, 'tens of MB')}) "
+        f"into pyslfp's data directory, {DATADIR}; run again with "
+        "--download to do so.")

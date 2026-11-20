@@ -22,9 +22,11 @@
  * `node` field interpolated between its nodes or read from the latest
  * one, an `interval` field from the interval holding the time, an
  * `instant` field at its stored instants alone, a `static` field at any
- * time. Outside a field's span its end values are held by default (the
- * behaviour of pyslfp's `IceNG`); `hold_outside = false` refuses such
- * times instead.
+ * time. Outside a field's span its end values are held by default;
+ * `hold_outside = false` refuses such times instead. A `previous` field
+ * and an `interval` field are step functions of time: `Jumps` says where
+ * they jump, `Values` serves the right limit there and `ValuesBefore` the
+ * left.
  *
  * Fields come back colatitude-major on the grid given at `Read`, the
  * library's storage order.
@@ -54,6 +56,20 @@ struct FieldHistoryOptions {
   /// time instead. Fields served at stored times alone (an `instant`
   /// field, a `node` field stating no time rule) always refuse.
   bool hold_outside = true;
+  /// The tolerance a time is read on a stored time with, relative to the
+  /// scale of the axis (planetmodel::TimeRowsAt's `time_rtol`): a time
+  /// that close to a stored time is that time, under every rule.
+  double time_rtol = 1e-12;
+};
+
+/// Where a field's values jump in time: a `node` field read by `previous`
+/// at each stored time after the first, an `interval` field at each node
+/// between its first and its last (its values held from each to the
+/// next), SI seconds; none for a field continuous in time. With the
+/// tolerance a time is read on a stored time with (SI seconds).
+struct FieldJumps {
+  std::vector<double> times;
+  double tolerance = 0.0;
 };
 
 class FieldHistory {
@@ -75,10 +91,35 @@ class FieldHistory {
   /// has no time axis.
   [[nodiscard]] std::optional<std::pair<double, double>> Span() const;
 
+  /// Whether a field is static, the same at every time: one of `static`
+  /// support, as every field of a file without a time axis is, beside
+  /// fields on the file's time axis in a file with one. Throws
+  /// std::runtime_error naming a field the file lacks.
+  [[nodiscard]] bool Static(std::string_view name) const;
+
   /// A field's SI values at an SI time, colatitude-major on the grid
-  /// given at Read; a static field ignores the time.
+  /// given at Read; a static field ignores the time. At a jump (Jumps)
+  /// the values from it on, the right limit.
   [[nodiscard]] std::vector<double> Values(std::string_view name,
                                            double time) const;
+
+  /// The left limit of a field at an SI time: at a jump (a time within
+  /// the tolerance of one of Jumps' times) the values of the slice
+  /// before it, elsewhere Values'.
+  [[nodiscard]] std::vector<double> ValuesBefore(std::string_view name,
+                                                 double time) const;
+
+  /// Where a field jumps (FieldJumps). Throws std::runtime_error naming a
+  /// field the file lacks.
+  [[nodiscard]] FieldJumps Jumps(std::string_view name) const;
+
+  /// Where a field of a surface file jumps, read from the file without
+  /// resampling it (its time axis and the field's support and rule
+  /// alone), under the tolerance `options` give; refused as Read refuses
+  /// the file, or naming a field it lacks.
+  [[nodiscard]] static std::expected<FieldJumps, IoError> JumpsIn(
+      const std::filesystem::path& path, std::string_view name,
+      const FieldHistoryOptions& options = {});
 
   /// The file's `source` attribute: the code that wrote it.
   [[nodiscard]] const std::string& Source() const;

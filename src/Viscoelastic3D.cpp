@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/detail/AndersonMixer.hpp"
 #include "sl3dpp/detail/LateralSolve.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
@@ -132,6 +133,24 @@ void AdvanceMemory(GridCoupling::TensorField& m,
     m.c[1][i] += beta[i] * d.c[1][i];
     m.r[i] += beta[i] * d.r[i];
   });
+}
+
+// The tide channel's columns at a degree and time. Its degree-1 columns
+// must vanish: a tide is taken relative to the centre of mass
+// (kLowestTideDegree), the channel's degree 0 the spherical mean of a
+// centrifugal change.
+std::optional<std::vector<std::complex<double>>> TideColumns(
+    const Viscoelastic3D::LoadCallable3D& tide, int l, double t) {
+  auto columns = tide(l, t);
+  if (columns && l == 1 &&
+      std::ranges::any_of(*columns, [](const std::complex<double>& v) {
+        return v != 0.0;
+      })) {
+    throw std::invalid_argument(
+        "a tide channel has no degree-1 part: tides are taken relative to "
+        "the centre of mass, its degree-1 columns must vanish");
+  }
+  return columns;
 }
 
 }  // namespace
@@ -347,6 +366,88 @@ void Viscoelastic3D::WeightCompanions(GridCoupling::TensorField& field) const {
   }
 }
 
+RelaxationSite Viscoelastic3D::ShortestRelaxation() const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  // this process's shortest, as (itau, -r, -theta, -phi) is largest: of
+  // equal times the innermost point, then the least colatitude and
+  // longitude (RelaxationSite)
+  auto best = std::array<double, 4>{0.0, 0.0, 0.0, 0.0};
+  auto site = RelaxationSite{};
+  auto holder = -1;  // the node holding it
+  for (auto k = std::size_t{0}; k < itau_.size(); ++k) {
+    for (auto node = 0; node < coupling_.NodeCount(); ++node) {
+      if (!(muBranch_[k][node] > 0.0)) continue;
+      const auto& sampling = coupling_.GridOf(node);
+      const auto r = coupling_.RadiusOfNode(node);
+      auto x = coupling_.FieldOffset(node);
+      for (const auto theta : sampling.CoLatitudes()) {
+        for (const auto phi : sampling.Longitudes()) {
+          const auto candidate =
+              std::array<double, 4>{itau_[k][x++], -r, -theta, -phi};
+          if (!(candidate[0] > 0.0) ||
+              (holder >= 0 && !(candidate > best))) {
+            continue;
+          }
+          best = candidate;
+          holder = node;
+          site.branch = k;
+          site.radius = r;
+          site.colatitude = theta;
+          site.longitude = phi;
+        }
+      }
+    }
+  }
+  if (holder >= 0) {
+    site.element = coupling_.ElementOfNode(holder);
+    site.layer = mesh.LayerOf(site.element);
+    const auto first = coupling_.FieldOffset(holder);
+    const auto values = std::span(itau_[site.branch])
+                            .subspan(first, coupling_.FieldSizeOf(holder));
+    const auto [low, high] = std::ranges::minmax(values);
+    site.lateral = low != high;
+  }
+  const auto& collectives = options_.collectives;
+  if (collectives.Distributed()) {
+    // the largest (itau, -r, -theta, -phi) over the processes, entry by
+    // entry among those holding the larger ones, then the holder's
+    // branch, element, layer and flag (-1 elsewhere)
+    const auto none = -std::numeric_limits<double>::infinity();
+    auto global = std::array<double, 4>{none, none, none, none};
+    auto mine = holder >= 0;
+    for (auto c = std::size_t{0}; c < best.size(); ++c) {
+      auto value = mine ? best[c] : none;
+      collectives.max(std::span(&value, 1));
+      global[c] = value;
+      mine = mine && best[c] == value;
+    }
+    auto rest = std::array<double, 4>{-1.0, -1.0, -1.0, -1.0};
+    if (mine) {
+      rest = {static_cast<double>(site.branch),
+              static_cast<double>(site.element),
+              static_cast<double>(site.layer), site.lateral ? 1.0 : 0.0};
+    }
+    collectives.max(rest);
+    if (!(global[0] > 0.0)) return RelaxationSite{};
+    site.branch = static_cast<std::size_t>(rest[0]);
+    site.element = static_cast<int>(rest[1]);
+    site.layer = static_cast<int>(rest[2]);
+    site.lateral = rest[3] > 0.0;
+    best = global;
+    site.radius = -global[1];
+    site.colatitude = -global[2];
+    site.longitude = -global[3];
+  } else if (holder < 0) {
+    return RelaxationSite{};
+  }
+  site.time = 1.0 / best[0];
+  if (!site.lateral) {
+    site.colatitude = 0.0;
+    site.longitude = 0.0;
+  }
+  return site;
+}
+
 Viscoelastic3D::~Viscoelastic3D() = default;
 Viscoelastic3D::Viscoelastic3D(Viscoelastic3D&&) noexcept = default;
 Viscoelastic3D& Viscoelastic3D::operator=(Viscoelastic3D&&) noexcept = default;
@@ -357,6 +458,37 @@ Viscoelastic3D::State Viscoelastic3D::ZeroState() const {
     state.m.push_back(coupling_.ZeroTensor());
   }
   return state;
+}
+
+Viscoelastic3D::State Viscoelastic3D::StageState(
+    std::span<const std::pair<double, const State*>> terms) const {
+  if (terms.empty()) {
+    throw std::invalid_argument("a stage's state takes at least one state");
+  }
+  const auto values = coupling_.GridValueCount();
+  State out;
+  out.t = terms.front().second->t;
+  for (auto k = std::size_t{0}; k < terms.front().second->m.size(); ++k) {
+    auto tensor = TakeTensor();
+    detail::ForEach(options_.parallel, values, [&](std::size_t i) {
+      auto c0 = Complex{}, c1 = Complex{};
+      auto r = 0.0;
+      for (const auto& [a, state] : terms) {
+        const auto& m = state->m[k];
+        c0 += a * m.c[0][i];
+        c1 += a * m.c[1][i];
+        r += a * m.r[i];
+      }
+      tensor.c[0][i] = c0;
+      tensor.c[1][i] = c1;
+      tensor.r[i] = r;
+    });
+    out.m.push_back(std::move(tensor));
+  }
+  const auto& last = *terms.back().second;
+  out.strain = last.strain;
+  out.strainCoefficients = last.strainCoefficients;
+  return out;
 }
 
 const DegreeOperator& Viscoelastic3D::Spheroidal(int l) const {
@@ -524,11 +656,13 @@ Viscoelastic3D::ApplyLateralOperator(
   auto [sph, tor] = lateralForce(x);
   auto tasks = std::vector<Task>{};
   for (const auto& [l, xl] : x.spheroidal) {
-    tasks.push_back({.l = l, .x = &xl, .sph = &spheroidal(l), .out = &sph.at(l)});
+    tasks.push_back(
+        {.l = l, .x = &xl, .sph = &spheroidal(l), .real = {}, .out = &sph.at(l)});
   }
   for (const auto& [l, wl] : x.toroidal) {
     if (l < 1) continue;
-    tasks.push_back({.l = l, .x = &wl, .tor = &toroidal(l), .out = &tor.at(l)});
+    tasks.push_back(
+        {.l = l, .x = &wl, .tor = &toroidal(l), .real = {}, .out = &tor.at(l)});
   }
   // the real pairs, as shares when distributed, summed in one
   // collective for every degree (the collective serial, in the
@@ -691,7 +825,7 @@ void Viscoelastic3D::AddChannelForces(
       }
     };
     if (load) add(load(l, t), system.Load());
-    if (tide) add(tide(l, t), system.Tide(l == 0 ? 2 : -1));
+    if (tide) add(TideColumns(tide, l, t), system.Tide(l == 0 ? 2 : -1));
   }
 }
 
@@ -934,7 +1068,7 @@ void Viscoelastic3D::AddUnitChannels(
       }
     };
     if (load) add(load(l, t), 0);
-    if (tide) add(tide(l, t), 1);
+    if (tide) add(TideColumns(tide, l, t), 1);
   }
 }
 
@@ -1094,6 +1228,13 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
     throw std::invalid_argument(
         "the 3D step is implicit: ExponentialTrapezoid or BackwardEuler");
   }
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(
+        "an opened step is one stage, ExponentialTrapezoid or BackwardEuler: "
+        "Sdirk2 is opened stage by stage, each a BackwardEuler step "
+        "(StepRecipe.hpp)");
+  }
+  scheme = ZeroLengthScheme(scheme);
   const auto values = coupling_.GridValueCount();
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
   const auto K = state.m.size();
@@ -1265,7 +1406,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
   const auto toroidal = [&](int l) -> const ToroidalOperator& {
     return op.FlavourToroidal(flavour, l);
   };
-  if (extraSpheroidal_.empty() && analysed_.scalars.empty()) {
+  if (extraSpheroidal_.empty() && extraToroidal_.empty() &&
+      analysed_.scalars.empty()) {
     return op.SolveAll(analysed_, spheroidal, toroidal);
   }
   auto sph = op.SpheroidalForces(analysed_, spheroidal);
@@ -1273,8 +1415,12 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
     auto& b = sph.at(l);
     for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
   }
-  return op.SolveForces(sph, coupling.ToroidalForce(analysed_, toroidal),
-                        spheroidal, toroidal);
+  auto tor = coupling.ToroidalForce(analysed_, toroidal);
+  for (const auto& [l, f] : extraToroidal_) {
+    auto& b = tor.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+  }
+  return op.SolveForces(sph, tor, spheroidal, toroidal);
 }
 
 std::pair<Viscoelastic3D::OpenStep::Fields, Viscoelastic3D::OpenStep::Fields>
@@ -1313,10 +1459,15 @@ Viscoelastic3D::OpenStep::Forces(const LoadCallable3D& load,
     for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
   }
   op.AddChannelForces(sph, t_, load, tide, spheroidal);
-  return {std::move(sph),
-          op.coupling_.ToroidalForce(fixed_, [&](int l) -> const ToroidalOperator& {
-            return op.FlavourToroidal(flavour, l);
-          })};
+  auto tor =
+      op.coupling_.ToroidalForce(fixed_, [&](int l) -> const ToroidalOperator& {
+        return op.FlavourToroidal(flavour, l);
+      });
+  for (const auto& [l, f] : extraToroidal_) {
+    auto& b = tor.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+  }
+  return {std::move(sph), std::move(tor)};
 }
 
 std::pair<Viscoelastic3D::OpenStep::Fields, Viscoelastic3D::OpenStep::Fields>
@@ -1547,6 +1698,43 @@ void Viscoelastic3D::OpenStep::AddForce(
     if (extra.empty()) {
       extra = f;
     } else {
+      for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
+    }
+  }
+  startForce_ = false;
+}
+
+void Viscoelastic3D::OpenStep::AddDegreeForces(
+    const std::map<int, std::vector<Complex>>& spheroidal,
+    const std::map<int, std::vector<Complex>>& toroidal) {
+  for (const auto& [l, f] : spheroidal) {
+    const auto expected =
+        static_cast<std::size_t>(Spheroidal(l).DofCount()) * (l + 1);
+    if (f.size() != expected) {
+      throw std::invalid_argument(std::format(
+          "a degree-{} force has {} entries, the solutions {}", l, f.size(),
+          expected));
+    }
+    auto& extra = extraSpheroidal_[l];
+    if (extra.empty()) {
+      extra = f;
+    } else {
+      for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
+    }
+  }
+  AddToroidalForce(toroidal);
+}
+
+void Viscoelastic3D::OpenStep::AddToroidalForce(
+    const std::map<int, std::vector<Complex>>& toroidal) {
+  for (const auto& [l, f] : toroidal) {
+    auto& extra = extraToroidal_[l];
+    if (extra.empty()) {
+      extra = f;
+    } else {
+      if (extra.size() != f.size()) {
+        throw std::invalid_argument("a toroidal force has the solutions' layout");
+      }
       for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
     }
   }
@@ -1785,9 +1973,37 @@ Viscoelastic3D::OpenStep::Converge(
   return {std::move(s), info};
 }
 
+std::string Viscoelastic3D::StepInfo::Describe(double rtol) const {
+  return std::format("residual {:.3g} after {} passes, against the tolerance "
+                     "{:.3g}",
+                     residual, iterations, rtol);
+}
+
 Viscoelastic3D::StepResult Viscoelastic3D::Step(
     const State& state, double dt, Scheme scheme, const LoadCallable3D& load,
     const LoadCallable3D& tide) const {
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    // stage by stage, each closed under the channels at its own end time
+    auto solutions = Solutions{};
+    auto info = StepInfo{};
+    auto out = StepByRecipe(
+        RecipeOf(scheme, dt), dt, state,
+        [&](const State& from, const RecipeStage& stage, double length,
+            std::size_t) {
+          auto result = Step(from, length, stage.family, load, tide);
+          solutions = std::move(result.solutions);
+          info.iterations += result.info.iterations;
+          info.mixedPasses += result.info.mixedPasses;
+          info.solveIterations += result.info.solveIterations;
+          info.residual = result.info.residual;
+          info.converged = info.converged && result.info.converged;
+          return std::move(result.state);
+        },
+        [&](std::span<const std::pair<double, const State*>> terms,
+            const RecipeStage&) { return StageState(terms); },
+        [&](State&& spent) { Recycle(std::move(spent)); });
+    return {std::move(out), std::move(solutions), info};
+  }
   auto step = StartStep(state, dt, scheme, load, tide);
   if (options_.solver == Options::StepSolver::ConjugateGradients) {
     const auto [sph, tor] = step.Forces(load, tide);
@@ -1813,6 +2029,24 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
           info};
 }
 
+double Viscoelastic3D::InertiaMoment(const Solutions& solutions) const {
+  const auto found = solutions.spheroidal.find(0);
+  if (found == solutions.spheroidal.end()) return 0.0;
+  const auto& x = found->second;
+  auto column = std::vector<double>(x.size());
+  for (auto i = std::size_t{0}; i < x.size(); ++i) column[i] = x[i].real();
+  Spheroidal(0).MaskToShare(column);
+  auto moment = 0.0;
+  {
+    const auto lock = LockCaches();
+    moment = reference_.InertiaMoment(column, 1)[0];
+  }
+  if (options_.collectives.Distributed()) {
+    options_.collectives.sum(std::span(&moment, 1));
+  }
+  return moment;
+}
+
 std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
     const Solutions& solutions, Component component) const {
   auto out = std::map<int, std::vector<Complex>>{};
@@ -1831,6 +2065,37 @@ std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
   if (options_.collectives.Distributed()) {
     // The surface segment's process holds them: summed, every process has
     // them.
+    auto all = std::vector<Complex>{};
+    for (const auto& [l, values] : out) {
+      all.insert(all.end(), values.begin(), values.end());
+    }
+    options_.collectives.sum(Reals(all));
+    auto at = all.begin();
+    for (auto& [l, values] : out) {
+      std::copy(at, at + static_cast<std::ptrdiff_t>(values.size()),
+                values.begin());
+      at += static_cast<std::ptrdiff_t>(values.size());
+    }
+  }
+  return out;
+}
+
+std::map<int, std::vector<Viscoelastic3D::Complex>>
+Viscoelastic3D::SurfaceToroidal(const Solutions& solutions) const {
+  auto out = std::map<int, std::vector<Complex>>{};
+  for (const auto& [l, x] : solutions.toroidal) {
+    const auto& op = Toroidal(l);
+    const auto columns = l + 1;
+    const auto dof = op.SurfaceDof();
+    auto values = std::vector<Complex>(columns, 0.0);
+    if (dof >= 0 && op.Holds(dof)) {
+      for (auto c = 0; c < columns; ++c) {
+        values[c] = x[static_cast<std::size_t>(c) * op.DofCount() + dof];
+      }
+    }
+    out.emplace(l, std::move(values));
+  }
+  if (options_.collectives.Distributed()) {
     auto all = std::vector<Complex>{};
     for (const auto& [l, values] : out) {
       all.insert(all.end(), values.begin(), values.end());

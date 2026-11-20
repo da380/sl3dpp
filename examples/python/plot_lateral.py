@@ -1,13 +1,16 @@
 """The 3D lateral-viscosity example: run ExampleLateralViscosity first,
-then `poetry run python plot_lateral.py` from build/examples."""
+then `poetry run python plot_lateral.py` from build/examples. Reads
+output/library/lateral_viscosity/lateral_viscosity.txt and writes
+figures/library/lateral_viscosity.png."""
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plotutil import Example, world_map, plot_field
+from plotutil import (Example, library_figure, library_output, plot_field,
+                      save_figure, world_map)
 
-ex = Example("lateral.txt")
+ex = Example(library_output("lateral_viscosity", "lateral_viscosity.txt"))
 fig = plt.figure(figsize=(11, 7))
 
 ax = world_map(fig, 2, 2, 1, state=ex)
@@ -34,5 +37,4 @@ ax.set_title("the lateral fixed point's cost per step", fontsize=10)
 
 fig.suptitle("3D lateral viscosity against the radial reference (10 kyr)")
 fig.tight_layout()
-fig.savefig("lateral.png", dpi=180)
-print("wrote lateral.png")
+save_figure(fig, library_figure("lateral_viscosity"))

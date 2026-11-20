@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -21,6 +22,7 @@
 #include <random>
 #include <vector>
 
+#include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/EarthModel.hpp"
@@ -28,6 +30,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
 
 using namespace sl3dpp;
 
@@ -109,6 +112,19 @@ double MaxAbs(const std::map<int, std::vector<Complex>>& m) {
     for (auto c : v) out = std::max(out, std::abs(c));
   }
   return out;
+}
+
+/// The largest difference of two arrays over the largest magnitude of the
+/// first.
+template <class A, class B>
+double Departure(const A& x, const B& y) {
+  EXPECT_EQ(x.size(), y.size());
+  auto worst = 0.0, top = 0.0;
+  for (auto i = std::size_t{0}; i < std::min(x.size(), y.size()); ++i) {
+    worst = std::max(worst, std::abs(x[i] - y[i]));
+    top = std::max(top, std::abs(x[i]));
+  }
+  return top > 0.0 ? worst / top : worst;
 }
 
 }  // namespace
@@ -243,12 +259,12 @@ TEST(ElasticPerturbation3D, SelectionRules) {
   }
 }
 
-TEST(ElasticPerturbation3D, StaticKernelsAreTheTransposeOfTheForce) {
-  // The static material kernels of a solution pair: their grid pairing
-  // with lateral directions in kappa and mu equals the Hermitian pairing
-  // of the dual solution with the force of those directions on the
-  // other — the transpose of Force; with the dual the response to a
-  // surface dual, the kernels of a static surface measurement.
+TEST(ElasticPerturbation3D, ForceTransposePairsWithTheForce) {
+  // ForceTranspose of a solution pair is the transpose of Force: its grid
+  // pairing with lateral directions in kappa and mu equals the Hermitian
+  // pairing of the dual solution with the force of those directions on
+  // the other; with the dual the response to a surface dual, minus it is
+  // a static surface measurement's kernels.
   const auto material = MakeMaterial();
   ElasticPerturbation3D born(material, kLmax);
   const auto& coupling = born.Coupling();
@@ -282,17 +298,9 @@ TEST(ElasticPerturbation3D, StaticKernelsAreTheTransposeOfTheForce) {
       [](double theta, double phi) {
         return std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
       });
-  const auto kernels = born.StaticKernels(y, x);
+  const auto kernels = born.ForceTranspose(y, x);
   auto pairing = [&](std::span<const double> kernel, std::span<const double> d) {
-    auto total = 0.0;
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto at = coupling.FieldOffset(rn);
-      const auto size = coupling.FieldSizeOf(rn);
-      auto product = std::vector<double>(size);
-      for (auto i = std::size_t{0}; i < size; ++i) product[i] = kernel[at + i] * d[at + i];
-      total += coupling.GridOf(rn).Integrate(product);
-    }
-    return total;
+    return VolumePairing(coupling, kernel, d);
   };
   const auto [sMu, tMu] = born.Force(x, dMu, {});
   const auto [sKappa, tKappa] = born.Force(x, {}, dKappa);
@@ -581,7 +589,7 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
   // The adjoint of the laterally heterogeneous static problem: with y the
   // lateral solve of a surface measurement's dual forces and x that of
   // the load, both under the background delta mu_0(x), delta kappa_0(x),
-  // -StaticKernels(y, x) paired with a direction (v_mu, v_kappa) equals
+  // -ForceTranspose(y, x) paired with a direction (v_mu, v_kappa) equals
   // the central difference of the measurement along the direction,
   // through the full solve.
   const auto material = MakeMaterial();
@@ -645,17 +653,9 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
       born.SurfaceDualForces(dual, Component::Phi), {}, mu0, kappa0, options);
   EXPECT_TRUE(infoX.converged);
   EXPECT_TRUE(infoY.converged);
-  const auto kernels = born.StaticKernels(y, x);
+  const auto kernels = born.ForceTranspose(y, x);
   auto pairing = [&](std::span<const double> kernel, std::span<const double> v) {
-    auto total = 0.0;
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto at = coupling.FieldOffset(rn);
-      const auto size = coupling.FieldSizeOf(rn);
-      auto product = std::vector<double>(size);
-      for (auto i = std::size_t{0}; i < size; ++i) product[i] = kernel[at + i] * v[at + i];
-      total += coupling.GridOf(rn).Integrate(product);
-    }
-    return total;
+    return VolumePairing(coupling, kernel, v);
   };
   const auto predicted = -(pairing(kernels.mu, vMu) + pairing(kernels.kappa, vKappa));
   const auto eps = 1e-3;
@@ -663,6 +663,95 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
   std::cout << "kernel pairing " << predicted << ", finite difference " << difference << '\n';
   EXPECT_NEAR(predicted, difference, 1e-5 * std::abs(difference));
   EXPECT_NE(difference, 0.0);
+}
+
+TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveUnchanged) {
+  // Options::cache_bytes reaches the coupling's grid, and a cache small
+  // enough that the batched transforms over the nodes take smaller chunks
+  // than under the default (16 KiB: 11 spin -2 fields at a time against
+  // 63, so the chunks fall differently through the batch) leaves the
+  // lateral solve as it is under the default: its iteration count the
+  // same, and every conjugate-gradient residual, the solution and the
+  // static kernels equal to rounding. Each operator's grid plans its own
+  // transforms, and two plans may sum in different orders, so the last
+  // bits may differ; a fault in the chunking would differ in the leading
+  // digits.
+  constexpr auto kSmall = std::size_t{16} << 10;
+  constexpr auto kRounding = 1e-12;
+  const auto material = MakeMaterial();
+  ElasticPerturbation3D standard(material, kLmax);
+  ElasticPerturbation3D small(material, kLmax, {.cache_bytes = kSmall});
+  const auto& coupling = small.Coupling();
+  const auto& grid = coupling.Grid();
+  EXPECT_EQ(grid.Grid().ChunkingPolicy(), GSHTrans::Chunking::ForCache(kSmall));
+  EXPECT_EQ(standard.Coupling().Grid().Grid().ChunkingPolicy(),
+            GSHTrans::Chunking::Automatic());
+  ASSERT_EQ(standard.Coupling().GridValueCount(), coupling.GridValueCount());
+  // the chunk of a spin -2 batch (one copy of its block: a stored table)
+  const auto block = static_cast<GSHTrans::Chunking::Int>(
+      sizeof(Complex) * grid.SpinCoefficientSize(-2));
+  const auto chunk = GSHTrans::Chunking::ForCache(kSmall).Count(block, 1);
+  EXPECT_LT(chunk, GSHTrans::Chunking::Automatic().Count(block, 1));
+  EXPECT_LT(chunk, coupling.NodeCount());
+
+  const auto top = [&] {
+    auto s = 0.0;
+    for (auto v : material.Moduli().L) s = std::max(s, v);
+    return s;
+  }();
+  auto load = grid.ZeroCoefficients();
+  for (auto l = 0; l <= kLmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      load[SurfaceGrid::Index(l, m)] = {1.0 / (1.0 + l), m == 0 ? 0.0 : 0.3 * m};
+    }
+  }
+  const auto dMu = Lateral(
+      coupling, [&](double r) { return 0.1 * top * (0.5 + r * r); },
+      [](double theta, double phi) {
+        return std::sin(theta) * std::cos(theta) * std::cos(phi) +
+               0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta);
+      });
+  const auto dKappa = Lateral(
+      coupling, [&](double r) { return 0.1 * top * (1.0 - 0.5 * r); },
+      [](double theta, double phi) { return std::cos(theta); });
+  const auto options = ElasticPerturbation3D::SolveOptions{.rtol = 1e-13};
+  const auto [a, infoA] = standard.SolveLateral(load, dMu, dKappa, options);
+  const auto [b, infoB] = small.SolveLateral(load, dMu, dKappa, options);
+  EXPECT_TRUE(infoA.converged);
+  EXPECT_GT(infoA.iterations, 1);
+  EXPECT_EQ(infoA.iterations, infoB.iterations);
+  // the residuals against the largest of them
+  EXPECT_LE(Departure(infoA.residuals, infoB.residuals), kRounding);
+
+  auto scale = 0.0;
+  auto compare = [&](const std::map<int, std::vector<Complex>>& x,
+                     const std::map<int, std::vector<Complex>>& y) {
+    ASSERT_EQ(x.size(), y.size());
+    // against the largest value of any degree: a degree the solve barely
+    // reaches holds little more than rounding
+    auto top = 0.0;
+    for (const auto& [l, u] : x) {
+      for (auto c : u) top = std::max(top, std::abs(c));
+    }
+    scale = std::max(scale, top);
+    for (const auto& [l, u] : x) {
+      const auto& v = y.at(l);
+      ASSERT_EQ(u.size(), v.size()) << "degree " << l;
+      auto worst = 0.0;
+      for (auto i = std::size_t{0}; i < u.size(); ++i) {
+        worst = std::max(worst, std::abs(u[i] - v[i]));
+      }
+      EXPECT_LE(worst, kRounding * top) << "degree " << l;
+    }
+  };
+  compare(a.spheroidal, b.spheroidal);
+  compare(a.toroidal, b.toroidal);
+  EXPECT_GT(scale, 0.0);
+  const auto ka = standard.ForceTranspose(a, a);
+  const auto kb = small.ForceTranspose(b, b);
+  EXPECT_FALSE(ka.mu.empty());
+  EXPECT_LE(Departure(ka.mu, kb.mu), kRounding);
+  EXPECT_LE(Departure(ka.kappa, kb.kappa), kRounding);
 }
 
 TEST(ElasticPerturbation3D, DISABLED_TimingAtHigherDegree) {

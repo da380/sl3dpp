@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <complex>
@@ -86,20 +87,23 @@ TEST(SpinMachinery, ReductionToTheDegreeBasisMemoryForce) {
     const auto pointU = rows.u * jac * Wq * r * mu;
     const auto pointV = rows.v * jac * Wq * r * mu;
     const auto pointW = rows.w * jac * Wq * r * mu;
+    // To rounding on the terms' own size (cM reaches 8e2 at l = 9).
+    const auto tol =
+        1e-12 * std::max({std::abs(cR), std::abs(cS), std::abs(cM), 1.0});
     // The 1D dual's pointwise parts (the B terms are compared below).
-    EXPECT_NEAR(std::abs(pointU - (-cR + cS)), 0.0, 1e-13) << "l = " << l;
-    EXPECT_NEAR(std::abs(pointV - (0.5 * k2 * cR - cS + cM)), 0.0, 1e-12)
+    EXPECT_NEAR(std::abs(pointU - (-cR + cS)), 0.0, tol) << "l = " << l;
+    EXPECT_NEAR(std::abs(pointV - (0.5 * k2 * cR - cS + cM)), 0.0, tol)
         << "l = " << l;
-    EXPECT_NEAR(std::abs(pointW), 0.0, 1e-13) << "l = " << l;  // W = 0
+    EXPECT_NEAR(std::abs(pointW), 0.0, tol) << "l = " << l;  // W = 0
 
     // Derivative rows: du pairs as B cR, dv as B cS. B(q,i) = r D / jac,
     // so rows.du * (Wq r mu D) == D * (r/jac) * cR requires
     // rows.du * Wq * r * mu == (r / jac) * cR, i.e. du * jac * Wq * mu = cR.
-    EXPECT_NEAR(std::abs(rows.du * jac * Wq * mu - cR), 0.0, 1e-13)
+    EXPECT_NEAR(std::abs(rows.du * jac * Wq * mu - cR), 0.0, tol)
         << "l = " << l;
-    EXPECT_NEAR(std::abs(rows.dv * jac * Wq * mu - cS), 0.0, 1e-12)
+    EXPECT_NEAR(std::abs(rows.dv * jac * Wq * mu - cS), 0.0, tol)
         << "l = " << l;
-    EXPECT_NEAR(std::abs(rows.dw), 0.0, 1e-13) << "l = " << l;
+    EXPECT_NEAR(std::abs(rows.dw), 0.0, tol) << "l = " << l;
   }
 }
 

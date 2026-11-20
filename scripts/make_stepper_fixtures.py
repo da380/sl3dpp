@@ -1,12 +1,17 @@
 """The 1D viscoelastic stepper's reference, from pyslfp.
 
-A Love-number history: the PREM-like elastic deck with a 1e21 Pa s Maxwell
-mantle (solid layers fully inside [3480, 6151] km — the same rule as the
-C++ tests), held under a unit surface-density load at every degree, stepped
-with the exponential trapezoid and backward Euler at fixed dt. Grid-free,
-so the comparison isolates the stepper and is expected near machine
-precision. The step's effective Love numbers are recorded besides.
-tests/TestFixtures.cpp holds the C++ to it.
+A Love-number history: the PREM-like elastic deck
+tests/data/prem8.elastic.deck with a 1e21 Pa s Maxwell mantle (solid
+layers fully inside [3480, 6151] km — the same rule as the C++ tests),
+held under a unit surface-density load at every degree, stepped with the
+exponential trapezoid and backward Euler at fixed dt. Grid-free, so the
+comparison isolates the stepper and is expected near machine precision.
+pyslfp's ViscoelasticOperator does the stepping, and the file holds, in
+SI, the shortest relaxation time, for each scheme the radial displacement
+U and potential phi at the surface at degrees 2, 5 and 10 over 50 steps
+of 100 years, and the exponential trapezoid's effective Love numbers h_u,
+k_u, h_t and k_t at that step for degrees 0 to 10. tests/TestFixtures.cpp
+holds the C++ to it.
 
 Run in this directory's environment (pyproject.toml):
 

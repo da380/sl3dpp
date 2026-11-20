@@ -148,7 +148,7 @@ If W is band-limited at K, the integrand has degree at most 2L_b + K. The
 grid's Gauss–Legendre colatitudes (n_θ of them) integrate exactly to
 degree 2n_θ − 1, and its longitudes likewise. The 3/2 rule, n_θ ≈ 1.5 L_b
 + 1, is therefore exact for K up to about L_b. On the lmax grid a deep
-node's product was exact to K ≈ 3 lmax − 2 L(e). The only change is in
+node's product is exact to K ≈ 3 lmax − 2 L(e). The only change is in
 W's components between those bounds. That is a matter of the viscosity's
 spectrum, not the fields': lateral viscosity is typically smoother than
 the solution, whose resolution and the shorelines set lmax. Measured: a
@@ -272,13 +272,18 @@ rank its segment.
   (docs/adjoints.md §17): the discrete transpose sums
   the ranks' partial contractions for the load duals and places the
   surface duals on their holding rank.
-- **The `sl3d` program** runs `evolve`, `kernel` and `static` under
-  `mpiexec`.
+- **The `sl3d` program** runs `solve` and `kernel` under `mpiexec`: the
+  static problem on lateral moduli (the stepper on a branchless rheology,
+  adjoints.md §13m) and the 3D runs through time, and their kernels; a 1D
+  run of these commands is the first rank's alone, the other ranks
+  returning at once.
   - Rank 0 writes the outputs.
   - Each rank checkpoints its own segment into its own subdirectory. A
     run resumes from the newest node every rank has, over the same rank
-    count only.
-  - The viscosity kernels are gathered to rank 0 for writing.
+    count only; where the ranks have none in common, their checkpoints
+    are removed and the run starts over.
+  - The 3D kernels (viscosity and moduli) are gathered to rank 0 for
+    writing.
   - A failure on any rank aborts the job.
 
 One process with the threads inside it is the intended shape: on a

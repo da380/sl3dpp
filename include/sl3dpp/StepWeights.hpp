@@ -3,9 +3,9 @@
 /**
  * @file StepWeights.hpp
  * @brief The per-step weight algebra of the viscoelastic time-stepping
- * schemes, algebraically identical to pyslfp's `viscoelastic.weights` and
- * AdGIA's `detail::ExponentialTrapezoidWeights`, so that the
- * cross-benchmarks isolate the spatial discretisation.
+ * schemes, algebraically identical to AdGIA's
+ * `detail::ExponentialTrapezoidWeights`, so that the cross-benchmarks
+ * isolate the spatial discretisation.
  *
  * Everything is a function of h = dt / tau, evaluated per node and per
  * branch. The exponential trapezoid update of an internal variable m
@@ -25,10 +25,35 @@
  * An elastic node is h = 0 (tau infinite, stored as itau = 0): e = 1,
  * alpha = beta = 0, both effective weights 1. The weights lie in (0, 1]
  * where evaluated; anything interpolating them between nodes must clamp
- * to that interval. Negative h gives the EXACT inverse trapezoid step
- * (the update at -dt with the start and end strains swapped), which a
- * checkpointing reverse sweep uses; dissipation then amplifies roundoff
- * by exp(|h|).
+ * to that interval. Every step runs forwards, h >= 0: a step at -dt
+ * would invert the update exactly, but amplify rounding by exp(h), so a
+ * sweep that needs a state between two recorded ones rebuilds it by
+ * forward steps from the earlier one (detail/TrajectoryCursor.hpp).
+ *
+ * Every scheme here but one steps in one stage with these weights. The
+ * exception, Sdirk2, steps in two backward Euler stages (StepRecipe.hpp);
+ * it has no weights of its own, and what takes a scheme's weights or its
+ * one effective operator refuses it at a step of nonzero length.
+ *
+ * Why two stages. Where a memory point's h is large, the trapezoid's e
+ * and alpha vanish and its update is backward Euler's, m+ = d+: the point
+ * is slaved to the end strain. The slow, buoyancy-driven modes that carry
+ * the observables involve such points (a weak layer, a fast branch), and
+ * at steps long against their relaxation times the trapezoid then decays
+ * those modes at backward Euler's rate, first order, most visibly after
+ * an abrupt change of the forcing (a seismic onset, an unloading, the
+ * continuous adjoint's impulse at a measurement). No one-solve scheme of
+ * this form is both second order on those modes and damped at the stiff
+ * points (second order forces e -> -1 there, an undamped sawtooth); two
+ * implicit stages are: Sdirk2 is second order, L-stable and stiffly
+ * accurate, at two solves of one effective operator a step. It is the
+ * scheme for steps long against the shortest relaxation time (the forward
+ * run after abrupt forcing, the continuous kernels); at steps short
+ * against it the trapezoid, exact for a strain linear in a step, is the
+ * closer at half the cost (docs/design.md §5; docs/running.md, "Choosing
+ * a step and scheme"). The derivative runs take its step stage by stage,
+ * each stage's weights' derivatives backward Euler's at gamma dt
+ * (detail/StepStages.hpp).
  */
 
 #include <cmath>
@@ -36,8 +61,29 @@
 
 namespace sl3dpp {
 
-/// The implicit/exponential time-stepping schemes.
-enum class Scheme { ExponentialTrapezoid, BackwardEuler, ExponentialEuler };
+/// The time-stepping schemes. The first three are one-stage schemes with
+/// the weights below: the exponential trapezoid (second order), backward
+/// Euler (first order) and the exponential Euler (explicit in the
+/// strain). Sdirk2, the default of every driver and operator step, is
+/// Alexander's (1977) two-stage singly diagonally implicit Runge-Kutta
+/// scheme, gamma = 1 - 1/sqrt 2: second order, L-stable and stiffly
+/// accurate, its stages backward Euler steps of length gamma dt
+/// (StepRecipe.hpp).
+enum class Scheme {
+  ExponentialTrapezoid,
+  BackwardEuler,
+  ExponentialEuler,
+  Sdirk2
+};
+
+/// The two methods of a stepped run's derivatives (Adjoint.hpp,
+/// TangentLinear.hpp): Discrete, the derivatives of the stepped map itself,
+/// the scheme's weights differentiated in the relaxation times; and
+/// Continuous, the continuous equations' derivatives stepped by the scheme.
+/// A tangent-linear run's snapshots carry the method that made it
+/// (Evolution::Snapshot::tangentMethod), so that what reads it is of the
+/// same method.
+enum class AdjointMethod { Continuous, Discrete };
 
 /// The (e, alpha, beta) of one node and branch; also carries the
 /// h-derivatives when asked for them.
@@ -81,9 +127,10 @@ inline double D2Phi1(double h, double e, double dphi1) {
 
 }  // namespace detail
 
-/// The exponential trapezoid weights at h = dt / tau; negative h gives the
-/// exact inverse step's. The effective-modulus weight is 1 - beta = phi1.
+/// The exponential trapezoid weights at h = dt / tau >= 0. The
+/// effective-modulus weight is 1 - beta = phi1.
 [[nodiscard]] inline TrapezoidWeights ExponentialTrapezoidWeights(double h) {
+  if (h < 0.0) throw std::invalid_argument("h = dt / tau must be >= 0");
   const auto e = std::exp(-h);
   const auto phi1 = detail::Phi1(h, e);
   return {e, phi1 - e, 1.0 - phi1};

@@ -6,6 +6,7 @@
 #include <numbers>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 #include "sl3dpp/ShConventions.hpp"
 #include "sl3dpp/detail/AndersonMixer.hpp"
@@ -70,7 +71,38 @@ std::vector<std::complex<double>> FromReal(std::span<const double> v) {
   return out;
 }
 
+/// One over the ocean's area, and zero for a state with no ocean: every
+/// term the solves divide by the area is one of water conservation, which
+/// a body without an ocean does not have.
+double InverseOceanArea(double oceanArea) {
+  return oceanArea > 0.0 ? 1.0 / oceanArea : 0.0;
+}
+
 }  // namespace
+
+void RequireTideDegrees(std::span<const std::complex<double>> coefficients,
+                        std::string_view what) {
+  for (auto l = 0; l < kLowestTideDegree; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      if (i < coefficients.size() && coefficients[i] != 0.0) {
+        throw std::invalid_argument(std::format(
+            "{} has no degree-{} part: tides are taken relative to the "
+            "centre of mass, degree {} and up",
+            what, l, kLowestTideDegree));
+      }
+    }
+  }
+}
+
+void ZeroBelowTideDegrees(std::span<std::complex<double>> coefficients) {
+  for (auto l = 0; l < kLowestTideDegree; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      if (i < coefficients.size()) coefficients[i] = 0.0;
+    }
+  }
+}
 
 std::vector<double> SeaLevelFromTopography(
     std::span<const double> topography, std::span<const double> iceThickness,
@@ -107,7 +139,7 @@ SeaLevelParameters WithHydrostaticMoments(SeaLevelParameters parameters,
   return parameters;
 }
 
-SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
+GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
                                SeaLevelParameters parameters)
     : grid_(std::move(grid)), parameters_(parameters) {
   const auto lmax = grid_.LMax();
@@ -117,8 +149,8 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
                     table.degrees.empty() ? -1 : table.degrees.back(), lmax));
   }
 
-  // The body of the parameters is the Love table's (pyslfp's with_body),
-  // unless the caller holds its own.
+  // The body of the parameters is the Love table's (its sea-floor radius
+  // and surface gravity), unless the caller holds its own.
   if (parameters.body_from_table) {
     parameters.mean_sea_floor_radius = table.radius;
     parameters.gravitational_acceleration = table.surface_gravity;
@@ -142,6 +174,23 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
   }
   h2_ = h_[2];
   k2_ = k_[2];
+  ht_ = truncate(nd.h_t);
+  kt_ = truncate(nd.k_t);
+  lU_ = truncate(nd.l_u);
+  lPhi_ = truncate(nd.l_phi);
+  lt_ = truncate(nd.l_t);
+  l_.resize(lmax + 1);
+  for (auto l = 0; l <= lmax; ++l) l_[l] = lU_[l] + lPhi_[l];
+  // a degree-0 field has no tangential part
+  l_[0] = lU_[0] = lPhi_[0] = lt_[0] = 0.0;
+  hV_.assign(lmax + 1, 0.0);
+  lV_.assign(lmax + 1, 0.0);
+  kV_.assign(lmax + 1, 0.0);
+  for (auto l = 1; l <= lmax; ++l) {
+    hV_[l] = nd.h_v[l];
+    lV_[l] = nd.l_v[l];
+    kV_[l] = nd.k_v[l];
+  }
   ht2_ = nd.h_t[2];
   kt2_ = nd.k_t[2];
   hc_ = nd.h_c;
@@ -168,9 +217,12 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
   slcFactor_.resize(lmax + 1);
   for (auto l = 0; l <= lmax; ++l) slcFactor_[l] = -(h_[l] + k_[l] / g_);
 
-  // The rotational feedback factors, pyslfp's `EarthModelParameters`
-  // verbatim (there in the pyshtools real basis, which is where our
-  // rotation block runs too).
+  // The rotational feedback factors, in the pyshtools real basis where the
+  // rotation block runs: the rotation factors take the angular velocity
+  // change to the centrifugal potential's (2, 1), (2, 0) and (0, 0)
+  // coefficients, the inertia factors take the (2, 1) and (2, 0) potential
+  // perturbations back to it (MacCullagh, with C - A transverse and C
+  // axial).
   const double a = radius_;
   rotationFactor_ = std::sqrt(4.0 * kPi / 15.0) * omega * a * a;
   inertiaFactor_ = std::sqrt(5.0 / (12.0 * kPi)) * omega * a * a * a /
@@ -190,7 +242,7 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
       traceFactor_ * mc_ * uniformRotationFactor_;
 }
 
-std::vector<std::complex<double>> SeaLevelSolver::CentrifugalCoefficients(
+std::vector<std::complex<double>> GRDSolver::CentrifugalCoefficients(
     const std::array<double, 3>& omega) const {
   auto psi = grid_.ZeroCoefficients();
   psi[SurfaceGrid::Index(2, 1)] = ComplexFromRealPair(
@@ -200,7 +252,7 @@ std::vector<std::complex<double>> SeaLevelSolver::CentrifugalCoefficients(
   return psi;
 }
 
-std::array<double, 3> SeaLevelSolver::CentrifugalDual(
+std::array<double, 3> GRDSolver::CentrifugalDual(
     std::span<const std::complex<double>> tideDual) const {
   // Pair(a, b) = sum_l a_l0 b_l0 + 2 sum_{m>0} Re(a conj b) equals the
   // plain real-pair pairing under RealPairFromComplex, so the transpose
@@ -211,11 +263,20 @@ std::array<double, 3> SeaLevelSolver::CentrifugalDual(
               uniformRotationFactor_ * tideDual[SurfaceGrid::Index(0, 0)].real()};
 }
 
-double SeaLevelSolver::IntegrateSurface(std::span<const double> field) const {
+double GRDSolver::SurfaceMassMoment(std::span<const double> density) const {
+  if (density.size() != grid_.FieldSize()) {
+    throw std::invalid_argument("the density does not live on the grid");
+  }
+  // traceFactor_ times this is shellFactor_ times the density's degree-0
+  // coefficient: the shell term of Rotation
+  return 0.5 * radius_ * radius_ * IntegrateSurface(density);
+}
+
+double GRDSolver::IntegrateSurface(std::span<const double> field) const {
   return radius_ * radius_ * grid_.Integrate(field);
 }
 
-SeaLevelSolver::State SeaLevelSolver::MakeState(
+GRDSolver::State GRDSolver::MakeState(
     std::vector<double> iceThickness, std::vector<double> seaLevel,
     std::span<const char> forcedLand) const {
   if (iceThickness.size() != grid_.FieldSize() ||
@@ -238,26 +299,61 @@ SeaLevelSolver::State SeaLevelSolver::MakeState(
   return state;
 }
 
+std::vector<double> GRDSolver::DirectLoadFromIceThicknessChange(
+    const State& state, std::span<const double> iceThicknessChange) const {
+  if (iceThicknessChange.size() != grid_.FieldSize() ||
+      state.oceanFunction.size() != grid_.FieldSize()) {
+    throw std::invalid_argument("the fields do not live on the grid");
+  }
+  auto out = std::vector<double>(iceThicknessChange.size());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
+    out[i] =
+        iceDensity_ * (1.0 - state.oceanFunction[i]) * iceThicknessChange[i];
+  }
+  return out;
+}
+
+std::vector<double> GRDSolver::LoadFromSeaLevelChange(
+    const State& state, std::span<const double> seaLevelChange) const {
+  if (seaLevelChange.size() != grid_.FieldSize() ||
+      state.oceanFunction.size() != grid_.FieldSize()) {
+    throw std::invalid_argument("the fields do not live on the grid");
+  }
+  auto out = std::vector<double>(seaLevelChange.size());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
+    out[i] = waterDensity_ * state.oceanFunction[i] * seaLevelChange[i];
+  }
+  return out;
+}
+
+GRDSolver::State GRDSolver::NoOceanState() const {
+  State state;
+  state.iceThickness.assign(grid_.FieldSize(), 0.0);
+  state.seaLevel.assign(grid_.FieldSize(), 0.0);
+  state.oceanFunction.assign(grid_.FieldSize(), 0.0);
+  state.oceanArea = 0.0;
+  return state;
+}
+
 // -- the rotation block
 // ----------------------------------------------------------
 
 /**
  * The degree-2 / degree-0 rotational feedback, solved exactly within an
- * iteration: pyslfp's `SeaLevelEquation._rotation`, verbatim, on the real
- * (cos, sin) pairs. The transverse components are set by the (2, 1)
- * potential and the axial by (2, 0) (MacCullagh), each feeding back
- * through the degree-2 tidal numbers; the axial component also carries the
- * trace of the inertia perturbation through the axial Love numbers and the
- * uniform shell term.
+ * iteration, on the real (cos, sin) pairs. The transverse components are
+ * set by the (2, 1) potential and the axial by (2, 0) (MacCullagh), each
+ * feeding back through the degree-2 tidal numbers; the axial component
+ * also carries the trace of the inertia perturbation through the axial
+ * Love numbers and the uniform shell term.
  */
-struct SeaLevelSolver::Rotation {
+struct GRDSolver::Rotation {
   std::array<double, 3> omega{0.0, 0.0, 0.0};
   Block2 disp2{};             // full degree-2 displacement (forcing + tidal)
   Block2 grav2{};             // likewise the potential, without the centrifugal
   Block2 centrifugal{};       // the degree-2 centrifugal potential
   double centrifugal0 = 0.0;  // its degree-0 part
 
-  Rotation(const SeaLevelSolver& s, const Block2& load2, double load0,
+  Rotation(const GRDSolver& s, const Block2& load2, double load0,
            const std::optional<Block2>& staticDisp2,
            const std::optional<Block2>& staticGrav2, double displacementLoad0,
            double potentialLoad0, double inertiaMoment,
@@ -298,7 +394,7 @@ struct SeaLevelSolver::Rotation {
 // -- the generalised linear solve
 // ---------------------------------------------------
 
-SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
+GRDSolver::Response GRDSolver::SolveGeneralised(
     const State& state, const GeneralisedForcing& forcing,
     Options options) const {
   const auto fieldSize = grid_.FieldSize();
@@ -322,14 +418,30 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
   checkField(forcing.directLoad, "direct load");
   checkField(forcing.displacementLoad, "displacement load");
   checkField(forcing.potentialLoad, "potential load");
+  checkField(forcing.tangentialTraction, "tangential traction");
   checkField(forcing.oceanFunctionOverride, "ocean function override");
+  checkField(forcing.directLoadOutsideWaterBudget,
+             "direct load outside the water budget");
+  checkField(forcing.solidSurfaceChange, "solid surface change");
   checkCoefficients(forcing.displacementResponse, "displacement response");
   checkCoefficients(forcing.potentialResponse, "potential response");
+  checkCoefficients(forcing.tangentialResponse, "tangential response");
+  checkCoefficients(forcing.toroidalResponse, "toroidal response");
+  checkCoefficients(forcing.tide, "tide");
+  const bool tidal =
+      !forcing.tide.empty() &&
+      MaxAbs(std::span<const std::complex<double>>(forcing.tide)) > 0.0;
+  RequireTideDegrees(forcing.tide);
 
   // The static (load-independent) coefficient terms.
-  std::vector<std::complex<double>> staticDisp, staticGrav;
+  // The tangential potential answers the same forcings and feeds nothing
+  // back: its static terms are kept apart and joined at the end.
+  std::vector<std::complex<double>> staticDisp, staticGrav, staticTan;
   auto displacementLoad0 = 0.0, potentialLoad0 = 0.0;
   auto anyForcing = false;
+  auto ensureTangential = [&] {
+    if (staticTan.empty()) staticTan.assign(coefSize, 0.0);
+  };
   auto ensureStatic = [&] {
     if (staticDisp.empty()) {
       staticDisp.assign(coefSize, 0.0);
@@ -340,6 +452,7 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
       MaxAbs(forcing.displacementLoad) > 0.0) {
     anyForcing = true;
     ensureStatic();
+    ensureTangential();
     const auto lm = grid_.Expand(forcing.displacementLoad);
     displacementLoad0 = lm[SurfaceGrid::Index(0, 0)].real();
     for (auto l = 0; l <= grid_.LMax(); ++l) {
@@ -347,12 +460,14 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
         const auto i = SurfaceGrid::Index(l, m);
         staticDisp[i] += hU_[l] * lm[i];
         staticGrav[i] += kU_[l] * lm[i];
+        staticTan[i] += lU_[l] * lm[i];
       }
     }
   }
   if (!forcing.potentialLoad.empty() && MaxAbs(forcing.potentialLoad) > 0.0) {
     anyForcing = true;
     ensureStatic();
+    ensureTangential();
     const auto lm = grid_.Expand(forcing.potentialLoad);
     potentialLoad0 = lm[SurfaceGrid::Index(0, 0)].real();
     for (auto l = 0; l <= grid_.LMax(); ++l) {
@@ -360,6 +475,22 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
         const auto i = SurfaceGrid::Index(l, m);
         staticDisp[i] += hPhi_[l] * lm[i];
         staticGrav[i] += kPhi_[l] * lm[i];
+        staticTan[i] += lPhi_[l] * lm[i];
+      }
+    }
+  }
+  if (!forcing.tangentialTraction.empty() &&
+      MaxAbs(forcing.tangentialTraction) > 0.0) {
+    anyForcing = true;
+    ensureStatic();
+    ensureTangential();
+    const auto lm = grid_.Expand(forcing.tangentialTraction);
+    for (auto l = 1; l <= grid_.LMax(); ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        staticDisp[i] += hV_[l] * lm[i];
+        staticGrav[i] += kV_[l] * lm[i];
+        staticTan[i] += lV_[l] * lm[i];
       }
     }
   }
@@ -379,16 +510,57 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
       staticGrav[i] += forcing.potentialResponse[i];
     }
   }
+  if (!forcing.tangentialResponse.empty() &&
+      MaxAbs(std::span<const std::complex<double>>(
+          forcing.tangentialResponse)) > 0.0) {
+    anyForcing = true;
+    ensureTangential();
+    for (auto i = std::size_t{0}; i < coefSize; ++i) {
+      staticTan[i] += forcing.tangentialResponse[i];
+    }
+  }
+  // A layer on the solid surface: its thickness is in the sea level
+  // change alone, with the static terms.
+  const bool layered = !forcing.solidSurfaceChange.empty() &&
+                       MaxAbs(forcing.solidSurfaceChange) > 0.0;
+  auto layerLm = std::vector<std::complex<double>>{};
+  if (layered) {
+    anyForcing = true;
+    ensureStatic();
+    layerLm = grid_.Expand(forcing.solidSurfaceChange);
+  }
+  if (tidal) {
+    // The body's answer to the prescribed potential; the potential's own
+    // place in the sea level change is added where that is formed.
+    anyForcing = true;
+    ensureStatic();
+    ensureTangential();
+    for (auto l = 1; l <= grid_.LMax(); ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        staticDisp[i] += ht_[l] * forcing.tide[i];
+        staticGrav[i] += kt_[l] * forcing.tide[i];
+        staticTan[i] += lt_[l] * forcing.tide[i];
+      }
+    }
+  }
   anyForcing =
       anyForcing || forcing.inertiaMomentChange != 0.0 ||
       MaxAbs(std::span<const double>(forcing.angularMomentumChange.data(), 3)) >
           0.0 ||
-      (!forcing.directLoad.empty() && MaxAbs(forcing.directLoad) > 0.0);
+      (!forcing.directLoad.empty() && MaxAbs(forcing.directLoad) > 0.0) ||
+      (!forcing.directLoadOutsideWaterBudget.empty() &&
+       MaxAbs(forcing.directLoadOutsideWaterBudget) > 0.0);
 
   Response response;
-  response.seaLevelChange.assign(fieldSize, 0.0);
+  response.relativeSeaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
+  response.tangentialPotential.assign(fieldSize, 0.0);
+  // the toroidal potential is carried, whatever else is solved
+  if (!forcing.toroidalResponse.empty()) {
+    response.toroidalPotential = grid_.Synthesise(forcing.toroidalResponse);
+  }
   if (!anyForcing) return response;
 
   const auto& oceanFunction = forcing.oceanFunctionOverride.empty()
@@ -397,12 +569,21 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
   const double oceanArea = forcing.oceanFunctionOverride.empty()
                                ? state.oceanArea
                                : IntegrateSurface(oceanFunction);
+  // Without an ocean there is no water to conserve: no uniform shift, and
+  // the load is the direct one alone.
+  const double perOceanArea = InverseOceanArea(oceanArea);
 
   auto directData = std::vector<double>(fieldSize, 0.0);
   auto meanSlc = 0.0;
   if (!forcing.directLoad.empty()) {
     directData = forcing.directLoad;
-    meanSlc = -IntegrateSurface(directData) / (waterDensity_ * oceanArea);
+    meanSlc = -IntegrateSurface(directData) * perOceanArea / waterDensity_;
+  }
+  // a load outside the water budget loads the body and moves no water
+  if (!forcing.directLoadOutsideWaterBudget.empty()) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      directData[i] += forcing.directLoadOutsideWaterBudget[i];
+    }
   }
 
   auto staticSlc = std::vector<std::complex<double>>{};
@@ -412,10 +593,21 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
     for (auto i = std::size_t{0}; i < coefSize; ++i) {
       staticSlc[i] = -(staticDisp[i] + staticGrav[i] / g_);
     }
+    if (tidal) {
+      for (auto i = std::size_t{0}; i < coefSize; ++i) {
+        staticSlc[i] -= forcing.tide[i] / g_;
+      }
+    }
+    if (layered) {
+      for (auto i = std::size_t{0}; i < coefSize; ++i) staticSlc[i] -= layerLm[i];
+    }
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
   }
+  const Block2 tide2 = tidal ? BlockOf(forcing.tide) : Block2{};
+  const Block2 layer2 = layered ? BlockOf(layerLm) : Block2{};
 
+  auto lastShift = 0.0;  // the conservation's uniform part, last formed
   // One iteration: the mass-conserving sea level change of a load.
   auto seaLevelFromLoad = [&](std::span<const std::complex<double>> loadLm,
                               std::array<double, 3>& omega) {
@@ -439,7 +631,9 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
       omega = rotation.omega;
       SetBlock(slcLm,
                -1.0 * (rotation.disp2 +
-                       (1.0 / g_) * (rotation.grav2 + rotation.centrifugal)));
+                       (1.0 / g_) *
+                           (rotation.grav2 + rotation.centrifugal + tide2) +
+                       layer2));
       // uniform, and so absorbed by mass conservation below
       slcLm[SurfaceGrid::Index(0, 0)] -=
           (hc_ + (kc_ + 1.0) / g_) * rotation.centrifugal0;
@@ -449,8 +643,9 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       cslc[i] = oceanFunction[i] * slc[i];
     }
-    const auto shift = meanSlc - IntegrateSurface(cslc) / oceanArea;
+    const auto shift = meanSlc - IntegrateSurface(cslc) * perOceanArea;
     for (auto& v : slc) v += shift;
+    lastShift = shift;
     return slc;
   };
 
@@ -498,11 +693,13 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
 
   // The remaining fields, from the same load as the sea level.
   std::vector<std::complex<double>> dispLm(coefSize), potLm(coefSize);
+  std::vector<std::complex<double>> tanLm(coefSize);
   for (auto l = 0; l <= grid_.LMax(); ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
       dispLm[i] = h_[l] * loadLm[i];
       potLm[i] = k_[l] * loadLm[i];
+      tanLm[i] = l_[l] * loadLm[i];
     }
   }
   if (!staticDisp.empty()) {
@@ -510,6 +707,9 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
       dispLm[i] += staticDisp[i];
       potLm[i] += staticGrav[i];
     }
+  }
+  if (!staticTan.empty()) {
+    for (auto i = std::size_t{0}; i < coefSize; ++i) tanLm[i] += staticTan[i];
   }
   if (rotational) {
     const Rotation rotation(
@@ -520,19 +720,22 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
     SetBlock(potLm, rotation.grav2);
     dispLm[SurfaceGrid::Index(0, 0)] += hc_ * rotation.centrifugal0;
     potLm[SurfaceGrid::Index(0, 0)] += kc_ * rotation.centrifugal0;
+    AddBlock(tanLm, lt_[2] * rotation.centrifugal);
   }
 
-  response.seaLevelChange = std::move(slc);
+  response.relativeSeaLevelChange = std::move(slc);
   response.displacement = grid_.Synthesise(dispLm);
   response.potential = grid_.Synthesise(potLm);
+  response.tangentialPotential = grid_.Synthesise(tanLm);
   response.angularVelocity = omega;
+  response.uniformShift = lastShift;
   response.iterations = count;
   response.error = err;
   response.converged = converged;
   return response;
 }
 
-SeaLevelSolver::Response SeaLevelSolver::Solve(const State& state,
+GRDSolver::Response GRDSolver::Solve(const State& state,
                                                std::vector<double> directLoad,
                                                RotationalFeedback rotation,
                                                Options options) const {
@@ -545,7 +748,7 @@ SeaLevelSolver::Response SeaLevelSolver::Solve(const State& state,
 // -- the adjoint solve
 // -----------------------------------------------------------
 
-SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
+GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
     const State& state, const AdjointForcing& forcing, Options options) const {
   const auto fieldSize = grid_.FieldSize();
   const auto coefSize = grid_.CoefficientSize();
@@ -559,9 +762,10 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   const double oceanArea = forcing.oceanFunctionOverride.empty()
                                ? state.oceanArea
                                : IntegrateSurface(oceanFunction);
+  const double perOceanArea = InverseOceanArea(oceanArea);
 
   auto gXi = std::vector<double>(fieldSize, 0.0);
-  if (!forcing.seaLevelDual.empty()) gXi = forcing.seaLevelDual;
+  if (!forcing.relativeSeaLevelDual.empty()) gXi = forcing.relativeSeaLevelDual;
   std::vector<std::complex<double>> lamU(coefSize, 0.0), lamPhi(coefSize, 0.0);
   if (!forcing.displacementDual.empty()) {
     lamU = grid_.Expand(forcing.displacementDual);
@@ -571,13 +775,30 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
     lamPhi = grid_.Expand(forcing.potentialDual);
     for (auto& v : lamPhi) v *= r2;
   }
+  // The tangential potential feeds nothing back: its dual enters the dual
+  // load by the load numbers, the centrifugal dual by the degree-2 tidal
+  // one, and is itself the dual of the ready channel.
+  std::vector<std::complex<double>> lamV(coefSize, 0.0);
+  if (!forcing.tangentialPotentialDual.empty()) {
+    lamV = grid_.Expand(forcing.tangentialPotentialDual);
+    for (auto& v : lamV) v *= r2;
+  }
   const auto& gOmega = forcing.angularVelocityDual;
 
   AdjointResponse out;
   out.directLoadDual.assign(fieldSize, 0.0);
+  out.directLoadOutsideWaterBudgetDual.assign(fieldSize, 0.0);
+  out.solidSurfaceChangeDual.assign(fieldSize, 0.0);
   out.displacementResponseDual.assign(coefSize, 0.0);
   out.potentialResponseDual.assign(coefSize, 0.0);
+  out.tangentialResponseDual = lamV;
+  if (!forcing.toroidalPotentialDual.empty()) {
+    out.toroidalResponseDual = grid_.Expand(forcing.toroidalPotentialDual);
+    for (auto& v : out.toroidalResponseDual) v *= r2;
+  }
+  out.tideDual.assign(coefSize, 0.0);
   if (MaxAbs(gXi) == 0.0 && MaxAbs(lamU) == 0.0 && MaxAbs(lamPhi) == 0.0 &&
+      MaxAbs(std::span<const std::complex<double>>(lamV)) == 0.0 &&
       MaxAbs(std::span<const double>(gOmega.data(), 3)) == 0.0) {
     return out;
   }
@@ -585,6 +806,7 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   // Duals the synthesised outputs contribute outside the fixed point.
   std::vector<std::complex<double>> lamUBase = lamU, lamPhiBase = lamPhi;
   Block2 du2Out{}, dphi2Out{};
+  const Block2 dpsi2Out = rotational ? lt_[2] * BlockOf(lamV) : Block2{};
   auto dpsi0Out = 0.0;
   if (rotational) {
     du2Out = BlockOf(lamU);
@@ -598,7 +820,7 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   for (auto l = 0; l <= grid_.LMax(); ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
-      rOut[i] = h_[l] * lamUBase[i] + k_[l] * lamPhiBase[i];
+      rOut[i] = h_[l] * lamUBase[i] + k_[l] * lamPhiBase[i] + l_[l] * lamV[i];
     }
   }
   const double hkc = hc_ + (kc_ + 1.0) / g_;
@@ -607,6 +829,7 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
     double meanDual = 0.0;
     double j = 0.0;
     std::vector<std::complex<double>> zBase;
+    std::vector<std::complex<double>> zWhole;  // its degree-2 entries kept
     Block2 dsU2{}, dsPhi2{};
   };
 
@@ -621,10 +844,12 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
     stash.meanDual = IntegrateSurface(xiDual);
     auto xgDual = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      xgDual[i] = xiDual[i] - oceanFunction[i] * (stash.meanDual / oceanArea);
+      xgDual[i] =
+          xiDual[i] - oceanFunction[i] * (stash.meanDual * perOceanArea);
     }
     auto zDual = grid_.Expand(xgDual);
     for (auto& v : zDual) v *= r2;
+    stash.zWhole = zDual;
 
     auto next = rOut;
     if (rotational) {
@@ -635,7 +860,8 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
       SetBlock(stash.zBase, Block2{});
       const auto dDisp2 = du2Out + (-1.0 * z2);
       const Block2 dGrav2 = dphi2Out + (-1.0 / g_) * z2;
-      const Block2 dPsi2 = (-1.0 / g_) * z2 + ht2_ * dDisp2 + kt2_ * dGrav2;
+      const Block2 dPsi2 =
+          (-1.0 / g_) * z2 + ht2_ * dDisp2 + kt2_ * dGrav2 + dpsi2Out;
       const double dPsi0 =
           dpsi0Out - hkc * zDual[SurfaceGrid::Index(0, 0)].real();
       Block2 dGravForcing = dGrav2;
@@ -699,9 +925,18 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   // The input duals, read at the converged dual load.
   auto [unused, stash] = reverseOnce(lam);
   const auto lamGrid = grid_.Synthesise(lam);
+  out.directLoadOutsideWaterBudgetDual.resize(fieldSize);
+  out.solidSurfaceChangeDual.resize(fieldSize);
+  // the dual of the sea level before the uniform shift, band-limited as
+  // the layer's thickness is where it enters
+  const auto seaLevelDual = grid_.Synthesise(stash.zWhole);
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     out.directLoadDual[i] =
-        lamGrid[i] / r2 - stash.meanDual / (waterDensity_ * oceanArea);
+        lamGrid[i] / r2 - stash.meanDual * perOceanArea / waterDensity_;
+    // outside the water budget: no part in the conservation's constant
+    out.directLoadOutsideWaterBudgetDual[i] = lamGrid[i] / r2;
+    // a layer on the solid surface lowers the sea level by its thickness
+    out.solidSurfaceChangeDual[i] = -seaLevelDual[i] / r2;
   }
   for (auto i = std::size_t{0}; i < coefSize; ++i) {
     out.displacementResponseDual[i] = -stash.zBase[i] + lamUBase[i];
@@ -710,6 +945,17 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   if (rotational) {
     AddBlock(out.displacementResponseDual, stash.dsU2);
     AddBlock(out.potentialResponseDual, stash.dsPhi2);
+  }
+  // The prescribed tide entered the two response channels by the tidal
+  // numbers, and the sea level change by its own potential; it has no
+  // part below kLowestTideDegree, nor has its dual.
+  for (auto l = kLowestTideDegree; l <= grid_.LMax(); ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      out.tideDual[i] = ht_[l] * out.displacementResponseDual[i] +
+                        kt_[l] * out.potentialResponseDual[i] +
+                        lt_[l] * lamV[i] - stash.zWhole[i] / g_;
+    }
   }
   out.inertiaMomentDual = stash.j;
   out.iterations = count;
@@ -721,22 +967,51 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
 // -- the nonlinear (migrating shoreline) solve
 // ---------------------------------------
 
-SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
+GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     const State& state, const NonlinearForcing& forcing,
     Options options) const {
   const auto fieldSize = grid_.FieldSize();
   const auto coefSize = grid_.CoefficientSize();
   const bool transverse = forcing.rotation == RotationalFeedback::Full;
   const bool rotational = forcing.rotation != RotationalFeedback::None;
-  const double sedimentDensity =
-      forcing.sedimentDensity >= 0.0
-          ? forcing.sedimentDensity
-          : 2300.0 / scales_.Factor(DensityDimensions);
+  if (!(state.oceanArea > 0.0)) {
+    throw std::invalid_argument(
+        "the nonlinear sea level solve needs a state with an ocean: the "
+        "shorelines of a body without one do not migrate");
+  }
+  auto checkField = [&](const std::vector<double>& field, const char* name) {
+    if (!field.empty() && field.size() != fieldSize) {
+      throw std::invalid_argument(std::string(name) +
+                                  " is not a field on the solver's grid");
+    }
+  };
+  checkField(forcing.iceThicknessChange, "the ice thickness change");
+  checkField(forcing.directLoad, "the direct load");
+  checkField(forcing.directLoadOutsideWaterBudget,
+             "the direct load outside the water budget");
+  checkField(forcing.solidSurfaceChange, "the solid surface change");
+  checkField(forcing.dynamicSeaLevelChange, "the dynamic sea level change");
+  // the land held: the forcing's where it gives one, the state's otherwise
+  const auto& held =
+      forcing.forcedLand ? *forcing.forcedLand : state.forcedLand;
+  if (!held.empty() && held.size() != fieldSize) {
+    throw std::invalid_argument(
+        "the land held is not a mask on the solver's grid");
+  }
+
+  if (!forcing.tide.empty() && forcing.tide.size() != coefSize) {
+    throw std::invalid_argument(
+        "tide is not a coefficient vector of the grid");
+  }
+  const bool tidal =
+      !forcing.tide.empty() &&
+      MaxAbs(std::span<const std::complex<double>>(forcing.tide)) > 0.0;
+  RequireTideDegrees(forcing.tide);
 
   std::vector<std::complex<double>> staticDisp, staticGrav, staticSlc;
   std::optional<Block2> staticDisp2, staticGrav2;
   if (!forcing.displacementResponse.empty() ||
-      !forcing.potentialResponse.empty()) {
+      !forcing.potentialResponse.empty() || tidal) {
     staticDisp.assign(coefSize, 0.0);
     staticGrav.assign(coefSize, 0.0);
     if (!forcing.displacementResponse.empty()) {
@@ -745,12 +1020,44 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
     if (!forcing.potentialResponse.empty()) {
       staticGrav = forcing.potentialResponse;
     }
+    if (tidal) {
+      // The body's answer to the prescribed potential, as in the linear
+      // solve; the potential's own place in the sea level change follows.
+      for (auto l = 1; l <= grid_.LMax(); ++l) {
+        for (auto m = 0; m <= l; ++m) {
+          const auto i = SurfaceGrid::Index(l, m);
+          staticDisp[i] += ht_[l] * forcing.tide[i];
+          staticGrav[i] += kt_[l] * forcing.tide[i];
+        }
+      }
+    }
     staticSlc.resize(coefSize);
     for (auto i = std::size_t{0}; i < coefSize; ++i) {
       staticSlc[i] = -(staticDisp[i] + staticGrav[i] / g_);
     }
+    if (tidal) {
+      for (auto i = std::size_t{0}; i < coefSize; ++i) {
+        staticSlc[i] -= forcing.tide[i] / g_;
+      }
+    }
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
+  }
+  const Block2 tide2 = tidal ? BlockOf(forcing.tide) : Block2{};
+  // A layer on the solid surface: its thickness is in the sea level
+  // change alone, with the static terms, and so in the flotation.
+  const bool layered = !forcing.solidSurfaceChange.empty();
+  auto layer2 = Block2{};
+  if (layered) {
+    const auto layerLm = grid_.Expand(forcing.solidSurfaceChange);
+    if (staticSlc.empty()) staticSlc.assign(coefSize, 0.0);
+    for (auto i = std::size_t{0}; i < coefSize; ++i) staticSlc[i] -= layerLm[i];
+    layer2 = BlockOf(layerLm);
+  }
+  if (!forcing.tangentialResponse.empty() &&
+      forcing.tangentialResponse.size() != coefSize) {
+    throw std::invalid_argument(
+        "tangential response is not a coefficient vector of the grid");
   }
 
   const auto& initialBathy = state.seaLevel;
@@ -763,45 +1070,56 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
       newIce[i] += forcing.iceThicknessChange[i];
     }
   }
-  auto sedimentLoad = std::vector<double>{};
-  auto sedimentMassChange = 0.0;
-  if (!forcing.sedimentThicknessChange.empty()) {
-    sedimentLoad.resize(fieldSize);
+  // The direct loads: the one inside the water budget takes its mass
+  // from the ocean, the one outside it moves no water.
+  auto directData = std::vector<double>{};
+  auto directMassChange = 0.0;
+  if (!forcing.directLoad.empty()) {
+    directData = forcing.directLoad;
+    directMassChange = IntegrateSurface(directData);
+  }
+  if (!forcing.directLoadOutsideWaterBudget.empty()) {
+    if (directData.empty()) directData.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sedimentLoad[i] = sedimentDensity * forcing.sedimentThicknessChange[i];
+      directData[i] += forcing.directLoadOutsideWaterBudget[i];
     }
-    sedimentMassChange = IntegrateSurface(sedimentLoad);
   }
 
-  auto initialWater = std::vector<double>(fieldSize);
-  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    initialWater[i] = initialOcean[i] * initialBathy[i];
-  }
-  const double initialWaterMass =
-      waterDensity_ * IntegrateSurface(initialWater);
+  // The changes of grounded ice and of ocean water per unit area from
+  // the state given, formed from the changes of the fields: a small
+  // change is then not the difference of two large masses.
+  const auto iceChange = [&](std::size_t i) {
+    return forcing.iceThicknessChange.empty() ? 0.0
+                                              : forcing.iceThicknessChange[i];
+  };
+  auto groundedIceChangeAt = [&](std::size_t i, double ocean) {
+    return iceDensity_ * ((1.0 - ocean) * iceChange(i) -
+                          (ocean - initialOcean[i]) * initialIce[i]);
+  };
+  auto waterChangeAt = [&](std::size_t i, double ocean, double seaLevelChange) {
+    return waterDensity_ * (ocean * seaLevelChange +
+                            (ocean - initialOcean[i]) * initialBathy[i]);
+  };
 
   std::vector<double> currentOcean = initialOcean;
-  std::vector<double> currentBathy = initialBathy;
+  // the final state's sea level less the first's
+  auto currentChange = std::vector<double>(fieldSize, 0.0);
   auto slcData = std::vector<double>(fieldSize, 0.0);
   auto omega = std::array<double, 3>{0.0, 0.0, 0.0};
 
   auto loadLm = std::vector<std::complex<double>>(coefSize, 0.0);
   auto lastRotation = std::optional<Rotation>{};
 
+  auto lastShift = 0.0;
   auto err = std::numeric_limits<double>::infinity();
   auto converged = false;
   auto count = 0;
   while (count < options.max_iterations) {
     auto totalLoad = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      const double groundedIceChange =
-          iceDensity_ * ((1.0 - currentOcean[i]) * newIce[i] -
-                         (1.0 - initialOcean[i]) * initialIce[i]);
-      const double oceanMassChange =
-          waterDensity_ * (currentOcean[i] * currentBathy[i] -
-                           initialOcean[i] * initialBathy[i]);
-      totalLoad[i] = groundedIceChange + oceanMassChange;
-      if (!sedimentLoad.empty()) totalLoad[i] += sedimentLoad[i];
+      totalLoad[i] = groundedIceChangeAt(i, currentOcean[i]) +
+                     waterChangeAt(i, currentOcean[i], currentChange[i]);
+      if (!directData.empty()) totalLoad[i] += directData[i];
     }
     loadLm = grid_.Expand(totalLoad);
 
@@ -821,59 +1139,56 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
                            staticGrav2, 0.0, 0.0, forcing.inertiaMomentChange,
                            std::array<double, 3>{0.0, 0.0, 0.0}, transverse);
       omega = lastRotation->omega;
-      SetBlock(slcLm, -1.0 * (lastRotation->disp2 +
-                              (1.0 / g_) * (lastRotation->grav2 +
-                                            lastRotation->centrifugal)));
+      // the degree-2 block anew: the rotation's, and the tide's own
+      // potential there
+      const auto potential2 =
+          tidal ? lastRotation->grav2 + lastRotation->centrifugal + tide2
+                : lastRotation->grav2 + lastRotation->centrifugal;
+      SetBlock(slcLm, -1.0 * (lastRotation->disp2 + (1.0 / g_) * potential2 +
+                              layer2));
       slcLm[SurfaceGrid::Index(0, 0)] -=
           (hc_ + (kc_ + 1.0) / g_) * lastRotation->centrifugal0;
     }
     const auto slcLocal = grid_.Synthesise(slcLm);
 
-    // The explicit mass budget: grounded ice and sediment taken from the
-    // ocean, the eustatic shift closing it exactly.
-    auto rawBathy = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      rawBathy[i] = initialBathy[i] + slcLocal[i];
-      if (!forcing.sedimentThicknessChange.empty()) {
-        rawBathy[i] -= forcing.sedimentThicknessChange[i];
-      }
-      if (!forcing.dynamicSeaLevelChange.empty()) {
-        rawBathy[i] += forcing.dynamicSeaLevelChange[i];
+    // The explicit water budget: the grounded ice and the direct load
+    // inside it taken from the ocean, the uniform shift closing it
+    // exactly. The layer's thickness is already in the local change.
+    auto rawChange = slcLocal;
+    if (!forcing.dynamicSeaLevelChange.empty()) {
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        rawChange[i] += forcing.dynamicSeaLevelChange[i];
       }
     }
-    auto groundedIceChange = std::vector<double>(fieldSize);
+    // what the water has gained before the shift, and what it must lose
+    auto unbalanced = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      groundedIceChange[i] =
-          iceDensity_ * ((1.0 - currentOcean[i]) * newIce[i] -
-                         (1.0 - initialOcean[i]) * initialIce[i]);
+      unbalanced[i] = groundedIceChangeAt(i, currentOcean[i]) +
+                      waterChangeAt(i, currentOcean[i], rawChange[i]);
     }
-    const auto iceMassChange = IntegrateSurface(groundedIceChange);
-    const double targetWaterMass =
-        initialWaterMass - iceMassChange - sedimentMassChange;
-    auto currentRaw = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      currentRaw[i] = currentOcean[i] * rawBathy[i];
-    }
-    const double currentRawWaterMass =
-        waterDensity_ * IntegrateSurface(currentRaw);
     const double oceanDensityArea =
         waterDensity_ * IntegrateSurface(currentOcean);
     const double eustaticShift =
-        (targetWaterMass - currentRawWaterMass) / oceanDensityArea;
+        -(IntegrateSurface(unbalanced) + directMassChange) / oceanDensityArea;
 
-    std::vector<double> newSlc(fieldSize), newBathy(fieldSize),
+    lastShift = eustaticShift;
+    std::vector<double> newSlc(fieldSize), newChange(fieldSize),
         newOcean(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       newSlc[i] = slcLocal[i] + eustaticShift;
-      newBathy[i] = rawBathy[i] + eustaticShift;
-      const auto land = !state.forcedLand.empty() && state.forcedLand[i] != 0;
+      newChange[i] = rawChange[i] + eustaticShift;
+      const double newBathy = initialBathy[i] + newChange[i];
+      const auto land = !held.empty() && held[i] != 0;
       newOcean[i] =
-          !land && waterDensity_ * newBathy[i] - iceDensity_ * newIce[i] > 0.0
+          !land && waterDensity_ * newBathy - iceDensity_ * newIce[i] > 0.0
               ? 1.0
               : 0.0;
     }
 
-    const auto maxSlc = MaxAbs(slcData);
+    // The change between iterates against the size of the change, taken
+    // before the uniform shift as well as after: a layer whose water the
+    // shift returns exactly leaves no change to measure against.
+    const auto maxSlc = std::max(MaxAbs(slcData), count > 0 ? MaxAbs(slcLocal) : 0.0);
     if (maxSlc > 0.0) {
       auto diff = 0.0;
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -885,7 +1200,7 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
     }
 
     slcData = std::move(newSlc);
-    currentBathy = std::move(newBathy);
+    currentChange = std::move(newChange);
     currentOcean = std::move(newOcean);
     ++count;
     if (err <= options.rtol) {
@@ -908,23 +1223,65 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
       potLm[i] += staticGrav[i];
     }
   }
+  std::vector<std::complex<double>> tanLm(coefSize);
+  for (auto l = 0; l <= grid_.LMax(); ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      tanLm[i] = l_[l] * loadLm[i];
+    }
+  }
+  if (!forcing.tangentialResponse.empty()) {
+    for (auto i = std::size_t{0}; i < coefSize; ++i) {
+      tanLm[i] += forcing.tangentialResponse[i];
+    }
+  }
+  if (tidal) {
+    for (auto l = 1; l <= grid_.LMax(); ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        tanLm[i] += lt_[l] * forcing.tide[i];
+      }
+    }
+  }
   if (rotational && lastRotation) {
     SetBlock(dispLm, lastRotation->disp2);
     SetBlock(potLm, lastRotation->grav2);
     dispLm[SurfaceGrid::Index(0, 0)] += hc_ * lastRotation->centrifugal0;
     potLm[SurfaceGrid::Index(0, 0)] += kc_ * lastRotation->centrifugal0;
+    AddBlock(tanLm, lt_[2] * lastRotation->centrifugal);
   }
 
   NonlinearResponse out;
   out.finalState.iceThickness = std::move(newIce);
-  out.finalState.seaLevel = std::move(currentBathy);
+  out.finalState.seaLevel = initialBathy;
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    out.finalState.seaLevel[i] += currentChange[i];
+  }
   out.finalState.oceanFunction = std::move(currentOcean);
   out.finalState.oceanArea = IntegrateSurface(out.finalState.oceanFunction);
-  out.finalState.forcedLand = state.forcedLand;
-  out.response.seaLevelChange = std::move(slcData);
+  out.finalState.forcedLand = held;
+  out.response.relativeSeaLevelChange = std::move(slcData);
   out.response.displacement = grid_.Synthesise(dispLm);
   out.response.potential = grid_.Synthesise(potLm);
+  out.response.tangentialPotential = grid_.Synthesise(tanLm);
+  if (!forcing.toroidalResponse.empty()) {
+    if (forcing.toroidalResponse.size() != coefSize) {
+      throw std::invalid_argument(
+          "toroidal response is not a coefficient vector of the grid");
+    }
+    out.response.toroidalPotential = grid_.Synthesise(forcing.toroidalResponse);
+  }
   out.response.angularVelocity = omega;
+  out.response.uniformShift = lastShift;
+  // the load of the state returned, which the last pass's update made
+  auto carried = std::vector<double>(fieldSize);
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    carried[i] = groundedIceChangeAt(i, out.finalState.oceanFunction[i]) +
+                 waterChangeAt(i, out.finalState.oceanFunction[i],
+                               currentChange[i]);
+    if (!directData.empty()) carried[i] += directData[i];
+  }
+  out.loadCoefficients = grid_.Expand(carried);
   out.response.iterations = count;
   out.response.error = err;
   out.response.converged = converged;

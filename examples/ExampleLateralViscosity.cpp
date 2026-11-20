@@ -13,12 +13,13 @@
  * The load is a tenth of the Antarctic ice of the present-day state,
  * melted at once and held.
  *
- * Outputs (SI): final sea-level maps for both runs and their difference,
- * and the per-step iteration counts of the lateral fixed point.
+ * Outputs (SI), in output/library/lateral_viscosity/lateral_viscosity.txt:
+ * final sea-level maps for both runs and their difference, and the
+ * per-step iteration counts of the lateral fixed point.
  *
  *   ExampleLateralViscosity [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_lateral.py.
+ * Run from build/examples; plot with python/plot_lateral.py.
  */
 
 #include <cmath>
@@ -54,7 +55,7 @@ int main(int argc, char** argv) {
   Viscoelastic3D flat(earth.rheology, lmax,
                       [](double, double, double) { return 0.0; });
 
-  SeaLevelSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
+  GRDSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -78,34 +79,36 @@ int main(int argc, char** argv) {
                           iceSi[i] / length
                     : 0.0;
   }
-  auto iceLoad = [&](double) { return load; };
+  auto directLoad = [&](double) { return load; };
   auto times = std::vector<double>{};
   for (auto n = 0; n < nodes; ++n) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
 
-  const auto report = examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(
+  const auto report = examples::NodeReporter<Evolution3D::Snapshot>(
       nodes - 1, scales.Time());
   examples::Say(
       std::format("the run with lateral viscosity, {} steps:", nodes - 1));
-  SeaLevelEvolution3D run3(lateral, solver, state, {.on_snapshot = report});
-  const auto with = run3.Run(times, iceLoad);
+  Evolution3D run3(lateral, solver, state, {.on_snapshot = report});
+  const auto with = run3.Run(times, directLoad);
   examples::Say("its radial twin:");
-  SeaLevelEvolution3D run1(flat, solver, state, {.on_snapshot = report});
-  const auto without = run1.Run(times, iceLoad);
+  Evolution3D run1(flat, solver, state, {.on_snapshot = report});
+  const auto without = run1.Run(times, directLoad);
 
-  examples::Writer out("lateral.txt");
+  const auto table = examples::OutputDirectory("lateral_viscosity") /
+                     "lateral_viscosity.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "3D lateral viscosity (one decade peak to peak) vs the radial "
       "reference, held northern melt, 10 kyr (SI)");
   out.Grid(grid);
-  out.Field("slc_lateral_m", with.back().seaLevelChange, length);
-  out.Field("slc_radial_m", without.back().seaLevelChange, length);
+  out.Field("slc_lateral_m", with.back().relativeSeaLevelChange, length);
+  out.Field("slc_radial_m", without.back().relativeSeaLevelChange, length);
   auto difference = std::vector<double>(grid.FieldSize());
   for (auto i = std::size_t{0}; i < difference.size(); ++i) {
     difference[i] =
-        with.back().seaLevelChange[i] - without.back().seaLevelChange[i];
+        with.back().relativeSeaLevelChange[i] - without.back().relativeSeaLevelChange[i];
   }
   out.Field("slc_difference_m", difference, length);
   // The lateral log-viscosity pattern at the surface, for the plot.
@@ -121,6 +124,6 @@ int main(int argc, char** argv) {
   }
   out.Series("iterations", {"t_kyr", "coupled_iterations", "residual"}, rows);
 
-  std::cout << "wrote lateral.txt\n";
+  std::cout << "wrote " << table.string() << "\n";
   return 0;
 }

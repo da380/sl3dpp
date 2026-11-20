@@ -54,7 +54,7 @@ TEST(Toolkit, SphericalHarmonicRoundTrip) {
 }
 
 // Geographic <-> spherical polar conversions round-trip and hit the
-// landmarks.
+// landmarks (plain arithmetic: the exact ones to the last bits).
 TEST(Toolkit, GeographicConversions) {
   using namespace sl3dpp;
   EXPECT_DOUBLE_EQ(CoLatitudeOf(90.0), 0.0);

@@ -7,8 +7,7 @@
  * the ice history, the initial sea level and the laterally varying
  * inverse relaxation times, about a recorded trajectory, and the
  * second-order run along two such directions. The 3D form of
- * TangentLinear.hpp (pyslfp has no 3D counterpart); see
- * docs/adjoints.md.
+ * TangentLinear.hpp; see docs/adjoints.md.
  *
  * With the ocean functions held the coupled step is linear in its loads
  * and its memory, so the tangent-linear step is the forward step once
@@ -32,7 +31,7 @@
  * branch moduli's variation, and the bulk term through the scalar
  * pipeline; the start's unrelaxed response alike.
  *
- * Conventions follow SeaLevelEvolution3D: times increasing in SLE units,
+ * Conventions follow Evolution3D: times increasing in SLE units,
  * grids in the solver's units; an itau perturbation is per branch over
  * the coupling's grid values ([FieldOffset(node) + x], the layout of
  * Kernels3D::itauKernel3D) in MATERIAL units, and the log-viscosity
@@ -51,24 +50,50 @@
 
 namespace sl3dpp {
 
+namespace detail {
+struct StageRef;
+}  // namespace detail
+
 /// A direction in the 3D evolution's inputs. Empty members are absent;
 /// `itau` and `logViscosity` may both be given (they add). The material
-/// direction is MaterialDirection3D (Adjoint3D.hpp).
+/// direction is MaterialDirection3D (Adjoint3D.hpp). The members given per
+/// node are the direction's values at the nodes, a stage of Sdirk2 inside
+/// a step taking the combination of the step's two nodes' that the
+/// forward run takes of its forcing, as TangentPerturbation's.
 struct TangentPerturbation3D {
-  std::vector<std::vector<double>> directLoad;    ///< per node, frozen runs
-  std::vector<std::vector<double>> iceThickness;  ///< per node
+  std::vector<std::vector<double>> directLoad;    ///< per node
+  /// Per node, perturbations of the run's direct load outside the
+  /// water budget and of the height of a layer on the solid surface
+  /// (Evolution3D::Forcing).
+  std::vector<std::vector<double>> directLoadOutsideWaterBudget;
+  std::vector<std::vector<double>> solidSurfaceChange;
+  /// Per node, a perturbation of the prescribed tidal potential of the
+  /// run, its coefficients on the surface (degree 2 and up,
+  /// kLowestTideDegree: a part below is refused), frozen or migrating
+  /// (the shorelines of a migrating one held).
+  std::vector<std::vector<std::complex<double>>> tide;
+  /// Per node, a perturbation of the interior sources acting there
+  /// (Evolution3D::Forcing::sources and stressGluts, solver units); the
+  /// run is linear in them, the shorelines of a migrating one held.
+  std::vector<std::vector<PointSource>> sources;
+  std::vector<std::vector<StressGlut>> stressGluts;
+  /// Per node, relative to the first node's, as
+  /// TangentPerturbation::iceThickness.
+  std::vector<std::vector<double>> iceThickness;
   std::vector<double> initialSeaLevel;            ///< migrating runs
   /// Per branch over the grid values, material units.
   std::vector<std::vector<double>> itau;
   /// Over the grid values: delta itau_k = -itau_k(x) logViscosity(x).
   std::vector<double> logViscosity;
-  /// The moduli (docs/adjoints.md); needs the recorded
-  /// trajectory, memory nodes at the GLL points and no rotational
-  /// feedback. Distributed like the run.
+  /// The moduli, over the grid values of the memory nodes
+  /// (docs/adjoints.md); needs the recorded trajectory. Distributed like
+  /// the run.
   MaterialDirection3D material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && iceThickness.empty() &&
+    return directLoad.empty() && directLoadOutsideWaterBudget.empty() &&
+           solidSurfaceChange.empty() && tide.empty() && sources.empty() &&
+           stressGluts.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty() && logViscosity.empty() &&
            material.Empty();
   }
@@ -91,36 +116,49 @@ struct SecondOrderDirection3D {
 class TangentLinearSolver3D {
  public:
   struct Options {
-    AdjointMethod method = AdjointMethod::Continuous;
+    /// Discrete (the default, as AdjointSolver3D's) or Continuous, as
+    /// TangentLinearSolver's: about an evolution under Sdirk2 either run
+    /// steps the tangent state by the scheme's stages, and the two are one
+    /// run, to the coupled iteration's tolerance (docs/adjoints.md §1a).
+    AdjointMethod method = AdjointMethod::Discrete;
     /// The SLE's own tolerance per pass, and the combined fixed point's
-    /// controls (as SeaLevelEvolution3D::Options).
+    /// controls (as Evolution3D::Options).
     double rtol = 1e-9;
     int anderson_memory = 5;
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
     /// Keep the tangent-linear state (with its strain) and the load and
-    /// centrifugal coefficients on every snapshot: what a second-order
-    /// run reads.
+    /// centrifugal coefficients on every snapshot, and under a multi-stage
+    /// scheme each inner stage's (Evolution3D::Snapshot::stages): what a
+    /// second-order run reads.
     bool record = false;
+    /// As TangentLinearSolver::Options::initial_sea_level_held: RunSecondOrder
+    /// about a state calibrated under migrating shorelines
+    /// (Evolution3D::Calibrated) is refused unless this states that the
+    /// second derivative with the initial sea level held is wanted.
+    bool initial_sea_level_held = false;
     std::function<void(std::size_t node)> on_node{};
   };
 
-  explicit TangentLinearSolver3D(const SeaLevelEvolution3D& evolution,
+  explicit TangentLinearSolver3D(const Evolution3D& evolution,
                                  Options options);
-  explicit TangentLinearSolver3D(const SeaLevelEvolution3D& evolution)
+  explicit TangentLinearSolver3D(const Evolution3D& evolution)
       : TangentLinearSolver3D(evolution, Options{}) {}
 
   /// The derivative of the run over `times` along `direction`. With an
   /// itau or log-viscosity perturbation the recorded forward `trajectory`
   /// is required (the states between kept nodes rebuilt by forward steps
   /// under the recorded loads, with the run's own iteration). With
-  /// `oceanFunctions` from a migrating run the run linearises about that
-  /// trajectory. Distributed over radius like the evolution, collective.
-  [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> Run(
+  /// `oceanFunctions` from a migrating run (OceanFunctions::Of its
+  /// snapshots) the run linearises about that trajectory; about a
+  /// migrating run under Sdirk2 each step's first stage is linearised
+  /// about its own shorelines (OceanFunctions::stages). Distributed over
+  /// radius like the evolution, collective.
+  [[nodiscard]] std::vector<Evolution3D::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The second-order run along u and v, about the forward trajectory and
   /// the recorded tangent-linear runs of u and v (`Run` with `record`):
@@ -133,14 +171,16 @@ class TangentLinearSolver3D {
   /// trajectory (its full solution and its decayed memory with v's itau
   /// drive) and of v's on u's, the start's alike (docs/adjoints.md
   /// §15). Symmetric in u and v; the 3D form of
-  /// TangentLinearSolver::RunSecondOrder.
-  [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> RunSecondOrder(
+  /// TangentLinearSolver::RunSecondOrder, refusing as it does a run of the
+  /// other method and, unless Options::initial_sea_level_held, a
+  /// calibrated migrating run.
+  [[nodiscard]] std::vector<Evolution3D::Snapshot> RunSecondOrder(
       std::span<const double> times,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangentU,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangentV,
+      std::span<const Evolution3D::Snapshot> tangentU,
+      std::span<const Evolution3D::Snapshot> tangentV,
       const SecondOrderDirection3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The itau perturbation of a log-viscosity perturbation over the grid
   /// values, per branch: -itau_k(x) field(x) (eta = eta_ref exp(delta)).
@@ -162,9 +202,19 @@ class TangentLinearSolver3D {
       const std::vector<std::vector<double>>& ditau);
 
  private:
-  using Direct = std::function<std::vector<double>(std::size_t node)>;
+  /// A term of the direction at a stage of a step (detail::StageRef; the
+  /// first node is a stage of its own, ending there).
+  using Direct =
+      std::function<std::vector<double>(const detail::StageRef& stage)>;
+  using Tide = std::function<std::vector<std::complex<double>>(
+      const detail::StageRef& stage)>;
+  /// The interior sources perturbed at a node.
+  using Sources = std::function<
+      std::pair<std::vector<PointSource>, std::vector<StressGlut>>(
+          std::size_t node)>;
+  /// A stage's memory increment.
   using Drive = std::function<std::vector<GridCoupling::TensorField>(
-      std::size_t node, double dt)>;
+      const detail::StageRef& stage)>;
 
   /// The material forcing of a march (TangentLinear3D.cpp): a start
   /// response and a force per step, from a direction (MaterialDrive3D:
@@ -174,13 +224,13 @@ class TangentLinearSolver3D {
   struct MaterialDrive3D;
   struct MaterialSecondDrive3D;
   class ForwardCursor3D;
-  [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> March(
-      std::span<const double> times,
-      std::span<const std::vector<double>> oceanFunctions,
+  [[nodiscard]] std::vector<Evolution3D::Snapshot> March(
+      std::span<const double> times, const OceanFunctions& oceanFunctions,
       const Direct& directAt, const Drive& drive,
-      const MaterialForcing3D* material) const;
-  /// A material drive after the checks (the memory nodes at the GLL
-  /// points, no rotational feedback, the fields on the grid values).
+      const MaterialForcing3D* material, const Tide& tideAt = {},
+      const Sources& sourcesAt = {}, const Direct& outsideAt = {},
+      const Direct& layerAt = {}) const;
+  /// A material drive after the checks (the fields on the grid values).
   [[nodiscard]] std::shared_ptr<MaterialDrive3D> MakeMaterialDrive3D(
       const MaterialDirection3D& direction,
       const ForwardTrajectory3D* trajectory, ForwardCursor3D* cursor) const;
@@ -203,7 +253,7 @@ class TangentLinearSolver3D {
       const std::vector<std::complex<double>>&)>
   TideColumnsOf() const;
 
-  const SeaLevelEvolution3D* evolution_;
+  const Evolution3D* evolution_;
   Options options_;
 };
 

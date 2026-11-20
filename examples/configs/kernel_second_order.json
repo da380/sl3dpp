@@ -1,0 +1,31 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 16},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 22},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
+  },
+  "ocean": {
+    "at": "start",
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "perturbation": {
+    "model": {"viscosity": {"file": "../data/synthetic_weak_zone.nc"}}
+  },
+  "kernels": {
+    "parameters": ["ice", "viscosity"],
+    "second_order": true,
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",
+       "latitude": 60, "longitude": 275, "width_deg": 12, "date_kyr_bp": 0},
+      {"type": "relative_sea_level_point", "name": "far_field_sea_level",
+       "latitude": -17.5, "longitude": 210.5, "date_kyr_bp": 10},
+      {"type": "rotation", "name": "length_of_day", "component": "z"}
+    ],
+    "output": "out/kernel_second_order"
+  }
+}

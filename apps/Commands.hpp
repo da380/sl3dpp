@@ -8,12 +8,34 @@
  *
  * `love-numbers` solves the per-degree systems of a radial model and
  * writes the SI Love-number table as plain text under a provenance
- * header. `fingerprint` solves the elastic sea level equation for an
- * ice change on a present-day state read from a planetmodel surface
- * file (pyslfp's `export_ice_history` writes one), and writes the
- * fingerprint — sea-level change, displacement, potential, the ice
- * change and the ocean function, with the angular-velocity perturbation
- * in the metadata — as a planetmodel surface file.
+ * header. `solve` solves the sea level equation, the ocean coupled to the
+ * solid Earth, on a state (the sea level and the ice at one instant) read
+ * from file inputs (pyslfp's `export_ice_history` writes such files),
+ * under any mix of an ice change, surface loads, a tide and seismic
+ * sources, with frozen or migrating shorelines: in the static problem the
+ * solve at the state's date on the elastic Earth, in the quasi-static
+ * problem the run through time from a state at an end of the window,
+ * restartable from disk checkpoints; without a state, the same problems
+ * on a body without an ocean, the response of the solid body to the
+ * loads, the tide and the sources with the rotational feedback as asked.
+ * `kernel` gives the adjoint sensitivity kernels of measurements of the
+ * same problems, read from the same config, its `kernels` block naming
+ * the measurements and the kernels written, and, with `second_order`, the
+ * kernels' derivatives along the config's `perturbation` block beside
+ * them. `tangent` gives the
+ * tangent-linear run of the same problems along a direction in their
+ * inputs, the config's `perturbation` block (Perturbation.hpp), written as
+ * `solve`'s files, their fields first-order changes, where its `tangent`
+ * block says. All three read a config of blocks (Blocks.hpp, Forcing.hpp,
+ * Files.hpp) under a top-level `problem`, 1-D or 3-D as its `model` block
+ * makes it, and one file serves them all: each checks the others' blocks
+ * and does not use them (CheckOtherBlocks), `kernel` and `tangent` the
+ * `output`, `checkpoint` and `restart` members of `solve` too. The
+ * `trajectory` block is every command's (Trajectory.hpp): `solve` records
+ * its forward run into the trajectory store it names, and `kernel` sweeps
+ * from that store, and `tangent` runs about it, without running the
+ * forward problem, or record into it when it holds no complete recording
+ * of the run (Recorded.hpp).
  *
  * The readers are separate from the runners so the configs can be
  * checked without running anything; both throw `planetmodel::Error`
@@ -22,9 +44,16 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "Blocks.hpp"
+#include "Common.hpp"
+#include "Forcing.hpp"
+#include "Perturbation.hpp"
+#include "Trajectory.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/Geography.hpp"
@@ -34,16 +63,6 @@
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp::app {
-
-/// The deck formats a config may name: planetmodel's GIA and MINEOS
-/// tables, and the library's six-column elastic table (rho, vpv, vsv,
-/// vph, vsh, eta; no header), the test and example decks' format.
-/// Gia is planetmodel's Maxwell deck (`"maxwell"` in a config; `"gia"`, the
-/// format's old name, is kept as an alias).
-enum class ModelFormat { Gia, Mineos, Elastic };
-
-/// The format a `ModelFormat` stands for.
-[[nodiscard]] DeckFormat FormatOf(ModelFormat format);
 
 /// The config of `sl3d love-numbers`.
 struct LoveNumbersInput {
@@ -63,199 +82,303 @@ struct LoveNumbersInput {
 /// Runs a love-numbers config and returns the summary line.
 [[nodiscard]] std::string RunLoveNumbers(const std::filesystem::path& config);
 
-/// How a fingerprint config changes the ice.
-struct IceChange {
-  enum class Kind { CapFraction, CapThickness } kind = Kind::CapFraction;
-  GeographicPoint site;
-  double width = 0.0;   ///< the Gaussian cap's width, radians
-  double amount = 0.0;  ///< the fraction, or the thickness in metres
-};
-
-/// The config of `sl3d fingerprint`.
-struct FingerprintInput {
-  std::filesystem::path model;
-  ModelFormat format = ModelFormat::Gia;
-  int lmax = 0;
-  std::filesystem::path state;  ///< a planetmodel surface file
-  double date_kyr_bp = 0.0;     ///< the state's date, kyr before present
-  IceChange change;
-  RotationalFeedback rotation = RotationalFeedback::Full;
-  std::filesystem::path output;  ///< the surface file to write
-};
-
-/// Reads a fingerprint config, relative paths against its directory.
-[[nodiscard]] FingerprintInput ReadFingerprintInput(
-    const std::filesystem::path& config);
-
-/// Runs a fingerprint config and returns the summary line.
-[[nodiscard]] std::string RunFingerprint(const std::filesystem::path& config);
-
-/// The config of `sl3d evolve1d`: a 1D viscoelastic GIA run under an
-/// ice history, restartable from disk checkpoints.
-struct EvolveInput {
-  std::filesystem::path model;
-  ModelFormat format = ModelFormat::Gia;
-  int lmax = 0;
-  /// `sl3d evolve` alone: a planetmodel model file whose viscosity,
-  /// eta(x) = eta_bar(r) exp(delta(x)), supplies both the radial Maxwell
-  /// body and the lateral perturbation (io/ModelViscosity); empty for
-  /// the 1D command, whose viscosity is the deck's own column.
-  std::filesystem::path viscosity;
-  bool viscosity_file_radial = false;  ///< the file's own radial reference
-  std::filesystem::path state;        ///< a planetmodel surface file
-  std::filesystem::path ice_history;  ///< likewise; often the same file
-  double start_kyr_bp = 0.0;          ///< the window, kyr before present
-  double end_kyr_bp = 0.0;
-  int nodes = 0;                      ///< time nodes, the ends included
-  Scheme scheme = Scheme::ExponentialTrapezoid;
-  RotationalFeedback rotation = RotationalFeedback::Full;
-  /// The shorelines: frozen at the start's (the linear equation), or
-  /// following flotation.
-  Shorelines shorelines = Shorelines::Frozen;
-  /// With `calibrate`, the initial sea level is calibrated so that the run
-  /// reaches the state file's sea level at the window's end, by the method
-  /// and within the iterations and tolerance given (InitialSeaLevel.hpp),
-  /// instead of being read from the state file at the window's start.
-  bool calibrate = false;
-  CalibrationMethod calibration_method = CalibrationMethod::FixedPoint;
-  int calibration_iterations = 10;
-  double calibration_rtol = 1e-4;
-  /// The 3D command's combined (strain, ocean, rotation) fixed point.
-  double coupled_rtol = 1e-9;
-  int max_coupled_iterations = 60;
-  /// The 3D commands' transforms cut with depth: the degrees a memory
-  /// node's grid may take below lmax (Viscoelastic3D::Options::
-  /// transform_degrees); empty, every node at lmax.
-  std::vector<int> transform_degrees;
-  /// The 3D commands' last-level cache the transforms block their work
-  /// for, in MiB (Viscoelastic3D::Options::cache_bytes); 0, the library's
-  /// default.
-  std::size_t cache_mb = 0;
-  /// With "hydrostatic", the moments of inertia difference is set from
-  /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
-  /// which the full transverse feedback needs when the input moments
-  /// sustain less oblateness than the model's tidal response.
-  bool hydrostatic_moments = false;
-  double rtol = 1e-9;
-  /// Checkpointing: every `checkpoint_every`-th node's recurrence and
-  /// the history so far go to `checkpoint_directory` (none when the
-  /// directory is empty); a run finding a checkpoint there resumes from
-  /// it unless `restart` is false; a positive `max_walltime_min` makes
-  /// the run checkpoint and stop cleanly once the wall clock passes it.
-  std::filesystem::path checkpoint_directory;
-  int checkpoint_every = 0;
-  double max_walltime_min = 0.0;
+/// The config of `sl3d solve`: the sea level equation, the ocean coupled
+/// to the solid Earth, under any mix of an ice change, surface loads, a
+/// tide and seismic sources, with frozen or migrating shorelines. The
+/// static problem is the solve on the state (the sea level and the ice) at
+/// its date on the elastic Earth, radial or, under lateral moduli, 3-D;
+/// the quasi-static problem is the run through time from a state at an
+/// end of the window, its nodes dates before present or times on the
+/// run's own clock in a unit (Window), of the radial model, or, under a
+/// lateral viscosity or lateral moduli, the 3-D one, restartable from disk
+/// checkpoints. Without an `ocean` block the state is absent and the body
+/// has no ocean.
+struct SolveInput {
+  Run run;
+  CheckpointBlock checkpoint;  ///< no directory: no checkpoints
+  /// The trajectory store the run is recorded into (no directory: none).
+  /// A run that resumes from a checkpoint continues the incomplete store
+  /// its interrupted run left from the checkpoint's node, and is refused
+  /// one that does not hold the run to that node.
+  TrajectoryBlock trajectory;
+  /// Whether a run finding a checkpoint in the directory resumes from it.
   bool restart = true;
-  std::filesystem::path output;  ///< the surface file of SI histories
+  /// The surface file, the exchange tables of surface coefficients and,
+  /// in the static problem, the volume file (Outputs.hpp).
+  OutputBlock output;
 };
 
-/// Reads an evolve config, relative paths against its directory.
-[[nodiscard]] EvolveInput ReadEvolveInput(const std::filesystem::path& config);
+/// Reads the members of a solve config beside its run, relative paths
+/// against `directory`, held to the run: `checkpoint` and `restart`
+/// (refused in the static problem, and a checkpoint under seismic
+/// sources) and `output` (its members held to the problem, the volume
+/// file refused under seismic sources and without gravity; required
+/// where `outputRequired`, and otherwise read only where given).
+[[nodiscard]] SolveInput ReadSolveMembers(
+    const Json& top, Run run, const std::filesystem::path& directory,
+    bool outputRequired);
 
-/// Runs (or resumes) a 1D evolve config and returns the summary line.
-[[nodiscard]] std::string RunEvolve(const std::filesystem::path& config);
+/// Reads a solve config, relative paths against its directory, with its
+/// `trajectory` block (ReadTrajectoryBlock); a `kernels` block is checked
+/// (ReadKernelsBlock) and left unused.
+[[nodiscard]] SolveInput ReadSolveInput(const std::filesystem::path& config);
 
-/// Runs (or resumes) a 3D (lateral-viscosity) evolve config.
-[[nodiscard]] std::string RunEvolve3D(const std::filesystem::path& config);
+/// Runs (or resumes) a solve config and returns the summary line.
+[[nodiscard]] std::string RunSolve(const std::filesystem::path& config);
+
+/// The kernels a kernel config writes, each a set of fields per
+/// measurement (`kernels.parameters`): in the ice history, in a surface
+/// load at each node (in the water budget, outside it, and a layer on the
+/// solid surface), in the tidal potential's coefficients at each node, in
+/// the point moment tensors of the run's seismic sources at each node (a
+/// fault's patches each one), in the viscosity, and in the elastic moduli
+/// kappa and mu.
+enum class KernelParameter { Ice, Load, Tide, Moment, Viscosity, Moduli };
+
+/// The word a config names a parameter by.
+[[nodiscard]] std::string_view NameOf(KernelParameter parameter);
 
 /// One measurement of a kernel config: a named linear functional of one
-/// time node's outputs, or the decay time of a site's series over a
-/// window of nodes. Every date must be a node of the config's times.
+/// node's outputs, or the decay time of a site's series over a window of
+/// nodes. Its instants are located on the run's nodes when the config is
+/// read: a date before present (`date_kyr_bp`) in a dated run, a time on
+/// the run's own clock in its unit (`time`) in one counting forwards, the
+/// run's last node where neither is given, and the one node of the static
+/// problem, which takes neither.
 struct MeasurementSpec {
   enum class Type {
-    SeaLevelCap,
-    SeaLevelPoint,
+    RelativeSeaLevelCap,
+    RelativeSeaLevelPoint,
     DisplacementCap,
     DisplacementPoint,
+    DisplacementVectorCap,
+    DisplacementVectorPoint,
     PotentialCap,
     PotentialPoint,
     StokesCoefficient,
     Rotation,
     DecayTime
   };
-  Type type = Type::SeaLevelCap;
+  Type type = Type::RelativeSeaLevelCap;
+  std::string word;  ///< the type as the config names it
   std::string name;
   GeographicPoint site{};  ///< caps, points and the decay time's site
   double width = 0.0;      ///< a cap's Gaussian width, radians
   int degree = 0;          ///< a coefficient's degree and order (m < 0
   int order = 0;           ///< the sine term)
   AngularVelocityComponent component = AngularVelocityComponent::Z;
-  double date_kyr_bp = 0.0;  ///< a single-date measurement's node
-  /// The decay time's window of nodes and the estimator's uncertainties
-  /// (Measurements.hpp): the fit runs over every node of the window.
-  double window_start_kyr_bp = 0.0;
-  double window_end_kyr_bp = 0.0;
-  double time_uncertainty_kyr = 0.0;
+  /// A vector displacement's direction, by its components to the east, to
+  /// the north and upwards at the site (a cap's centre): the smoothed
+  /// displacement there along it (CapDisplacementMeasurement), or the
+  /// displacement at the point.
+  SurfaceDirection direction{};
+  /// The node a single-instant measurement reads (0 in the static
+  /// problem).
+  std::size_t node = 0;
+  /// The decay time's window of nodes, the first the earlier, and the
+  /// estimator's uncertainties (Measurements.hpp): the timing's in the
+  /// run's unit (kyr in a dated run), the series' in metres. The fit runs
+  /// over every node of the window.
+  std::size_t first = 0;
+  std::size_t last = 0;
+  double time_uncertainty = 0.0;
   double value_uncertainty_m = 0.0;
 };
 
-/// The config of `sl3d kernel1d` and `sl3d kernel`: the evolve commands'
-/// run members, a recording stride, and the measurements — one adjoint
-/// sweep, and one set of kernel files, per measurement.
-struct KernelInput {
-  EvolveInput run;
-  int record_stride = 1;
-  AdjointMethod method = AdjointMethod::Continuous;
-  /// `sl3d kernel` alone: with a directory given, the recorded states
-  /// are spilled there during the forward run and read back one at a
-  /// time by the sweep, so the trajectory's N / stride states live on
-  /// disk instead of in memory — the lever for large lmax.
-  std::filesystem::path trajectory_directory;
+/// The `kernels` block: the adjoint method, the kernels written, the
+/// measurements and the directory the kernel files go into. One adjoint
+/// sweep, and one set of kernel files, per measurement. How the forward
+/// run is recorded is the top-level `trajectory` block's.
+struct KernelsBlock {
+  /// The discrete adjoint by default: the exact gradient of the stepped
+  /// run, its error the forward run's own at any step. The continuous
+  /// adjoint converges to the same kernels, accurate once the steps are
+  /// short against the shortest relaxation time (docs/adjoints.md §1).
+  AdjointMethod method = AdjointMethod::Discrete;
+  /// The kernels written, each named once, in the order of
+  /// KernelParameter.
+  std::vector<KernelParameter> parameters;
+  /// `lateral`: the kernels in the viscosity and the moduli as fields over
+  /// the memory nodes' grids whatever the background (true), or the radial
+  /// profiles of a radial run (false). Absent: fields on a model with
+  /// lateral structure, profiles on a radial one; false on a model with
+  /// lateral structure is refused when the run is built.
+  std::optional<bool> lateral;
   std::vector<MeasurementSpec> measurements;
   std::filesystem::path output;  ///< the directory the files land in
+  /// `calibration`, a calibrated run's alone (`"at": "end"`): which
+  /// derivatives its kernels are. `derivative` "total" (the default): the
+  /// initial sea level re-calibrated as the parameters change, the
+  /// calibration's multiplier found by sweeps beside each measurement's
+  /// (InitialSeaLevel.hpp), at most `iterations` of them to `rtol`; or
+  /// "partial": the calibrated initial sea level held, one sweep. Under
+  /// frozen shorelines the two are one and no multiplier's sweep runs.
+  bool total = true;
+  int calibration_iterations = 20;
+  double calibration_rtol = 1e-8;
+  /// `second_order`: beside each kernel, its second-order kernel, the
+  /// kernel's derivative along the direction of the config's top-level
+  /// `perturbation` block (the action of the measurement's Hessian on the
+  /// direction), by `method`; false by default, the first-order kernels
+  /// alone whatever else the config holds.
+  bool second_order = false;
+
+  [[nodiscard]] bool Writes(KernelParameter parameter) const;
 };
 
-/// Reads a kernel config, relative paths against its directory.
+/// Which derivatives of a calibrated run a derivative command forms
+/// (`kernels.calibration`, `tangent.calibration`): the total ones, the
+/// initial sea level re-calibrated as the parameters change, by an
+/// iteration of at most `iterations` passes to `rtol` (InitialSeaLevel.hpp:
+/// the multiplier's sweeps, the linearised calibration's runs), or the
+/// partial ones, the calibrated initial sea level held.
+struct CalibratedDerivative {
+  bool total = true;
+  int iterations = 20;
+  double rtol = 1e-8;
+};
+
+/// Reads a `calibration` member of a derivative command's block: an object
+/// of `derivative` ("total", the default, or "partial"), `iterations` (at
+/// least 1, default 20) and `rtol` (positive, default 1e-8), refused on a
+/// run that does not calibrate, and its iteration's members beside
+/// "partial". `pass` names a pass of the iteration ("sweep", "run"), and
+/// `partial` and `iteration` the partial derivatives and the iteration as
+/// a refusal states them.
+[[nodiscard]] CalibratedDerivative ReadCalibratedDerivative(
+    const Json& calibration, const Run& run, std::string_view pass,
+    std::string_view partial, std::string_view iteration);
+
+/// Reads a list of measurements (`kernels.measurements`,
+/// `tangent.measurements`) of a run: at least one, each read against the
+/// run, their names plain file names no two share.
+[[nodiscard]] std::vector<MeasurementSpec> ReadMeasurements(
+    const Json& measurements, const Run& run);
+
+/// Reads a `kernels` block of a run, relative paths against `directory`,
+/// and holds it to the run: `method` (a word, default "discrete"),
+/// `parameters` (required, distinct words, each one the run gives; its
+/// absence refused, listing them), `lateral` (true or false; true refused
+/// unless the parameters name the viscosity or the moduli), `measurements`
+/// (required, ReadMeasurements: at least one, each located on the run's
+/// nodes and held to its band and its ocean), `output` (required, the
+/// directory) and `calibration` (an object of `derivative`, `iterations`
+/// and `rtol`, refused on a run that does not calibrate, and its
+/// iteration's members beside "partial"). The recording's members,
+/// `record_stride` and `trajectory`, are refused, naming the top-level
+/// `trajectory` block's. The block is refused without gravity, which has
+/// no kernels. `second_order` (true or false) is held to the run: the
+/// second-order kernels are refused, each by name, of a calibrated
+/// run under migrating shorelines as total derivatives (the partial ones,
+/// `calibration.derivative` "partial", are built), and of a `decay_time`
+/// measurement (the fit's second derivative is not built).
+[[nodiscard]] KernelsBlock ReadKernelsBlock(
+    const Json& block, const Run& run, const std::filesystem::path& directory);
+
+/// Refuses, at `kernels.second_order`, the second-order kernels of a config
+/// with no top-level `perturbation` block, the direction they are along.
+/// Every command reading the `kernels` block calls it.
+void CheckSecondOrderDirection(const Json& top, const KernelsBlock& block);
+
+/// The config of `sl3d kernel`: a run, read as `solve` reads it (the
+/// static problem or the quasi-static one, with an ocean or without,
+/// under any forcing, 1-D or 3-D as the model block makes it), the
+/// `kernels` block, and the `trajectory` block: the forward run recorded in
+/// memory at its stride, or, with a directory, swept from the complete
+/// trajectory store of this run there, or recorded into it.
+struct KernelInput {
+  Run run;
+  KernelsBlock kernels;
+  TrajectoryBlock trajectory;
+  /// The direction of the second-order kernels (`kernels.second_order`),
+  /// the top-level `perturbation` block; absent without them.
+  std::optional<PerturbationBlock> perturbation;
+};
+
+/// Reads a kernel config, relative paths against its directory: the run,
+/// the `kernels` block and the `trajectory` block, with `output`,
+/// `checkpoint` and `restart` checked where given (ReadSolveMembers) and
+/// left unused. The members of the `kernels` block given at the top level
+/// are refused, naming it, and so is a run without gravity (`gravity`:
+/// "none"), which has no kernels. With `kernels.second_order` the
+/// `perturbation` block is read (ReadPerturbationBlock) as the direction
+/// of the second-order kernels; without, it is checked and left unused.
 [[nodiscard]] KernelInput ReadKernelInput(const std::filesystem::path& config);
 
-/// Runs a 1D kernel config and returns the summary line.
-[[nodiscard]] std::string RunKernel1D(const std::filesystem::path& config);
+/// Runs a kernel config and returns the summary line.
+[[nodiscard]] std::string RunKernel(const std::filesystem::path& config);
 
-/// Runs a 3D (lateral-viscosity) kernel config.
-[[nodiscard]] std::string RunKernel3D(const std::filesystem::path& config);
-
-/// The config of `sl3d static`: the instantaneous (elastic) response of
-/// a laterally heterogeneous elastic Earth to a surface load and a
-/// tidal potential, no sea level (docs/adjoints.md §13j), with the
-/// radial model's response beside it.
-struct StaticInput {
-  std::filesystem::path model;
-  ModelFormat format = ModelFormat::Gia;
-  int lmax = 0;
-  /// A planetmodel model file whose `mu` and `kappa` fields supply the
-  /// lateral perturbations of the moduli (io/ModelModuli); empty for
-  /// the radial model alone.
-  std::filesystem::path moduli;
-  bool moduli_file_radial = false;  ///< the file's own radial reference
-  /// A Gaussian cap of surface mass density: kg m^-2 at its centre.
-  struct Cap {
-    bool set = false;
-    GeographicPoint site;
-    double width = 0.0;      ///< radians
-    double amplitude = 0.0;  ///< kg m^-2
-  } load;
-  /// One coefficient of an external tidal potential, m^2 s^-2.
-  struct Tide {
-    bool set = false;
-    int degree = 2;
-    int order = 0;
-    double amplitude = 0.0;
-    double imaginary = 0.0;
-  } tide;
-  /// The conjugate-gradient solve under lateral moduli.
-  double rtol = 1e-10;
-  int max_iterations = 200;
-  std::vector<int> transform_degrees;
-  std::size_t cache_mb = 0;               ///< as EvolveInput's
-  std::filesystem::path output;           ///< the surface file
-  std::filesystem::path exchange_output;  ///< the coefficient table, optional
-  std::filesystem::path volume_output;    ///< the model file, optional
+/// The `tangent` block: what `tangent` does with a config's `perturbation`
+/// block. `output` is where its files go, a block of `solve`'s `output`
+/// block's members that a tangent-linear run writes (`surface`, required,
+/// `fields` and `smoothing`): the surface file `solve` writes, its fields
+/// their first-order changes along the direction. `calibration` is a
+/// calibrated run's alone (CalibratedDerivative): the total derivative,
+/// the linearised calibration's change of the initial sea level in it, or
+/// the partial one. `method` is `kernels.method`'s, with its words and
+/// its default: "discrete", the derivative of the stepped run, the
+/// transpose of the discrete adjoint, under every scheme; or "continuous",
+/// the run of the linearised equations stepped by the scheme, whose drive
+/// along a change of the relaxation times is the continuous equations'
+/// (TangentLinearSolver::Options::method). The two differ along a
+/// direction in the viscosity under the exponential trapezoid alone;
+/// along the forcing, the state's sea level and the moduli, and along
+/// every direction under Sdirk2, they are one run. `measurements` is a list as
+/// `kernels.measurements`, the measurements whose first-order changes the
+/// run tabulates: the config's `kernels.measurements` where the block
+/// gives none (TangentInput::measurements).
+struct TangentBlock {
+  AdjointMethod method = AdjointMethod::Discrete;
+  OutputBlock output;
+  CalibratedDerivative calibration;
+  std::optional<std::vector<MeasurementSpec>> measurements;
 };
 
-/// Reads a static config, relative paths against its directory.
-[[nodiscard]] StaticInput ReadStaticInput(const std::filesystem::path& config);
+/// Reads a `tangent` block of a run, relative paths against `directory`,
+/// and holds it to the run: `output` (required; its `exchange`,
+/// `exchange_nodes` and `volume` refused, a tangent-linear run's tables
+/// and response inside the body not being built) and `calibration`
+/// (ReadCalibratedDerivative), `method` and `measurements`
+/// (ReadMeasurements).
+[[nodiscard]] TangentBlock ReadTangentBlock(
+    const Json& block, const Run& run, const std::filesystem::path& directory);
 
-/// Runs a static config and returns the summary line.
-[[nodiscard]] std::string RunStatic3D(const std::filesystem::path& config);
+/// The config of `sl3d tangent`: a run, read as `solve` reads it, the
+/// `perturbation` block (the direction, Perturbation.hpp), the `tangent`
+/// block, the `trajectory` block (the forward run recorded or read back as
+/// `kernel`'s is) and the measurements whose first-order changes are
+/// formed: `tangent.measurements`, or where the block has none the
+/// `kernels` block's (`measuredBy` says which, "tangent" or "kernels");
+/// empty where the config gives neither, and the run writes its file
+/// alone.
+struct TangentInput {
+  Run run;
+  PerturbationBlock perturbation;
+  TangentBlock tangent;
+  TrajectoryBlock trajectory;
+  std::vector<MeasurementSpec> measurements;
+  std::string measuredBy;
+};
+
+/// Reads a tangent config, relative paths against its directory: the run,
+/// the `perturbation`, `tangent` and `trajectory` blocks, a `kernels`
+/// block where given (ReadKernelsBlock, the whole block held to the run as
+/// `kernel` holds it), and `output`, `checkpoint` and `restart` checked
+/// where given (ReadSolveMembers) and left unused. A run without gravity
+/// is refused.
+[[nodiscard]] TangentInput ReadTangentInput(
+    const std::filesystem::path& config);
+
+/// Runs a tangent config and returns the summary line.
+[[nodiscard]] std::string RunTangent(const std::filesystem::path& config);
+
+/// Checks the blocks of the derivative commands a config holds beside
+/// those `command` reads itself (`kernels`, `perturbation`, `tangent`), so
+/// that one config serves every command and a fault in a block is found
+/// whichever runs: each is read by its own reader against the run and
+/// left unused.
+void CheckOtherBlocks(const Json& top, const Run& run,
+                      const std::filesystem::path& directory,
+                      std::string_view command);
 
 }  // namespace sl3dpp::app

@@ -18,7 +18,9 @@
  * read as Python reads them. Only the legacy sl3d format below is
  * parsed here. A deck is numbers and a header, nothing else: values are
  * kept exactly as the file gives them (SI for planetmodel decks), and
- * non-dimensionalisation belongs to EarthModel.
+ * non-dimensionalisation belongs to EarthModel. planetmodel's prony and
+ * burgers decks are read by planetmodel's own formats, their headers and
+ * values held to its checks (PronyFormat, BurgersFormat).
  */
 
 #include <cstddef>
@@ -40,12 +42,21 @@ struct DeckError {
 /**
  * @brief What a family of deck files looks like: the column names after the
  * radius, keyed by row width where the format admits several, and the number
- * of verbatim header lines before the table.
+ * of verbatim header lines before the table; or one of planetmodel's own
+ * formats, read whole by its rules.
  */
 struct DeckFormat {
+  /// Whose rules read a deck: the named columns alone, the header lines
+  /// kept verbatim (Columns); or planetmodel's own format (Prony,
+  /// planetmodel::PRONY(); Burgers, planetmodel::BURGERS()), its header
+  /// and its values held to that format's checks, `columns` and
+  /// `header_lines` unused.
+  enum class Rules { Columns, Prony, Burgers };
+
   std::string name = "custom";
   std::map<std::size_t, std::vector<std::string>> columns;
   std::size_t header_lines = 0;
+  Rules rules = Rules::Columns;
 
   /// A format with a single admissible row width.
   DeckFormat(std::string format_name, std::vector<std::string> column_names,
@@ -75,6 +86,26 @@ struct DeckFormat {
 /// is elastic or fluid.
 [[nodiscard]] DeckFormat GiaFormat();
 
+/// planetmodel's prony deck (planetmodel::PRONY(), its
+/// `docs/source/formats/prony_deck.rst`): a generalised Maxwell body, the
+/// Maxwell deck's title, column line and naming lines, its elastic columns
+/// `rho vpv vsv vph vsh eta` (the unrelaxed values), then
+/// `relaxation_strength_k relaxation_time_k` for k = 1 to N, N read from
+/// the column line; a layer NaN in every branch column (elastic) or a
+/// number in each, the strengths in [0, 1] summing to at most one (to the
+/// rounding of the eight digits the format writes) and the times positive.
+/// planetmodel's reader reads it, with its checks.
+[[nodiscard]] DeckFormat PronyFormat();
+
+/// planetmodel's burgers deck (planetmodel::BURGERS(), its
+/// `docs/source/formats/burgers_deck.rst`): the Maxwell deck's columns and
+/// the Kelvin element's `kelvin_viscosity` (Pa s) and
+/// `kelvin_modulus_fraction` (its shear modulus over the layer's elastic
+/// one), a layer elastic (none of the three), a Maxwell body (the
+/// viscosity alone) or a Burgers body (all three). Read by planetmodel's
+/// reader, with its checks, as PronyFormat is.
+[[nodiscard]] DeckFormat BurgersFormat();
+
 /**
  * @brief A read deck: knot radii, one array per named column, and the
  * verbatim header lines. Radii are non-decreasing with every repeat a
@@ -91,7 +122,8 @@ class Deck {
 
   /// A deck from a file: the format's header lines, then
   /// whitespace-separated rows, radius first. Blank lines in the table are
-  /// skipped; `nan` is a valid value.
+  /// skipped; `nan` is a valid value. A format of planetmodel's own rules
+  /// (DeckFormat::Rules) is read and checked by planetmodel's reader of it.
   [[nodiscard]] static std::expected<Deck, DeckError> Read(
       const std::filesystem::path& path, const DeckFormat& format);
 

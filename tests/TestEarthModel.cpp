@@ -1,11 +1,17 @@
-// EarthModel: structure, fields, classification, and the reference gravity
-// against closed forms.
+// EarthModel: structure, fields, classification, the columns of
+// planetmodel's viscoelastic decks joined as planetmodel joins them, and the
+// reference gravity against closed forms.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
+#include <map>
 #include <numbers>
+#include <planetmodel/deck.hpp>
+#include <string>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -169,6 +175,102 @@ TEST(EarthModel, LayerClassification) {
   EXPECT_TRUE(model.Has("viscosity", 2));
   EXPECT_THROW((void)model.EvaluateInLayer("viscosity", 0, 0.5e6),
                std::domain_error);
+}
+
+TEST(EarthModel, ViscoelasticColumnsAreJoinedAsPlanetmodelJoinsThem) {
+  // A viscosity changing by orders of magnitude within a layer is joined as
+  // planetmodel's DeckLayers joins it under its kinds for its viscoelastic
+  // decks (ViscoelasticDeckKinds: in its logarithm by straight lines,
+  // geometric between knots), value and derivative to rounding, while the
+  // elastic columns stay the model's own splines; a viscosity constant
+  // through a layer is that constant; kinds given replace the defaults
+  // (none: every column the model's spline; `linear`: the values by
+  // straight lines); and the refusals: a value not positive under a
+  // logarithmic kind, `rho` given a kind, a kind naming a column the deck
+  // lacks, the second derivative of a joined column.
+  const auto radius =
+      std::vector<double>{0.0, 1e6, 2e6, 3e6, 3e6, 4e6, 5e6, 6e6};
+  const auto graded =
+      std::vector<double>{1e21, 1e21, 1e21, 1e21, 1e19, 3e20, 2e22, 1e23};
+  const auto columns = [&](const std::vector<double>& viscosity) {
+    return std::vector<std::pair<std::string, std::vector<double>>>{
+        {"rho",
+         {6000.0, 5900.0, 5700.0, 5400.0, 4000.0, 3900.0, 3700.0, 3400.0}},
+        {"mu",
+         {1.2e11, 1.1e11, 1.0e11, 0.9e11, 0.8e11, 0.75e11, 0.7e11, 0.6e11}},
+        {"viscosity", viscosity}};
+  };
+  const auto deck = Deck::Create(radius, columns(graded)).value();
+  const auto model = EarthModel::FromDeck(deck).value();
+  const auto table = planetmodel::Deck(radius, columns(graded));
+  auto kinds = std::map<std::string, std::string, std::less<>>{};
+  for (const auto& [name, kind] : sl3dpp::ViscoelasticDeckKinds()) {
+    if (name == "viscosity") kinds.emplace(name, kind);
+  }
+  const auto joined = planetmodel::DeckLayers(table, "cubic", kinds);
+  auto worst = 0.0, worstSlope = 0.0;
+  for (auto r = 3.05e6; r < 6e6; r += 0.1e6) {
+    const auto& f = joined.layers[1].at("viscosity");
+    worst = std::max(
+        worst, std::abs(model.EvaluateInLayer("viscosity", 1, r) - f.Value(r)) /
+                   f.Value(r));
+    worstSlope = std::max(worstSlope,
+                          std::abs(model.EvaluateInLayer("viscosity", 1, r, 1) -
+                                   f.Derivative(r)) /
+                              std::abs(f.Derivative(r)));
+  }
+  RecordProperty("value", std::format("{:.2e}", worst));
+  RecordProperty("derivative", std::format("{:.2e}", worstSlope));
+  // (2.5e-15 each here: the two joins' rounding)
+  EXPECT_LT(worst, 1e-13);
+  EXPECT_LT(worstSlope, 1e-13);
+  // geometric between knots
+  EXPECT_NEAR(model.EvaluateInLayer("viscosity", 1, 4.5e6),
+              std::sqrt(3e20 * 2e22), 1e-14 * std::sqrt(3e20 * 2e22));
+  for (const auto r : {0.0, 0.7e6, 2.3e6, 3e6}) {
+    // a deterministic evaluation of a constant: to the last bits
+    EXPECT_DOUBLE_EQ(model.EvaluateInLayer("viscosity", 0, r), 1e21);
+  }
+  // the elastic columns are the model's splines, whatever the kinds
+  const auto splined =
+      EarthModel::FromDeck(deck,
+                           {.kinds = std::map<std::string, std::string>{}})
+          .value();
+  for (const auto r : {3.3e6, 4.4e6, 5.5e6}) {
+    // the same spline built from the same column: bitwise
+    EXPECT_EQ(splined.EvaluateInLayer("mu", 1, r),
+              model.EvaluateInLayer("mu", 1, r));
+    EXPECT_NE(splined.EvaluateInLayer("viscosity", 1, r),
+              model.EvaluateInLayer("viscosity", 1, r));
+  }
+  const auto linear =
+      EarthModel::FromDeck(
+          deck, {.kinds = std::map<std::string, std::string>{{"viscosity",
+                                                              "linear"}}})
+          .value();
+  EXPECT_NEAR(linear.EvaluateInLayer("viscosity", 1, 4.5e6),
+              0.5 * (3e20 + 2e22), 1e-14 * 2e22);
+  // the refusals
+  auto negative = graded;
+  negative[5] = -1.0;
+  const auto refused =
+      EarthModel::FromDeck(Deck::Create(radius, columns(negative)).value());
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_NE(refused.error().message.find("viscosity"), std::string::npos)
+      << refused.error().message;
+  const auto byRho = EarthModel::FromDeck(
+      deck, {.kinds = std::map<std::string, std::string>{{"rho", "linear"}}});
+  ASSERT_FALSE(byRho.has_value());
+  EXPECT_NE(byRho.error().message.find("'rho'"), std::string::npos);
+  const auto lacking = EarthModel::FromDeck(
+      deck, {.kinds = std::map<std::string, std::string>{{"vs", "linear"}}});
+  ASSERT_FALSE(lacking.has_value());
+  EXPECT_NE(lacking.error().message.find("a column the deck lacks"),
+            std::string::npos)
+      << lacking.error().message;
+  EXPECT_THROW(static_cast<void>(model.EvaluateInLayer("viscosity", 1, 4e6, 2)),
+               std::invalid_argument);
+  EXPECT_NO_THROW(static_cast<void>(model.EvaluateInLayer("mu", 1, 4e6, 2)));
 }
 
 TEST(EarthModel, RefusesMissingRhoAndPartialNaN) {

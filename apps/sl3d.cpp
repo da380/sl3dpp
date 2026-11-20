@@ -10,9 +10,10 @@
  * relative paths against the config's directory), runs, writes its
  * outputs with provenance, and prints a one-line summary to stderr.
  *
- * Built with SL3DPP_WITH_MPI, the 3D commands run under mpiexec over
- * several ranks, one radial segment each (Ranks.hpp); rank 0 writes and
- * prints, and a failure on any rank ends the job.
+ * Built with SL3DPP_WITH_MPI, the commands with a 3D run (solve, kernel,
+ * tangent) run under mpiexec over several ranks, one radial segment each
+ * (Ranks.hpp), a 1D run the first rank's alone; rank 0 writes and prints,
+ * and a failure on any rank ends the job.
  */
 
 #include <array>
@@ -42,16 +43,24 @@ constexpr auto kUsage =
     "\n"
     "commands:\n"
     "  love-numbers   the SI Love-number table of a radial model\n"
-    "  fingerprint    an elastic sea-level fingerprint on a present-day\n"
-    "                 state read from a planetmodel surface file\n"
-    "  evolve         a 3D (lateral-viscosity) GIA run under an ice\n"
-    "                 history, restartable from disk checkpoints\n"
-    "  evolve1d       its 1D counterpart, on the deck's own viscosity\n"
-    "  kernel         adjoint sensitivity kernels of configured\n"
-    "                 measurements, 3D lateral viscosity\n"
-    "  kernel1d       its 1D counterpart\n"
-    "  static         the instantaneous elastic response of a laterally\n"
-    "                 heterogeneous Earth to a surface load and a tide\n"
+    "  solve          the static problem at one instant or the quasi-static\n"
+    "                 problem through time: the sea level equation on a\n"
+    "                 state read from files under an ice change, surface\n"
+    "                 loads, a tide and seismic sources, shorelines frozen\n"
+    "                 or migrating, restartable from disk checkpoints; or,\n"
+    "                 without a state, the response of a body without an\n"
+    "                 ocean; 1D or 3D as the model block's moduli (and,\n"
+    "                 through time, viscosity) make it\n"
+    "  kernel         adjoint sensitivity kernels of measurements of the\n"
+    "                 same problems, read from a solve config with a\n"
+    "                 `kernels` block: in the ice, surface loads, a tide,\n"
+    "                 seismic moments, the viscosity and the moduli\n"
+    "  tangent        the tangent-linear run of the same problems along a\n"
+    "                 direction in their inputs, read from a solve config\n"
+    "                 with a `perturbation` block (terms of the forcing,\n"
+    "                 the viscosity, the moduli, the state's sea level)\n"
+    "                 and a `tangent` block: solve's files, their fields\n"
+    "                 first-order changes, and each measurement's change\n"
     "\n"
     "sl3d --version prints the library versions. Every command's config\n"
     "is documented in docs/sl3d-configs.md, also at\n"
@@ -65,12 +74,32 @@ struct Command {
 
 constexpr auto kCommands = std::array{
     Command{"love-numbers", sl3dpp::app::RunLoveNumbers, false},
-    Command{"fingerprint", sl3dpp::app::RunFingerprint, false},
-    Command{"evolve", sl3dpp::app::RunEvolve3D, true},
-    Command{"evolve1d", sl3dpp::app::RunEvolve, false},
-    Command{"kernel", sl3dpp::app::RunKernel3D, true},
-    Command{"kernel1d", sl3dpp::app::RunKernel1D, false},
-    Command{"static", sl3dpp::app::RunStatic3D, true},
+    Command{"solve", sl3dpp::app::RunSolve, true},
+    Command{"kernel", sl3dpp::app::RunKernel, true},
+    Command{"tangent", sl3dpp::app::RunTangent, true},
+};
+
+/// A word that is not a command but names what one runs: refused, as an
+/// unknown command is, with the command to run instead.
+struct NotCommand {
+  std::string_view name;
+  std::string_view instead;
+};
+
+constexpr auto kNotCommands = std::array{
+    NotCommand{"sea-level",
+               "the sea level problems run as `sl3d solve <config.json>`, "
+               "the config as it stands"},
+    NotCommand{"response",
+               "the response of a body without an ocean runs as `sl3d solve "
+               "<config.json>`, the config without an `ocean` block, with "
+               "\"rotation\": \"none\" and its times on the run's own clock "
+               "in a unit (`\"times\": {\"unit\": \"kyr\", ...}`, the terms' "
+               "`history`, `onset` and `time_origin`)"},
+    NotCommand{"kernel1d",
+               "the kernels of a radial model and of a 3-D one run as `sl3d "
+               "kernel <config.json>`, the measurements in the config's "
+               "`kernels` block"},
 };
 
 /// MPI from the start of main to its end (nothing without MPI).
@@ -123,12 +152,18 @@ int Run(int argc, char** argv) {
     return 2;
   }
   const auto name = std::string_view{args[1]};
+  for (const auto& word : kNotCommands) {
+    if (word.name != name) continue;
+    err << std::format("sl3d: \"{}\" is not a command: {}\n", name,
+                       word.instead);
+    return 2;
+  }
   for (const auto& command : kCommands) {
     if (command.name != name) continue;
     if (ranks.Distributed() && !command.distributes) {
       err << std::format(
-          "sl3d {}: runs on one process; only evolve and kernel run over "
-          "several ranks (this run has {})\n",
+          "sl3d {}: runs on one process; only solve, kernel and tangent run "
+          "over several ranks (this run has {})\n",
           name, ranks.size);
       return 2;
     }

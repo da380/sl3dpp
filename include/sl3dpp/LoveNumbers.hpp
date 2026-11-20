@@ -2,9 +2,8 @@
 
 /**
  * @file LoveNumbers.hpp
- * @brief Generalised Love numbers by degree, pyslfp's conventions
- * (`love_numbers.table` there states them in full; Al-Attar et al. 2024,
- * eq. 62).
+ * @brief Generalised Love numbers by degree (Al-Attar et al. 2024,
+ * eq. 62), in the conventions below.
  *
  * Per degree, the surface response (U, V, phi) to four forcings: the
  * traction piece of a unit surface load (channel u), its attraction piece
@@ -88,10 +87,10 @@ struct LoveNumbers {
   /// any scheme the table is stated in.
   [[nodiscard]] ConventionalLoveNumbers Conventional() const;
 
-  /// A table from a fixture-style file as
-  /// `scripts/make_love_number_fixtures.py` writes one (SI): the `radius`,
-  /// `surface_gravity`, `axial` and `table` records. Also the interchange route
-  /// from pyslfp.
+  /// A table from a fixture-style file (SI): the `radius`,
+  /// `surface_gravity`, `axial` and `table` records, as
+  /// `scripts/make_love_number_fixtures.py` writes the Love numbers it
+  /// computes with pyslfp.
   [[nodiscard]] static std::expected<LoveNumbers, ModelError> FromFile(
       const std::filesystem::path& path);
 };
@@ -121,36 +120,33 @@ struct LoveNumberOptions {
 /// Fréchet derivative of every number at the material, as a table of the
 /// same shape — each channel's entry the derivative of that number, SI
 /// per unit of the direction (whose fields are in the material's units),
-/// `surface_gravity` the surface gravity's derivative and `radius` and
-/// `gravitational_constant` zero. Per degree, dx = K^-1 (db - (dK) x)
-/// for each forcing (DegreeOperator::ApplyVariation and the forcing
-/// variations), read off at the surface as the numbers are; the axial
-/// inertia moments carry the density's variation too. Exact for the map
-/// Material::Shifted.
+/// and `radius`, `surface_gravity` and `gravitational_constant` zero.
+/// Per degree, dx = -K^-1 (dK) x for each forcing
+/// (DegreeOperator::ApplyVariation), read off at the surface as the
+/// numbers are. Exact for the map Material::Shifted.
 [[nodiscard]] LoveNumbers ComputeLoveNumberDerivatives(
     const Material& material, int lmax, const MaterialDirection& direction,
     LoveNumberOptions options = {});
 
 /// The sensitivity kernels of the Love numbers in the bulk and shear
-/// moduli and the density: for every channel of LoveNumbers (the load's
-/// force and potential pieces, the tangential load, the tide) and every
-/// degree, the nodal arrays dh_l/d kappa(r), dh_l/d mu(r), dh_l/d rho(r)
-/// and so on over the material's full mesh — the number's SI units per
-/// unit modulus or density in the material's units, pairing with a
-/// MaterialDirection by the plain nodal sum to
-/// ComputeLoveNumberDerivatives' entry. The adjoint of the static elastic
-/// problem: per degree the forcings' solutions x and the unit surface
-/// duals' solutions y, paired through DegreeOperator::MaterialGradient
-/// (the moduli) and the density duals (DegreeOperator::AddDensityDuals
-/// and the forcings', Material::DensityGradient — the gravity chain
-/// included), so dh = -<y_U, (dK) x> + <y_U, dF>. The degree-0
+/// moduli: for every channel of LoveNumbers (the load's force and
+/// potential pieces, the tangential load, the tide) and every degree,
+/// the kernels of h_l, l_l and k_l in kappa(r) and mu(r) at the nodes of
+/// the material's full mesh, densities per unit volume (docs/adjoints.md,
+/// "The kernels' convention") — the number's SI units per unit modulus
+/// and volume in the material's units, pairing with a MaterialDirection
+/// as VolumePairing(mesh, kernel, direction) to
+/// ComputeLoveNumberDerivatives' entry. The adjoint of the static
+/// elastic problem: per degree the forcings' solutions x and the unit
+/// surface duals' solutions y, paired through
+/// DegreeOperator::MaterialGradient, so dh = -<y_U, (dK) x>. The degree-0
 /// centrifugal channel and the inertia moments are not formed.
 struct LoveNumberKernels {
   struct Channel {
     /// [degree][node]
-    std::vector<std::vector<double>> h_kappa, h_mu, h_rho;
-    std::vector<std::vector<double>> l_kappa, l_mu, l_rho;
-    std::vector<std::vector<double>> k_kappa, k_mu, k_rho;
+    std::vector<std::vector<double>> h_kappa, h_mu;
+    std::vector<std::vector<double>> l_kappa, l_mu;
+    std::vector<std::vector<double>> k_kappa, k_mu;
   };
   Channel load;        ///< h_u, l_u, k_u
   Channel potential;   ///< h_phi, l_phi, k_phi
@@ -172,7 +168,8 @@ struct LoveNumberKernels {
 /// generalised Love numbers per unit of traction rather than of surface
 /// density. `gravitating` records which problem was solved; on the
 /// non-gravitating one (the E1 tier of the cross-code benchmarks) degree 1
-/// is excluded and its entries are NaN. Self-adjointness gives
+/// is excluded, a unit traction there having a net force, and its entries
+/// are NaN. Self-adjointness gives
 /// h_v = l(l + 1) l_u, which `ReciprocityResidual` measures.
 struct TractionNumbers {
   std::vector<int> degrees;
@@ -189,10 +186,10 @@ struct TractionNumbers {
 /// The surface response per unit normal and tangential traction for every
 /// degree from 0 to lmax, on the non-gravitating problem by default or on
 /// the full problem with `gravitating = true` -- the same forcing on both,
-/// so the pair isolates the effect of gravity. The non-gravitating problem
-/// takes a solid material, and its degree 1 is NaN. Degrees in parallel
-/// under OpenMP unless `options.parallel` is false. Mirrors pyslfp's
-/// `traction_numbers`.
+/// so the pair isolates the effect of gravity. The non-gravitating
+/// problem's degree 1 is NaN, and on a model with a fluid core its systems
+/// stop at the core's top above degree zero (DegreeOperator.hpp). Degrees
+/// in parallel under OpenMP unless `options.parallel` is false.
 [[nodiscard]] TractionNumbers ComputeTractionNumbers(
     const Material& material, int lmax, bool gravitating = false,
     LoveNumberOptions options = {});

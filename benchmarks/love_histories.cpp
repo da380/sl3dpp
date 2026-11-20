@@ -7,8 +7,8 @@
 // t = 0; the evolution is the exponential trapezoid with, between output
 // times, equal steps of at least `steps` and no longer than `dtmax` tau_min
 // -- the same rule as AdGIA's viscoelastic_love, and the same step-weight
-// algebra as pyslfp's, so cross-code differences isolate the spatial
-// discretisation.
+// algebra as its exponential trapezoid (StepWeights.hpp), so cross-code
+// differences isolate the spatial discretisation.
 //
 // Usage:
 //   love_histories <deck> <lmax> <taus> <out.txt> [steps] [dtmax]

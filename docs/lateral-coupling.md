@@ -12,9 +12,11 @@ iteration is the research content of the project
 GSHTrans spin-2 machinery; grid-held memory variables; pointwise weight
 fields; the within-step lateral iteration; the 3D model reader
 (`io::ModelViscosity`, over planetmodel's model file). Gates: the
-zero-lateral limit against the 1D stepper at machine precision; the old
+zero-lateral limit against the 1D stepper at 1e-11 (the pipeline) and
+1e-10 (the step); the old
 sl3d (`visco_test`, `sea_level_3d`) in the explicit/weak-contrast limit;
-Δt self-convergence; AdGIA on a common model — the headline benchmark.
+Δt self-convergence. A comparison with AdGIA on a common laterally
+heterogeneous model is not run.
 
 ## 2. The canonical components and the degree ↔ spin maps
 
@@ -170,7 +172,7 @@ explicit code's dt <= tau_min limit — converge in ~50 passes. At the
 saturated extreme (h >> 1 everywhere) the lateral term vanishes and the
 iteration trivialises, as it should.
 
-What it costs (lmax 64, 8 threads, the laptop): at the benchmark's weak
+What it costs (lmax 64, 8 threads): at the benchmark's weak
 contrast (1.26x, 50 yr steps) every depth takes 7 passes a step, while
 a pass costs 0.62 s under Picard against 0.87 s under depth-5 Anderson
 (0.81 at depth 2), whose history also holds 1.9 GB more at peak. The
@@ -235,7 +237,7 @@ with the reference effective solve as the preconditioner, from the
 Picard iterate. The §5a ladder (lmax 16, the second step, to 1e-11 in
 each method's own measure), the default fixed point's passes (Anderson-
 mixed ones in brackets) and the conjugate-gradient iterations, with the
-second step's wall-clock time on the idle laptop (16 threads):
+second step's wall-clock time on 16 threads:
 
     contrast dt/tau | fixed point passes (mixed)  time | conjugate gradients  time
          3x    0.5  |    12 (  0)               0.1 s  |     8               0.1 s
@@ -277,11 +279,12 @@ s = s(r) exp(0.3 (Y_2,-2 + Y_2,2)) (our delta is minus that, being a
 log-viscosity perturbation), a constant zonal load RATE
 sigma_dot_l = exp(-2 pi (l+1)/10.5) sqrt((2l+1)/4 pi) x 5515 / 30 yr
 (SI), explicit RK2 at dt = 50 yr against our trapezoid at the same dt.
-The driver was patched (I/O only: an lmax argument and coefficient
-output, `tests/data/fortran_visco_test.txt` at lmax 32); the physics
-is untouched, so the comparison pits the two codes' discretisations —
-rate-form explicit stepping on a coarse uniform mesh against implicit
-stepping on the graded mesh — against each other at physical accuracy.
+The driver carries a patch of its I/O alone (an lmax argument and
+coefficient output, `tests/data/fortran_visco_test.txt` at lmax 32);
+the physics is the Fortran's own, so the comparison pits the two codes'
+discretisations — rate-form explicit stepping on a coarse uniform mesh
+against implicit stepping on the graded mesh — against each other at
+physical accuracy.
 Measured (lmax 8): the two codes agree at
 3-13 x 1e-4 relative in the surface U and phi coefficients over the full
 5 kyr history for every degree l >= 2 — independent discretisations in
@@ -292,7 +295,7 @@ excluded from the comparison: sl3dpp works in the centre-of-mass frame,
 while the Fortran's l = 1 handling is unsettled, so its l = 1 output is
 neither our frame nor a settled one — the driver reports it separately.
 
-Detailed runs are server work: the kit is
+The kit is
 `benchmarks/fortran_gate` plus `scripts/run_fortran_gate.sh`, which
 builds both repos and runs the comparison at a chosen lmax; the lmax-32
 fixture is committed for reference. The kit needs an sl3d checkout
@@ -333,8 +336,9 @@ a. **Spin machinery**: `SurfaceGrid` carries spin-N transforms (complex
    workspace. GATE: with
    zero lateral perturbation (δ = 0, weights uniform in angle), one full
    grid-pipeline step reproduces the 1D stepper's state and
-   solutions at machine precision, degree by degree — the round trip
-   through synthesis/multiply/analysis is then exact up to transform
+   solutions at 1e-10, degree by degree (the pipeline alone at
+   1e-11) — the round trip through synthesis/multiply/analysis is then
+   exact up to transform
    round-off. This is the decisive correctness gate and needs no
    external reference.
 b. **Toroidal operator** (§4), with its own tests.
@@ -343,7 +347,7 @@ c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
    in the weak-contrast limit (§5b; tolerances set by its explicit
    stepping and lack of dealiasing); contraction diagnostics over a
    contrast ladder (§5a, the research measurements).
-d. **AdGIA on a common model** — run from AdGIA's benchmark suite.
+d. **AdGIA on a common model**: not run.
 
 ## 8. Choices
 

@@ -1,0 +1,20 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic",
+            "viscosity": {"file": "../data/viscosity_log.nc"},
+            "moduli": {"file": "../data/synthetic_moduli.nc"}},
+  "discretisation": {"lmax": 16},
+  "times": {"unit": "kyr", "start": 0.0, "end": 12.0, "nodes": 25},
+  "forcing": {
+    "load": [{"cap": {"latitude": 60.0, "longitude": -85.0, "width_deg": 10.0,
+                      "amplitude_kg_m2": 1.834e6},
+              "history": [[0.0, 0.0], [6.0, 1.0], [7.0, 0.0]]}],
+    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0}]
+  },
+  "rotation": "none",
+  "solver": {"scheme": "exponential_trapezoid", "step": "fixed_point",
+             "step_rtol": 1e-10, "step_max_iterations": 200},
+  "output": {"surface": "out/no_ocean_viscoelastic/no_ocean_viscoelastic.nc",
+             "exchange": "out/no_ocean_viscoelastic/no_ocean_viscoelastic_{node}.txt",
+             "exchange_nodes": [0, 12, 14, 24]}
+}

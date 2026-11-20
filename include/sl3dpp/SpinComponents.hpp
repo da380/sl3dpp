@@ -94,6 +94,31 @@ struct DegreeNodeValues {
   return A;
 }
 
+/// The components of a tensor given by its toroidal degree-basis scalars
+/// (M, S) — the toroidal systems' internal variables or strain scalars,
+/// M = W and S = r dW/dr - W for a strain (ToroidalViscoelastic.hpp): the
+/// toroidal part of DeviatoricComponents with (W, r dW/dr - W) replaced by
+/// (M, S). The same force weights k^2 (k^2 - 2) and k^2 as the spheroidal
+/// M and S follow in the energy contraction; the spin-0 component is zero.
+[[nodiscard]] inline std::array<std::complex<double>, 5>
+ComponentsFromToroidalScalars(int l, std::complex<double> M,
+                              std::complex<double> S, double r) {
+  constexpr std::complex<double> i(0.0, 1.0);
+  const auto zeta2 = l * (l + 1.0);
+  const auto zeta = std::sqrt(zeta2);
+  auto A = std::array<std::complex<double>, 5>{};
+  if (l >= 1) {
+    A[1] = -i * zeta * S / (2.0 * std::numbers::sqrt2 * r);
+    A[3] = -A[1];
+  }
+  if (l >= 2) {
+    const auto factor = 0.5 * zeta * std::sqrt(zeta2 - 2.0) / r;
+    A[0] = -i * factor * M;
+    A[4] = -A[0];
+  }
+  return A;
+}
+
 /// The memory-force rows of (weighted) components at one node: see the
 /// file comment for the quadrature weights the caller applies.
 struct MemoryForceRows {

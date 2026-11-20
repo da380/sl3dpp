@@ -1,0 +1,22 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../data/viscosity_log.nc",
+                          "reference": "geometric_mean"}},
+  "discretisation": {"lmax": 16},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
+  },
+  "ocean": {
+    "at": "end",
+    "shorelines": "migrating",
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"},
+    "calibration": {"method": "fixed_point", "iterations": 12}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
+  "output": {"surface": "out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc"}
+}

@@ -3,8 +3,7 @@
 /**
  * @file DegreeOperator.hpp
  * @brief The degree-l system of the loading problem: dofs, band assembly,
- * factorisation, right-hand sides. Corresponds to pyslfp's
- * `love_numbers.assembly.DegreeSystem`; non-dimensional throughout.
+ * factorisation, right-hand sides; non-dimensional throughout.
  *
  * For one spherical-harmonic degree l, with k^2 = l(l + 1), the unknowns
  * are the radial and tangential displacement scalars U, V and the
@@ -39,13 +38,33 @@
  * over radial segments (docs/radial-partitioning.md).
  *
  * With `gravitating = false` the same discretisation solves the
- * non-gravitating problem of the cross-code benchmark hierarchy: the
- * gravity and potential terms are dropped, the unknowns are U and V alone
- * (U alone at l = 0), and the natural forcings are the unit tractions. It
- * takes a solid model -- a fluid region has no restoring force without
- * gravity -- and excludes degree 1, where a surface traction has a net
- * force against the rigid translations. This mirrors pyslfp's
- * `DegreeSystem(..., gravitating=False)` exactly.
+ * non-gravitating problem: the gravity and potential terms are dropped,
+ * the unknowns are U and V alone (U alone at l = 0), and the natural
+ * surface forcings are the unit tractions. A fluid region carries no
+ * degree-l pressure above degree zero without gravity (its pressure is
+ * uniform), so above degree zero the system stops at the top of the
+ * outermost fluid region, the solid above it traction-free there, and
+ * what lies below is not solved; at degree zero the fluid keeps its bulk
+ * modulus, a mu = 0 elastic medium, as with gravity. A model with more
+ * than one fluid region is refused.
+ *
+ * Degree 1 without gravity has one null vector, the rigid translation
+ * U = V = 1 (RigidTranslation): no strain, so no stress. The gauge is
+ * fixed as the toroidal operator's is (ToroidalOperator.hpp): one U dof
+ * is pinned to zero in the factorisation (the surface node's by default,
+ * `pin_fraction`), which solves the full system when the right-hand side
+ * exerts no net force (is orthogonal to the translation; an interior
+ * source's force is, a surface traction's at degree 1 is not), and the
+ * solution is then moved to the frame of the centre of mass: the
+ * translation is subtracted that makes the density-weighted mean
+ * displacement vanish,
+ *
+ *   int rho (U + 2 V) r^2 dr = 0
+ *
+ * over the solved region (the integral of rho u over the body's volume
+ * for the degree-1 field U Y r_hat + V grad_1 Y). The answer does not
+ * depend on the pinned dof. A distributed degree-1 solve without gravity
+ * is refused (the frame's integral is a sum over the whole system).
  */
 
 #include <functional>
@@ -86,8 +105,13 @@ class DegreeOperator {
     /// construction only.
     const PointShear* point_shear = nullptr;
     /// false drops the gravity and potential terms and the phi dofs: the
-    /// non-gravitating problem, on a solid model, l != 1 (see above).
+    /// non-gravitating problem (see above).
     bool gravitating = true;
+    /// Without gravity at l = 1, the gauge: where the pinned U dof sits,
+    /// as a fraction of the way down from the surface node through the
+    /// solved region's nodes (0 = the surface). Below 1. The answer, in
+    /// the frame of the centre of mass, does not depend on it.
+    double pin_fraction = 0.0;
     /// Radial cuts: elements (increasing, each inside the mesh) at whose
     /// bottom node the mesh is cut into segments, the system then solved
     /// by substructuring with the cut nodes' dofs as the separators. The
@@ -107,8 +131,10 @@ class DegreeOperator {
 
   /// Assemble and factorise the degree-l system. The material is
   /// borrowed and must outlive the operator. Throws std::invalid_argument
-  /// for a negative degree and std::runtime_error when the factorisation
-  /// fails outright (Cholesky and LU both).
+  /// for a negative degree, without gravity for a model with more than one
+  /// fluid region, a pin fraction outside [0, 1) and a distributed
+  /// degree 1, and std::runtime_error when the factorisation fails
+  /// outright (Cholesky and LU both).
   DegreeOperator(const Material& material, int l, Options options);
   DegreeOperator(const Material& material, int l)
       : DegreeOperator(material, l, Options{}) {}
@@ -116,6 +142,7 @@ class DegreeOperator {
   [[nodiscard]] int Degree() const { return l_; }
   [[nodiscard]] int FirstElement() const { return firstElement_; }
   [[nodiscard]] int DofCount() const { return ndof_; }
+  [[nodiscard]] bool Gravitating() const { return gravitating_; }
 
   /// The global dof of a component at a global node, -1 where absent.
   [[nodiscard]] int Dof(int node, Component component) const {
@@ -159,11 +186,22 @@ class DegreeOperator {
   /// gauge and gives zero.
   [[nodiscard]] std::vector<double> Tide(int power = -1) const;
 
+  /// The potential's own share of the density it moves in the fluid
+  /// layers: with x the response to psi = (r/a)^power under Tide's force,
+  /// the density change paired with psi is Tide . x less this number
+  /// times psi's amplitude (a stratified fluid's density responds to the
+  /// total potential, psi included; a solid's to the displacement alone).
+  /// Zero without a stratified fluid layer, and at l = 0.
+  [[nodiscard]] double TideSelf(int power = -1) const;
+
   // -- solving
   // ------------------------------------------------------------------
 
   /// x with A x = b for `nrhs` right-hand sides stored column-major in
-  /// `b` (DofCount() rows each); the result has the same layout.
+  /// `b` (DofCount() rows each); the result has the same layout. Without
+  /// gravity at l = 1 in the pinned gauge, then in the frame of the centre
+  /// of mass, which needs b free of net force (orthogonal to
+  /// RigidTranslation) to solve A x = b.
   /// Distributed (Options::segments), only this process's segments' rows
   /// and the cut nodes' are read (the cut nodes' as `rhs` says: whole on
   /// every process, or in shares that the solve sums), and only those are
@@ -191,15 +229,10 @@ class DegreeOperator {
   /// not hold.
   void MaskToShare(std::span<double> x, int nrhs = 1) const;
 
-  /// A x for `nrhs` column-major columns: the assembled (unscaled)
-  /// operator, for residuals.
   /// The derivative of the system along a material variation, applied to
-  /// one or several vectors: the bilinear form with each coefficient
-  /// replaced by its variation — the moduli's, and the density's with
-  /// gravity, the stratification and the fluid-solid interface terms
-  /// differentiated (the self-consistent density derivative). The point
-  /// shear (fixed branches) and the exterior closures carry no variation.
-  /// Non-gravitating: the moduli alone.
+  /// one or several vectors: the elastic block with each modulus replaced
+  /// by its variation. The point shear (fixed branches), the gravitational
+  /// couplings and the exterior closures carry no variation.
   [[nodiscard]] std::vector<double> ApplyVariation(const MaterialVariation& dm,
                                                    std::span<const double> x,
                                                    int nrhs = 1) const;
@@ -216,42 +249,49 @@ class DegreeOperator {
   [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
   MaterialGradient(std::span<const double> y, std::span<const double> x,
                    int nrhs) const;
-  /// The variations of the forcings along the same: the load's traction
-  /// piece and the tangential traction through the surface gravity, the
-  /// tide through the density, its derivative, gravity and the interfaces;
-  /// the attraction piece and the unit tractions carry none.
-  [[nodiscard]] std::vector<double> LoadVariation(
-      const MaterialVariation& dm, LoadPart part = LoadPart::Both) const;
-  [[nodiscard]] std::vector<double> TangentialVariation(
-      const MaterialVariation& dm) const;
-  [[nodiscard]] std::vector<double> TideVariation(const MaterialVariation& dm,
-                                                  int power = -1) const;
+  /// The derivative of the system along a perturbation of the isotropic
+  /// moduli held at memory points, applied to one or several vectors:
+  /// per element and point the perturbations dkappa and dmu, (element,
+  /// point), integrated with the points' quadrature against the
+  /// dilatation and the deviatoric strain there — sum_p jac w_p (dkappa_p
+  /// D^2 + dmu_p (k^2 (k^2 - 2) M^2 + 4/3 R^2 + k^2 S^2)), with D = r d_r U
+  /// + 2 U - k^2 V and the deviatoric scalars of the point shear
+  /// (MemoryPoints.hpp). Either span may be empty. With GLL points it is
+  /// ApplyVariation along the same nodal dkappa and dmu. The solid
+  /// elements, and the fluid core's bulk term at degree zero.
+  [[nodiscard]] std::vector<double> ApplyPointVariation(
+      const MemoryPoints& points, std::span<const double> dkappa,
+      std::span<const double> dmu, std::span<const double> x,
+      int nrhs = 1) const;
 
-  /// The transposes in the DENSITY of ApplyVariation and of the forcings'
-  /// variations: the pairings' dependence on the nodal density, its radial
-  /// derivative, gravity and the surface gravity, accumulated as duals
-  /// (times `scale`) that Material::DensityGradient maps to a nodal
-  /// density gradient — y^T (dK) x for solutions of nrhs columns, summed
-  /// over the columns, and y^T (dF) a for a forcing's variation with the
-  /// column amplitudes a (one per column of y). Nothing non-gravitating.
-  void AddDensityDuals(std::span<const double> y, std::span<const double> x,
-                       int nrhs, double scale, DensityDuals& duals) const;
-  void AddLoadDensityDuals(std::span<const double> y,
-                           std::span<const double> amplitudes, LoadPart part,
-                           double scale, DensityDuals& duals) const;
-  void AddTangentialDensityDuals(std::span<const double> y,
-                                 std::span<const double> amplitudes,
-                                 double scale, DensityDuals& duals) const;
-  void AddTideDensityDuals(std::span<const double> y,
-                           std::span<const double> amplitudes, int power,
-                           double scale, DensityDuals& duals) const;
+  /// The transpose of ApplyPointVariation in the moduli: arrays (kappa,
+  /// mu) over (element, point) with sum_p kappa_p dkappa_p + mu_p dmu_p =
+  /// y^T (dK) x for solutions y and x of nrhs columns each, summed over
+  /// the columns. Each entry is the form's integrand at the point times
+  /// the point's quadrature weight.
+  [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
+  PointGradient(const MemoryPoints& points, std::span<const double> y,
+                std::span<const double> x, int nrhs) const;
 
+  /// A x for `nrhs` column-major columns: the assembled (unscaled)
+  /// operator, for residuals.
   [[nodiscard]] std::vector<double> Apply(std::span<const double> x,
                                           int nrhs = 1) const;
 
   /// Whether the (scaled) Cholesky factorisation held; false means the LU
   /// fallback is in use (in some segment, when substructured).
   [[nodiscard]] bool UsedCholesky() const { return !choleskyFailed_; }
+
+  /// Without gravity at l = 1, the rigid translation, U = V = 1 on every
+  /// dof: the null vector of the system. Refused otherwise.
+  [[nodiscard]] std::vector<double> RigidTranslation() const;
+  /// Without gravity at l = 1, the row whose product with a solution is
+  /// int rho (U + 2 V) r^2 dr over the solved region by the nodes'
+  /// quadrature: zero in the frame of the centre of mass. Refused
+  /// otherwise.
+  [[nodiscard]] std::span<const double> CentreOfMassRow() const;
+  /// The pinned dofs (one without gravity at l = 1; none otherwise).
+  [[nodiscard]] std::span<const int> PinnedDofs() const { return pinned_; }
 
   /// The radial segments the solve runs over: 1 for the direct solve.
   [[nodiscard]] int SegmentCount() const;
@@ -275,7 +315,8 @@ class DegreeOperator {
   void BuildDofMap();
   void Assemble(const PointShear* pointShear);
   /// The per-node coefficients one band assembly integrates: the base
-  /// system's from the material, or their variation along a direction.
+  /// system's from the material, or the moduli's variation along a
+  /// direction.
   struct Coefficients;
   /// Assembles the bilinear form of the coefficients into a band of this
   /// system's layout (the exterior closures and the k^2 potential term
@@ -312,14 +353,25 @@ class DegreeOperator {
   };
   [[nodiscard]] std::vector<Interface> Interfaces() const;
 
+  /// Without gravity: the element above the outermost fluid region (0
+  /// on a solid model), the base of the system above degree zero.
+  [[nodiscard]] int SolidBase() const;
+  /// Moves solutions to the frame of the centre of mass (without gravity
+  /// at l = 1; nothing otherwise).
+  void ToCentreOfMass(std::span<double> x, int nrhs) const;
+
   const Material* material_;
   int l_;
   bool gravitating_ = true;
+  double pinFraction_ = 0.0;
   int firstElement_ = 0;
   int kd_ = 0;
   int ndof_ = 0;
   std::vector<int> dof_;      // (node, component) row-major, -1 absent
   std::vector<double> band_;  // upper band, column-major (kd + 1) x ndof
+  // Without gravity at l = 1: the pinned dof and the frame's row.
+  std::vector<int> pinned_;
+  std::vector<double> centreOfMass_;
 
   // The factorisation: the symmetric diagonal scaling s, then the Cholesky
   // band or the LU band with its pivots, or with cuts the substructured

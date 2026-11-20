@@ -1,0 +1,13 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 64},
+  "times": {"unit": "kyr", "start": 0.0, "end": 20.0, "nodes": 41},
+  "forcing": {
+    "load": [{"disk": {"latitude": 60.0, "longitude": -85.0, "radius_deg": 8.0,
+                       "amplitude_kg_m2": 1.834e6},
+              "history": [[0.0, 1.0], [10.0, 1.0], [10.5, 0.0]]}]
+  },
+  "rotation": "none",
+  "output": {"surface": "out/no_ocean_1d_disk/no_ocean_1d_disk.nc"}
+}

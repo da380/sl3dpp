@@ -5,6 +5,8 @@
 #include <cmath>
 #include <format>
 #include <numbers>
+#include <planetmodel/deck.hpp>
+#include <planetmodel/vocabulary.hpp>
 #include <stdexcept>
 
 namespace sl3dpp {
@@ -25,8 +27,30 @@ Dimensions VocabularyDimensions(
     return VelocityDimensions;
   }
   if (name == "kappa" || name == "mu") return ModulusDimensions;
-  if (name == "viscosity") return ViscosityDimensions;
-  return {};  // qkappa, qmu, eta, and anything unknown: dimensionless
+  if (name == "viscosity" || name == "kelvin_viscosity") {
+    return ViscosityDimensions;
+  }
+  if (const auto member = planetmodel::Member(name);
+      member && member->first == "relaxation_time") {
+    return Dimensions{.time = 1};
+  }
+  // qkappa, qmu, eta, the strengths, the Kelvin modulus fraction, and
+  // anything unknown: dimensionless
+  return {};
+}
+
+/// The kind `kinds` gives a column, by its name or its family's stem;
+/// empty where it gives none.
+std::optional<std::string> KindOf(
+    const std::map<std::string, std::string, std::less<>>& kinds,
+    const std::string& name) {
+  if (const auto it = kinds.find(name); it != kinds.end()) return it->second;
+  if (const auto member = planetmodel::Member(name)) {
+    if (const auto it = kinds.find(member->first); it != kinds.end()) {
+      return it->second;
+    }
+  }
+  return std::nullopt;
 }
 
 /// int_a^b f ds by an n-point Gauss-Legendre rule, cached per n.
@@ -46,6 +70,18 @@ constexpr Dimensions MassDimensions{.mass = 1};
 constexpr Dimensions InertiaDimensions{.mass = 1, .length = 2};
 
 }  // namespace
+
+std::map<std::string, std::string> ViscoelasticDeckKinds() {
+  auto out = std::map<std::string, std::string>{};
+  for (const auto& [name, kind] : planetmodel::MAXWELL_KINDS) {
+    out.emplace(name, kind);
+  }
+  for (const auto* kinds :
+       {&planetmodel::PRONY_KINDS, &planetmodel::BURGERS_KINDS}) {
+    for (const auto& [name, kind] : *kinds) out.emplace(name, kind);
+  }
+  return out;
+}
 
 std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
                                                            Options options) {
@@ -76,15 +112,60 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
         "the deck has no density column 'rho'; it has [{}]", have)});
   }
 
+  // The columns joined by a kind of planetmodel's: by default its kinds
+  // for its viscoelastic decks' columns that the deck holds, else the
+  // caller's, every one passed to planetmodel (which refuses a name the
+  // deck lacks).
+  const auto radii = deck.Radius();
+  auto kinds = std::map<std::string, std::string, std::less<>>{};
+  if (options.kinds) {
+    for (const auto& [name, kind] : *options.kinds) {
+      if (name == "rho") {
+        return std::unexpected(ModelError{
+            "the density 'rho' is joined by the model's own spline: the "
+            "gravity integrals are taken on its segments"});
+      }
+      kinds.emplace(name, kind);
+    }
+  } else {
+    for (const auto& [name, kind] : ViscoelasticDeckKinds()) {
+      const auto held =
+          std::ranges::any_of(deck.Names(), [&, &name = name](const auto& c) {
+            const auto member = planetmodel::Member(c);
+            return c == name || (member && member->first == name);
+          });
+      if (held) kinds.emplace(name, kind);
+    }
+  }
+  // each layer's joined columns, as planetmodel::DeckLayers gives them, on
+  // the deck's own radii and values (SI)
+  auto joined =
+      std::vector<std::map<std::string, planetmodel::RadialFunction>>{};
+  if (!kinds.empty()) {
+    try {
+      auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};
+      for (const auto& name : deck.Names()) {
+        const auto values = deck.Column(name);
+        columns.emplace_back(name,
+                             std::vector<double>(values.begin(), values.end()));
+      }
+      const auto table = planetmodel::Deck(
+          std::vector<double>(radii.begin(), radii.end()), std::move(columns));
+      joined = planetmodel::DeckLayers(table, "cubic", kinds).layers;
+    } catch (const planetmodel::Error& error) {
+      return std::unexpected(ModelError{error.what()});
+    }
+  }
+
   // One interpolant per (field, layer) through the layer's knots,
   // non-dimensionalised by the column's dimensions — the once-only
   // conversion at the read boundary.
-  const auto radii = deck.Radius();
   for (const auto& name : deck.Names()) {
     const auto dimensions = VocabularyDimensions(name, options.dimensions);
     const double factor = model.scales_.Factor(dimensions);
     const auto values = deck.Column(name);
-    auto perLayer = std::vector<std::optional<Spline>>(layers.size());
+    const auto byKind = KindOf(kinds, name).has_value();
+    auto perLayer = std::vector<std::optional<Interpolant>>(layers.size());
     for (auto i = std::size_t{0}; i < layers.size(); ++i) {
       const auto [first, last] = layers[i];
       const auto n = last - first;
@@ -99,6 +180,18 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
             "from a layer only when NaN throughout it",
             name, i)});
       }
+      if (byKind) {
+        // planetmodel's function of the SI radius, read at a
+        // non-dimensional one: its value, or its derivative in r
+        auto f = joined.at(i).at(name);
+        perLayer[i].emplace(Interpolant{
+            .spline = std::nullopt,
+            .joined = [f = std::move(f), length, factor](double r, int nu) {
+              return nu == 0 ? f.Value(r * length) / factor
+                             : f.Derivative(r * length) * length / factor;
+            }});
+        continue;
+      }
       std::vector<double> x(n), y(n);
       for (auto k = std::size_t{0}; k < n; ++k) {
         x[k] = radii[first + k] / length;
@@ -112,8 +205,10 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
                                  ? Interpolation::BoundaryCondition::NotAKnot
                                  : Interpolation::BoundaryCondition::Natural;
       try {
-        perLayer[i].emplace(View(std::move(x)), View(std::move(y)), condition,
-                            0.0, 0.0);
+        perLayer[i].emplace(
+            Interpolant{.spline = Spline(View(std::move(x)), View(std::move(y)),
+                                         condition, 0.0, 0.0),
+                        .joined = {}});
       } catch (const std::exception& e) {
         return std::unexpected(ModelError{
             std::format("column '{}', layer {}: {}", name, i, e.what())});
@@ -147,6 +242,13 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
           std::all_of(values.begin() + first, values.begin() + last,
                       [](double v) { return v > 0.0; });
     }
+    if (deck.Has("relaxation_time_1")) {
+      const auto values = deck.Column("relaxation_time_1");
+      model.layers_[i].viscoelastic =
+          model.layers_[i].viscoelastic ||
+          std::none_of(values.begin() + first, values.begin() + last,
+                       [](double v) { return std::isnan(v); });
+    }
   }
 
   // The mass inside every boundary, accumulated layer by layer.
@@ -178,20 +280,20 @@ bool EarthModel::Has(const std::string& name, std::size_t layer) const {
   return Find(name, layer) != nullptr;
 }
 
-const EarthModel::Spline* EarthModel::Find(const std::string& name,
-                                           std::size_t layer) const {
-  const auto& spline = fields_[IndexOf(name)].at(layer);
-  return spline ? &*spline : nullptr;
+const EarthModel::Interpolant* EarthModel::Find(const std::string& name,
+                                                std::size_t layer) const {
+  const auto& field = fields_[IndexOf(name)].at(layer);
+  return field ? &*field : nullptr;
 }
 
-const EarthModel::Spline& EarthModel::Require(const std::string& name,
-                                              std::size_t layer) const {
-  const auto* spline = Find(name, layer);
-  if (spline == nullptr) {
+const EarthModel::Interpolant& EarthModel::Require(const std::string& name,
+                                                   std::size_t layer) const {
+  const auto* field = Find(name, layer);
+  if (field == nullptr) {
     throw std::domain_error(
         std::format("layer {} holds no field '{}'", layer, name));
   }
-  return *spline;
+  return *field;
 }
 
 std::size_t EarthModel::LayerOfND(double r, Side side) const {
@@ -207,12 +309,22 @@ std::size_t EarthModel::LayerOfND(double r, Side side) const {
 
 double EarthModel::EvaluateND(const std::string& name, double r,
                               Side side) const {
-  return Require(name, LayerOfND(r, side)).Evaluate(r);
+  return Require(name, LayerOfND(r, side)).Value(r);
 }
 
 double EarthModel::EvaluateInLayerND(const std::string& name, std::size_t layer,
                                      double r, int nu) const {
-  const auto& spline = Require(name, layer);
+  const auto& field = Require(name, layer);
+  if (!field.spline) {
+    if (nu != 0 && nu != 1) {
+      throw std::invalid_argument(std::format(
+          "'{}' is joined by a kind of planetmodel's, which holds its value "
+          "and first derivative: nu must be 0 or 1, got {}",
+          name, nu));
+    }
+    return field.joined(r, nu);
+  }
+  const auto& spline = *field.spline;
   switch (nu) {
     case 0:
       return spline.Evaluate(r);
@@ -228,7 +340,7 @@ double EarthModel::EvaluateInLayerND(const std::string& name, std::size_t layer,
 
 double EarthModel::ShellMoment(std::size_t layer, double a, double b,
                                int p) const {
-  const auto& rho = Require("rho", layer);
+  const auto& rho = *Require("rho", layer).spline;
   a = std::max(a, layers_[layer].lo);
   b = std::min(b, layers_[layer].hi);
   if (b <= a) return 0.0;
@@ -287,7 +399,7 @@ double EarthModel::PressureND(double r) const {
   // segment but not polynomial, so the eight-point rule is merely accurate.
   auto sum = 0.0;
   for (std::size_t i = LayerOfND(r, Side::Above); i < layers_.size(); ++i) {
-    const auto& rho = Require("rho", i);
+    const auto& rho = *Require("rho", i).spline;
     const double a = std::max(r, layers_[i].lo);
     for (auto k = std::size_t{0}; k + 1 < rho.Size(); ++k) {
       const double lo = std::max(a, rho.Node(k));

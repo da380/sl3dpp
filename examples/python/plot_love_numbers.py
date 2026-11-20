@@ -1,14 +1,16 @@
 """The Love-number example: run ExampleLoveNumbers first, then
-`poetry run python plot_love_numbers.py` from build/examples."""
+`poetry run python plot_love_numbers.py` from build/examples. Reads
+output/library/love_numbers/love_numbers.txt and writes
+figures/library/love_numbers.png."""
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plotutil import Example
+from plotutil import Example, library_figure, library_output, save_figure
 
-ex = Example("love_numbers.txt")
+ex = Example(library_output("love_numbers", "love_numbers.txt"))
 l = ex.column("love", "l")
 h = ex.column("love", "h_load")
 ll = ex.column("love", "l_load")
@@ -46,5 +48,4 @@ fig.suptitle(
     f"(degree 2: $h'$ = {h[two]:.3f}, $k'$ = {k[two]:.3f}, "
     f"$k$ = {ex.column('love', 'k_tide')[two]:.3f})")
 fig.tight_layout()
-fig.savefig("love_numbers.png", dpi=180)
-print("wrote love_numbers.png")
+save_figure(fig, library_figure("love_numbers"))

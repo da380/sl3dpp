@@ -341,6 +341,13 @@ int ToroidalOperator::SurfaceDof() const {
   return dof_[mesh.GlobalIndex(mesh.ElementCount() - 1, mesh.NGll() - 1)];
 }
 
+std::vector<double> ToroidalOperator::Tangential() const {
+  auto b = std::vector<double>(ndof_, 0.0);
+  const auto a = material_->Radius();
+  b[SurfaceDof()] = -material_->SurfaceGravity() * a * a * l_ * (l_ + 1.0);
+  return b;
+}
+
 std::vector<double> ToroidalOperator::Expand(std::span<const double> x) const {
   const auto& mesh = material_->Mesh();
   const auto n = mesh.NGll();

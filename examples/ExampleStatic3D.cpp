@@ -2,7 +2,7 @@
  * @file ExampleStatic3D.cpp
  * @brief The static response of a laterally heterogeneous elastic Earth:
  * a cap load over Hudson Bay on the synthetic 3D moduli of
- * synthetic_moduli.nc (MakeSyntheticModuli), solved exactly by the
+ * data/synthetic_moduli.nc (MakeSyntheticModuli), solved exactly by the
  * stepper's conjugate gradients on a branchless rheology — the 3D static
  * problem of docs/adjoints.md §13j — against the radial model's
  * response to the same load.
@@ -13,14 +13,14 @@
  * solver (distributed over radial segments under MPI, like the
  * evolutions), and the response inside the body goes out as a
  * planetmodel model file (io::WriteNodeFields) for planetmodel's
- * cutaways. Outputs: static_3d.txt (the surface fields and the
- * difference from the radial model, SI) and static_3d_volume.nc (the
- * radial displacement, the deviatoric strain's magnitude and the shear
- * perturbation at the memory nodes).
+ * cutaways. Outputs, in output/library/static_3d/: static_3d.txt (the
+ * surface fields and the difference from the radial model, SI) and
+ * static_3d_volume.nc (the radial displacement, the deviatoric strain's
+ * magnitude and the shear perturbation at the memory nodes).
  *
  *   ExampleStatic3D [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_static_3d.py.
+ * Run from build/examples; plot with python/plot_static_3d.py.
  */
 #include <cmath>
 #include <format>
@@ -48,7 +48,8 @@ int main(int argc, char** argv) {
   examples::Say(std::format("ExampleStatic3D: the 3D static response at lmax {}", lmax));
   const auto earth = examples::Earth::Make(lmax, 1e21);
   const auto elastic = Rheology::Create(earth.material, {}).value();
-  const auto moduli = io::ModelModuli::Read("synthetic_moduli.nc", earth.model);
+  const auto moduli = io::ModelModuli::Read(
+      examples::DataFile("synthetic_moduli.nc"), earth.model);
   if (!moduli) {
     std::cerr << "ExampleStatic3D: " << moduli.error().message << "\n";
     return 1;
@@ -114,7 +115,10 @@ int main(int argc, char** argv) {
       "({:.1f}% of its largest value)",
       worst, 100.0 * worst / scale));
 
-  examples::Writer out("static_3d.txt");
+  const auto output = examples::OutputDirectory("static_3d");
+  const auto table = output / "static_3d.txt";
+  const auto volumeFile = output / "static_3d_volume.nc";
+  examples::Writer out(table);
   out.Comment("the static response of the synthetic 3D elastic Earth to a cap "
               "load over Hudson Bay, against the radial model's (SI)");
   out.Scalar("site_lat", siteLat);
@@ -135,7 +139,7 @@ int main(int argc, char** argv) {
       [&](int l) -> const ToroidalOperator& { return reference.Toroidal(l); }, x);
   const auto shear = io::SampleNodeField(coupling, moduli->Shear());
   const auto written = io::WriteNodeFields(
-      "static_3d_volume.nc", coupling, earth.material.Mesh(), earth.model,
+      volumeFile, coupling, earth.material.Mesh(), earth.model,
       {io::NodeField{.name = "radial_displacement",
                      .meaning = "radial displacement of the static response",
                      .dimensions = Dimensions{.length = 1},
@@ -152,6 +156,7 @@ int main(int argc, char** argv) {
     std::cerr << "ExampleStatic3D: " << written.error().message << "\n";
     return 1;
   }
-  std::cout << "wrote static_3d.txt and static_3d_volume.nc\n";
+  std::cout << "wrote " << table.string() << " and " << volumeFile.string()
+            << "\n";
   return 0;
 }

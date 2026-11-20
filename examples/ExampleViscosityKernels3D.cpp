@@ -1,15 +1,16 @@
 /**
  * @file ExampleViscosityKernels3D.cpp
  * @brief 3D sensitivity kernels: what two observations at one site know
- * about the mantle's viscosity, point by point, by the continuous adjoint
- * of the coupled 3D evolution.
+ * about the mantle's viscosity, point by point, by the adjoint of the
+ * coupled 3D evolution (the library's default, the discrete transpose).
  *
  * The forward problem is ExampleModelViscosity's: the 3D viscosity of
- * viscosity_log.nc under the state file's deglaciation from 21 ka,
+ * data/viscosity_log.nc under the state file's deglaciation from 21 ka,
  * recorded at every node for the reverse sweeps. Two observations at a
  * site near the former Laurentide centre:
  *
- * - the cap-mean sea-level change from 21 ka to the present (m);
+ * - the sea-level change from 21 ka to the present averaged over a
+ *   Gaussian cap of 8 degrees (m);
  * - the decay time of the site's sea-level series over the last 7 kyr
  *   (kyr): the relaxation time of a fitted a e^(-t / tau) + b, a datum
  *   whose kernel comes from the fit's exact sensitivity to the series
@@ -21,12 +22,13 @@
  * (io::WriteKernels: viscosity_kernels.nc, for the Python to read, draw
  * and integrate), and as depth slices and radial profiles for the plot.
  *
- * Outputs: viscosity_kernels.nc and kernels_3d.txt (slices on the
- * coupling's grid, per km^3; the profiles per km of radius).
+ * Outputs, in output/library/viscosity_kernels_3d/: viscosity_kernels.nc
+ * and viscosity_kernels_3d.txt (slices on the coupling's grid, per km^3;
+ * the profiles per km of radius).
  *
  *   ExampleViscosityKernels3D [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_kernels_3d.py.
+ * Run from build/examples; plot with python/plot_kernels_3d.py.
  */
 
 #include <array>
@@ -34,6 +36,7 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <numbers>
 #include <span>
 #include <string>
 
@@ -62,10 +65,11 @@ int main(int argc, char** argv) {
       std::format("ExampleViscosityKernels3D: 3D kernels at lmax {}, state {}",
                   lmax, options.state.string()));
   // The forward problem, as ExampleModelViscosity sets it up.
-  examples::Say("reading viscosity_log.nc; building the 3D operator");
+  const auto viscosityFile = examples::DataFile("viscosity_log.nc");
+  examples::Say(std::format("reading {}; building the 3D operator",
+                            viscosityFile.string()));
   const auto earth = examples::Earth::Make(lmax, 1e21);
-  const auto viscosity =
-      io::ModelViscosity::Read("viscosity_log.nc", earth.model);
+  const auto viscosity = io::ModelViscosity::Read(viscosityFile, earth.model);
   if (!viscosity) {
     std::cerr << viscosity.error().message << "\n";
     return 1;
@@ -73,7 +77,7 @@ int main(int argc, char** argv) {
   const auto rheology =
       Rheology::Maxwell(earth.material, viscosity->Viscosity()).value();
   Viscoelastic3D op(rheology, lmax, viscosity->Delta());
-  SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLove(),
+  GRDSolver solver(SurfaceGrid(lmax), op.ElasticLove(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -89,7 +93,7 @@ int main(int argc, char** argv) {
   const auto history = io::FieldHistory::Read(options.state, grid).value();
   const auto& C = state.oceanFunction;
   const auto startSi = -startKyr * kyr;
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ice =
         history.Values("ice_thickness", startSi + t * scales.Time());
     auto load = std::vector<double>(grid.FieldSize());
@@ -108,24 +112,27 @@ int main(int argc, char** argv) {
   // forward one, so every stride-th forward state is kept and each sweep
   // rebuilds the ones between by forward steps from the last one kept.
   const auto stride = examples::CheckpointStride(nodes);
-  auto evolutionOptions = SeaLevelEvolution3D::Options{};
+  auto evolutionOptions = Evolution3D::Options{};
   evolutionOptions.record_stride = stride;
   evolutionOptions.on_snapshot =
-      examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(nodes - 1,
+      examples::NodeReporter<Evolution3D::Snapshot>(nodes - 1,
                                                             scales.Time());
   examples::Say(std::format(
       "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));
-  SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
-  const auto snapshots = evolution.Run(times, iceLoad);
+  Evolution3D evolution(op, solver, state, evolutionOptions);
+  const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
 
   // The two observations, as node-keyed duals: J is in the solver's length
   // unit for the sea level, and in kyr for the decay time (the series is
   // paired in solver units, so its weights pair with the fields as they
   // stand).
+  // Both read the sea level averaged over a Gaussian cap of 8 degrees, at
+  // least half the truncation wavelength 360 / lmax degrees at the default
+  // lmax 24 (7.5), so that the band resolves the cap.
   const GeographicPoint site{60.0, 275.0};  // Hudson Bay
   const auto a = solver.Radius();
-  const auto dual = CapMeanDual(grid, a, site, 0.05);
+  const auto dual = CapMeanDual(grid, a, site, 8.0 * std::numbers::pi / 180.0);
   auto seaLevel = std::map<std::size_t, Measurement>{};
   seaLevel[nodes - 1] = FieldMeasurement(FieldChannel::SeaLevel, dual);
   auto windowNodes = std::vector<std::size_t>{};
@@ -136,7 +143,7 @@ int main(int argc, char** argv) {
     if (dateKyr > decayFromKyr + 1e-9) continue;
     windowNodes.push_back(n);
     elapsed.push_back(decayFromKyr - dateKyr);
-    series.push_back(PairedValue(grid, a, dual, snapshots[n].seaLevelChange));
+    series.push_back(PairedValue(grid, a, dual, snapshots[n].relativeSeaLevelChange));
   }
   // The fit's uncertainties in the series' and times' own units: 1 m (in
   // solver units) and exact times.
@@ -150,10 +157,10 @@ int main(int argc, char** argv) {
                           {.on_node = examples::SweepReporter(nodes - 1)});
   examples::Say("adjoint sweep 1 of 2, the sea-level change:");
   const auto seaLevelKernels =
-      adjoint.IceHistoryKernels(times, seaLevel, &trajectory);
+      adjoint.FirstOrderKernels(times, seaLevel, &trajectory);
   examples::Say("adjoint sweep 2 of 2, the decay time:");
   const auto decayKernels =
-      adjoint.IceHistoryKernels(times, decay, &trajectory);
+      adjoint.FirstOrderKernels(times, decay, &trajectory);
 
   // The model file: values non-dimensional under the model's scales, each
   // with its objective's SI dimensions; J's SI unit per sweep unit is the
@@ -191,24 +198,28 @@ int main(int argc, char** argv) {
                       .objective = objectives[k].dimensions,
                       .values = scaled[k]});
   }
-  examples::Say("writing viscosity_kernels.nc and kernels_3d.txt");
+  const auto output = examples::OutputDirectory("viscosity_kernels_3d");
+  const auto kernelFile = output / "viscosity_kernels.nc";
+  const auto table = output / "viscosity_kernels_3d.txt";
+  examples::Say(std::format("writing {} and {}", kernelFile.string(),
+                            table.string()));
   const auto written =
-      io::WriteKernels("viscosity_kernels.nc", op, earth.model, fields,
+      io::WriteKernels(kernelFile, op, earth.model, fields,
                        {.name = "sl3dpp example kernels"});
   if (!written) {
     std::cerr << written.error().message << "\n";
     return 1;
   }
 
-  // Slices and profiles for the plot. Kernels3D holds an angular density
-  // with the radial quadrature folded in: VolumeDensity divides out the
-  // node's radial weight and r^2, RadialDensity integrates over angle per
-  // unit radius; in SI, by the model length cubed and once.
+  // Slices and profiles for the plot. Kernels3D holds the density per
+  // unit volume, so a slice is its values at a node; a profile per unit
+  // radius is its mean over the sphere times 4 pi r^2 (SphericalMean); in
+  // SI, by the model length cubed and once.
   const auto& coupling = op.Coupling();
   const auto& kernelGrid = coupling.Grid();
   const auto fieldSize = kernelGrid.FieldSize();
   const auto modelLength = modelScales.Length();
-  examples::Writer out("kernels_3d.txt");
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "3D log-viscosity kernels of two observations at a Hudson Bay site; "
@@ -217,15 +228,11 @@ int main(int argc, char** argv) {
   out.Scalar("site_lat", site.latitude);
   out.Scalar("site_lon", site.longitude);
   out.Scalar(
-      "sea_level_change_m",
-      length * PairedValue(grid, a, dual, snapshots.back().seaLevelChange));
+      "relative_sea_level_change_m",
+      length * PairedValue(grid, a, dual, snapshots.back().relativeSeaLevelChange));
   out.Scalar("decay_time_kyr", fit.decay_time);
   const auto displayUnit =
       std::array{1.0, 1.0 / examples::kYear};  // m; s to yr
-  auto volume = std::vector<std::vector<double>>{};
-  for (const auto& objective : objectives) {
-    volume.push_back(VolumeDensity(coupling, objective.kernel));
-  }
   for (const auto depthKm : {400.0, 1200.0, 2200.0}) {
     // the memory node nearest the depth
     const auto target = 1.0 - depthKm * 1.0e3 / modelLength;
@@ -243,33 +250,33 @@ int main(int argc, char** argv) {
     for (auto k = std::size_t{0}; k < objectives.size(); ++k) {
       auto slice = std::vector<double>(fieldSize);
       for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        slice[x] = volume[k][static_cast<std::size_t>(node) * fieldSize + x] *
+        slice[x] = objectives[k].kernel[static_cast<std::size_t>(node) * fieldSize + x] *
                    objectives[k].unitSi * displayUnit[k] * perKm3;
       }
       out.Field(std::format("{}_{}km", objectives[k].name, depth), slice);
     }
   }
-  auto radial = std::vector<std::vector<double>>{};
+  auto mean = std::vector<std::vector<double>>{};
   for (const auto& objective : objectives) {
-    radial.push_back(RadialDensity(coupling, objective.kernel));
+    mean.push_back(SphericalMean(coupling, objective.kernel));
   }
   auto rows = std::vector<std::vector<double>>{};
   for (auto p = 0; p < coupling.NodeCount(); ++p) {
-    auto row =
-        std::vector<double>{coupling.RadiusOfNode(p) * modelLength / 1.0e3};
+    const auto r = coupling.RadiusOfNode(p);
+    auto row = std::vector<double>{r * modelLength / 1.0e3};
     for (auto k = std::size_t{0}; k < objectives.size(); ++k) {
-      // dJ/dr per km
-      row.push_back(radial[k][p] * objectives[k].unitSi * displayUnit[k] *
-                    1.0e3 / modelLength);
+      // dJ/dr per km: the shell's 4 pi r^2 times the mean density
+      row.push_back(4.0 * std::numbers::pi * r * r * mean[k][p] *
+                    objectives[k].unitSi * displayUnit[k] * 1.0e3 / modelLength);
     }
     rows.push_back(row);
   }
   out.Series("radial", {"r_km", "sea_level_per_km", "decay_time_per_km"}, rows);
 
-  std::cout << "wrote viscosity_kernels.nc and kernels_3d.txt (sea level "
-               "change "
+  std::cout << "wrote " << kernelFile.string() << " and " << table.string()
+            << " (sea level change "
             << length *
-                   PairedValue(grid, a, dual, snapshots.back().seaLevelChange)
+                   PairedValue(grid, a, dual, snapshots.back().relativeSeaLevelChange)
             << " m, decay time " << fit.decay_time << " kyr)\n";
   return 0;
 }

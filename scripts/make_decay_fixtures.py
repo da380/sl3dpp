@@ -1,10 +1,13 @@
-"""The decay-time fixture: pyslfp's estimator on a deterministic noisy
-series, for TestMeasurements to hold the C++ port to.
+"""The decay-time fixture: pyslfp's estimator, `fit_decay_time`, on a
+deterministic noisy series, which TestMeasurements holds the C++
+FitDecayTime to.
 
 Run in this directory's environment (pyproject.toml):
 
     cd scripts && poetry install --no-root
     poetry run python make_decay_fixtures.py [--data-dir DIR]
+
+Output (committed): tests/data/decay_time.txt
 
 The series is a clean decay plus reproducible noise from the same
 linear-congruential generator the C++ test uses elsewhere, fitted with

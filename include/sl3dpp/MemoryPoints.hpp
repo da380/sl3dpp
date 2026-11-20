@@ -11,8 +11,9 @@
  * Gauss-Legendre points by default: the same 2N - 1 exactness for the
  * memory-force integral, no doubling at shared element boundaries, ~20%
  * fewer points. The displacement stays at the GLL nodes either way. The
- * alternative is the GLL nodes themselves (pyslfp's and the Fortran's
- * choice), kept for like-for-like comparisons with those codes.
+ * alternative is the GLL nodes themselves, kept for like-for-like
+ * comparisons with codes that place the internal variables there (the
+ * Fortran among them).
  *
  * The shear energy splits as int mu_inf |d|^2 + sum_k int mu_k |d - m_k|^2,
  * the long-term part at the GLL nodes (the stiffness assembly's own
@@ -82,6 +83,20 @@ struct MemoryPoints {
   /// point values onto the nodal values they interpolate.
   [[nodiscard]] std::vector<double> InterpolateTranspose(
       std::span<const double> atPoints) const;
+
+  /// The radii of the points over the whole mesh, (element, point).
+  [[nodiscard]] std::vector<double> Radii(const RadialMesh& mesh) const;
+  /// Their quadrature weights in radius, (element, point): the reference
+  /// weight times the element's Jacobian, so that sum_p w_p f(r_p)
+  /// approximates int f(r) dr. The weights of the L2 pairing of functions
+  /// sampled at the points.
+  [[nodiscard]] std::vector<double> QuadratureWeights(
+      const RadialMesh& mesh) const;
+  /// Their weights in volume, (element, point): 4 pi r^2 times the
+  /// quadrature weight in radius, so that sum_p W_p f(r_p) approximates
+  /// the volume integral of a function of radius. The weights of the
+  /// volume pairing of a kernel with a perturbation (docs/adjoints.md).
+  [[nodiscard]] std::vector<double> VolumeWeights(const RadialMesh& mesh) const;
 };
 
 /// A shear modulus that lives at the memory points, which an operator
@@ -89,10 +104,58 @@ struct MemoryPoints {
 /// per element and point the modulus s (the branches' sum_k mu_k w_k), and
 /// the term is sum_p jac w_p s_p times the deviatoric form at the point.
 /// With GLL points it is exactly the material's shear modulus raised by s.
-/// Read during the operator's construction only.
+/// Beside it, optionally, a bulk modulus at the points, integrated against
+/// the dilatation squared in the same way (a perturbation of kappa held at
+/// the points; empty for none), which the degree operators take and the
+/// toroidal ones, having no dilatation, do not. Read during the operator's
+/// construction only.
 struct PointShear {
   const MemoryPoints* points = nullptr;
   std::span<const double> modulus;  ///< (ElementCount, points->count)
+  std::span<const double> bulk{};   ///< likewise, or empty
 };
+
+/// The volume pairing of a 1D kernel with a perturbation. Every kernel
+/// of the library is a density per unit volume (docs/adjoints.md, "The
+/// kernels' convention"): its array holds samples K(r_p) of a function,
+/// and the change of the objective under a perturbation delta(r) of the
+/// parameter is
+///   dJ = int K delta dV = 4 pi int K(r) delta(r) r^2 dr
+///      ~ sum_p W_p K(r_p) delta(r_p),
+/// W the points' MemoryPoints::VolumeWeights. For a kernel at the memory
+/// points (kappaKernel, muKernel) pass the operator's Points(); for a
+/// nodal one (itauKernel, Kernels::Viscosity, the Love numbers') the
+/// mesh alone. Refused when the arrays are not the mesh's points'.
+[[nodiscard]] double VolumePairing(const MemoryPoints& points,
+                                   const RadialMesh& mesh,
+                                   std::span<const double> kernel,
+                                   std::span<const double> direction);
+[[nodiscard]] double VolumePairing(const RadialMesh& mesh,
+                                   std::span<const double> nodalKernel,
+                                   std::span<const double> nodalDirection);
+
+namespace detail {
+/// A kernel accumulated as a gradient with respect to the point values
+/// (each entry the kernel times its point's volume weight, what the
+/// sweeps and the static adjoints form) as the samples of the kernel:
+/// the volume weights divided out. A point at the centre has no volume
+/// weight: its sample is the element's polynomial through the other
+/// points, evaluated there, and its gradient entry is not kept. For a
+/// kernel accumulated at the points themselves that entry is small but
+/// not zero by construction: at a GLL point at r = 0 it is the point's
+/// quadrature weight (the degree forms carry no r^2 there) times products
+/// of the solution's departures from regularity at the centre (U and V at
+/// degree 2 and above, U - V at degree 1, W), which are spectrally small,
+/// at rounding on production meshes. For the nodal relaxation-time kernel
+/// of Gauss memory points, carried to the nodes by the interpolation's
+/// transpose, the entry is not small when the element at the centre
+/// relaxes, and the volume pairing then misses the sensitivity to the
+/// value at the centre alone (about 1e-5 of that element's).
+[[nodiscard]] std::vector<double> KernelSamples(const MemoryPoints& points,
+                                                const RadialMesh& mesh,
+                                                std::vector<double> gradient);
+[[nodiscard]] std::vector<double> KernelSamples(const RadialMesh& mesh,
+                                                std::vector<double> gradient);
+}  // namespace detail
 
 }  // namespace sl3dpp

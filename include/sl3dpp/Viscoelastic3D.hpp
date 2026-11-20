@@ -47,12 +47,13 @@
  * detail/LateralSolve.hpp (docs/adjoints.md §13k).
  *
  * With delta = 0 and no lateral moduli the lateral term vanishes
- * identically and a step reproduces the 1D two-phase stepper exactly. The memory nodes are the
- * Gauss points of the viscous elements or, with Options::memory_points,
- * their GLL nodes (MemoryPoints.hpp); the 1D reference takes the same
- * set, so the identity holds for either. Load channels are prescribed
- * here (complex m >= 0 columns of real fields); the sea-level coupling
- * drives this class through the same channels.
+ * identically and a step reproduces the 1D two-phase stepper to rounding
+ * (its transforms round where the 1D stepper has none). The memory nodes
+ * are the Gauss points of the viscous elements or, with
+ * Options::memory_points, their GLL nodes (MemoryPoints.hpp); the 1D
+ * reference takes the same set, so the identity holds for either. Load
+ * channels are prescribed here (complex m >= 0 columns of real fields);
+ * the sea-level coupling drives this class through the same channels.
  */
 
 #include <complex>
@@ -63,6 +64,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -79,7 +81,8 @@ class Viscoelastic3D {
   using Complex = std::complex<double>;
   /// A load channel: the complex m >= 0 columns (l + 1, index m; the
   /// field is real, so m < 0 is implied) at a time, or std::nullopt
-  /// where silent.
+  /// where silent. A tide channel's degree-1 columns must vanish, as
+  /// LoadCallable's (Viscoelastic.hpp), and are refused otherwise.
   using LoadCallable3D =
       std::function<std::optional<std::vector<Complex>>(int l, double t)>;
 
@@ -143,7 +146,9 @@ class Viscoelastic3D {
     /// phi)); either may be empty. With any set the coupling carries,
     /// beside the viscous elements, every solid element where a
     /// perturbation is non-zero at some memory point (the functions are
-    /// sampled on a probe of the whole solid first), the
+    /// sampled on a probe of the whole solid first), the element holding
+    /// the centre among them at the Gauss points (GridCoupling::Options),
+    /// the
     /// unrelaxed start solve is the preconditioned conjugate-gradient
     /// solve of detail/LateralSolve.hpp on the reference systems
     /// (elastic_rtol, elastic_max_iterations), and the within-step
@@ -213,6 +218,16 @@ class Viscoelastic3D {
   [[nodiscard]] const ViscoelasticOperator& Reference() const {
     return reference_;
   }
+
+  /// The shortest relaxation time over the volume as the operator holds
+  /// it, and where it is (RelaxationSite): every branch's inverse time at
+  /// every grid point of every memory node where the branch is active, the
+  /// lateral viscosity sampled. Distributed, over every process's nodes
+  /// (through the collectives' max): collective, the same on every
+  /// process. With no lateral viscosity it is the reference's
+  /// (ViscoelasticOperator::ShortestRelaxation), the coupling carrying
+  /// every element that relaxes.
+  [[nodiscard]] RelaxationSite ShortestRelaxation() const;
 
   /// The unrelaxed solid's Love numbers (SI), cached.
   [[nodiscard]] const LoveNumbers& ElasticLove() const {
@@ -294,6 +309,16 @@ class Viscoelastic3D {
   };
   [[nodiscard]] State ZeroState() const;
 
+  /// A multi-stage step's memory state (StepRecipe.hpp): the memory
+  /// tensors sum_j a_j m_j over the terms (a_j, state_j), in arrays
+  /// recycled where there are any (Recycle), the first state's time, and
+  /// the last state's strain cache, where the stage's within-step
+  /// iteration starts: a backward Euler stage reads its start strain for
+  /// nothing else, and the latest stage's end strain is the nearest to its
+  /// own. Not a state consistent with its cache otherwise.
+  [[nodiscard]] State StageState(
+      std::span<const std::pair<double, const State*>> terms) const;
+
   /// Per-degree solutions: spheroidal complex m >= 0 columns
   /// (ndof x (l + 1), column-major) and toroidal likewise (degrees >= 1;
   /// degree 1 in the operator's pinned gauge, its rigid rotations being
@@ -304,18 +329,21 @@ class Viscoelastic3D {
   };
 
   /// The quasi-static solutions consistent with (m, t): the unrelaxed
-  /// reference systems forced by the loads and the memory force of m.
-  /// (The unrelaxed operator is laterally uniform — viscosity enters only
-  /// through the stepping — so no iteration is needed here.)
+  /// systems forced by the loads and the memory force of m. Without
+  /// lateral moduli the unrelaxed operator is laterally uniform (viscosity
+  /// enters only through the stepping), and the reference solves give
+  /// them with no iteration; under lateral moduli it varies laterally, and
+  /// they are the preconditioned conjugate-gradient solve's
+  /// (LastElasticSolve): on a rheology without branches, the static
+  /// problem on the lateral moduli.
   [[nodiscard]] Solutions SolveElastic(const State& state,
                                        const LoadCallable3D& load = {},
                                        const LoadCallable3D& tide = {}) const;
 
   /// The strain consistent with (m, t) under the given loads: one
-  /// elastic solve. The unrelaxed operator is laterally uniform, so no
-  /// iteration, and a step's end strain satisfies unrelaxed equilibrium
-  /// with its new memory, so this regenerates the strain of a state
-  /// recorded with its internal variables only.
+  /// elastic solve (SolveElastic's). A step's end strain satisfies
+  /// unrelaxed equilibrium with its new memory, so this regenerates the
+  /// strain of a state recorded with its internal variables only.
   [[nodiscard]] GridCoupling::TensorField ElasticStrain(
       const State& state, const LoadCallable3D& load = {},
       const LoadCallable3D& tide = {}) const;
@@ -338,6 +366,12 @@ class Viscoelastic3D {
     /// iterations in all (the step's one solve, or a nested closure's
     /// solves summed).
     int solveIterations = 0;
+    /// Where an iteration that missed its tolerance `rtol` stopped, for
+    /// its failure's message: "residual r after n passes, against the
+    /// tolerance rtol". The residual has a floor at the rounding of a
+    /// pass (Evolution3D::Options::coupled_rtol), which a tolerance below
+    /// it shows here as a residual stopped above it.
+    [[nodiscard]] std::string Describe(double rtol) const;
   };
 
   /// The within-step fixed point's controls: at most max_iterations
@@ -359,16 +393,19 @@ class Viscoelastic3D {
     double anderson_rate = 0.5;
   };
 
-  /// One implicit step (ExponentialTrapezoid or BackwardEuler) under the
-  /// load channels; returns the new state (with its strain cache), the
-  /// end-time solutions, and the iteration diagnostics.
+  /// One implicit step (ExponentialTrapezoid, BackwardEuler, or Sdirk2's
+  /// two backward Euler stages, each closed under the channels at its own
+  /// end time) under the load channels; returns the new state (with its
+  /// strain cache), the end-time solutions, and the iteration diagnostics
+  /// (under Sdirk2 the stages' iterations summed, converged when both
+  /// were, the last stage's residual).
   struct StepResult {
     State state;
     Solutions solutions;
     StepInfo info;
   };
   [[nodiscard]] StepResult Step(const State& state, double dt,
-                                Scheme scheme = Scheme::ExponentialTrapezoid,
+                                Scheme scheme = Scheme::Sdirk2,
                                 const LoadCallable3D& load = {},
                                 const LoadCallable3D& tide = {}) const;
 
@@ -377,6 +414,15 @@ class Viscoelastic3D {
   /// segment's process holds them).
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
+
+  /// The surface value of the toroidal scalar W per degree (from 1), as
+  /// Surface: the tangential displacement is grad_1 V - r x grad_1 W.
+  [[nodiscard]] std::map<int, std::vector<Complex>> SurfaceToroidal(
+      const Solutions& solutions) const;
+
+  /// The inertia moment of the degree-0, m = 0 column of solutions (zero
+  /// without one); distributed, collective (each process's share summed).
+  [[nodiscard]] double InertiaMoment(const Solutions& solutions) const;
 
  private:
   struct Flavour;  // reference effective systems per (scheme, dt)
@@ -547,6 +593,13 @@ class Viscoelastic3D {
     /// Respond.
     void AddForce(const GridCoupling::SpectralTensor& analysed,
                   const std::map<int, std::vector<Complex>>& spheroidal);
+    /// Adds per-degree toroidal forces (the solutions' layout), as
+    /// AddForce's spheroidal ones: a toroidal traction, say.
+    void AddToroidalForce(const std::map<int, std::vector<Complex>>& toroidal);
+    /// Adds per-degree spheroidal and toroidal forces with no tensor: a
+    /// point source's (PointSource.hpp).
+    void AddDegreeForces(const std::map<int, std::vector<Complex>>& spheroidal,
+                         const std::map<int, std::vector<Complex>>& toroidal);
 
     /// Completes the step for the final strain coefficients: the strain d
     /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients
@@ -589,6 +642,8 @@ class Viscoelastic3D {
     mutable bool startForce_ = false;
     /// Per-degree spheroidal forces added after the assembly (AddForce).
     std::map<int, std::vector<Complex>> extraSpheroidal_;
+    /// Per-degree toroidal forces added after the assembly.
+    std::map<int, std::vector<Complex>> extraToroidal_;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
@@ -601,9 +656,12 @@ class Viscoelastic3D {
   /// there (docs/adjoints.md §13k). Its grid-sized
   /// arrays (the decayed memory, the weights, the workspace) come from the
   /// arrays recycled since the last StartStep where there are any, and are
-  /// allocated otherwise.
+  /// allocated otherwise. The step opened is one stage: a multi-stage
+  /// scheme (Sdirk2) is opened stage by stage (StepRecipe.hpp), and
+  /// refused here but at dt = 0, where every scheme's step is backward
+  /// Euler's.
   [[nodiscard]] OpenStep StartStep(const State& state, double dt,
-                                   Scheme scheme = Scheme::ExponentialTrapezoid,
+                                   Scheme scheme,
                                    const LoadCallable3D& load = {},
                                    const LoadCallable3D& tide = {}) const;
 

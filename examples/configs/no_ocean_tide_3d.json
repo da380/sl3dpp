@@ -1,0 +1,17 @@
+{
+  "problem": "static",
+  "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic",
+            "moduli": {"file": "../data/synthetic_moduli.nc"}},
+  "discretisation": {"lmax": 32},
+  "forcing": {
+    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.8009},
+             {"degree": 2, "order": 1, "amplitude_m2_s2": -0.3793,
+              "imaginary_m2_s2": 2.1511},
+             {"degree": 2, "order": 2, "amplitude_m2_s2": 2.8196,
+              "imaginary_m2_s2": 1.0263}]
+  },
+  "rotation": "none",
+  "solver": {"step_rtol": 1e-10, "step_max_iterations": 200},
+  "output": {"surface": "out/no_ocean_tide_3d/no_ocean_tide_3d.nc",
+             "exchange": "out/no_ocean_tide_3d/no_ocean_tide_3d.txt"}
+}

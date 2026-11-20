@@ -4,7 +4,7 @@
 // the prem8 deck's body with a Maxwell mantle, its elastic solver and the
 // analytic test state; smooth random fields and itau perturbations; the
 // objective of a measurement set on snapshots; a per-node load history;
-// and pyslfp's marine-grounded cap for migrating runs.
+// and a marine-grounded ice cap for migrating runs.
 
 #include <algorithm>
 #include <cmath>
@@ -37,15 +37,16 @@ constexpr auto kYear = 3.15576e7;  // s
 
 /// The prem8 deck's body with a Maxwell mantle of the given viscosity
 /// (Pa s) between the CMB and 220 km depth, its elastic solver and the
-/// analytic test state (the adjoint tests' scene).
+/// analytic test state (the adjoint tests' scene). With `weakSI`, the
+/// layers between 400 and 220 km depth take that viscosity instead.
 struct Scene {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
 
-  static Scene Make(double viscositySI) {
+  static Scene Make(double viscositySI, double weakSI = 0.0) {
     auto deck =
         Deck::Read(
             std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -61,13 +62,14 @@ struct Scene {
     for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
-        viscosity.emplace(i,
-                          viscositySI / scales.Factor(ViscosityDimensions));
+        const auto weak = weakSI > 0.0 && b[i] >= 5.9709e6 / scales.Length();
+        viscosity.emplace(i, (weak ? weakSI : viscositySI) /
+                                 scales.Factor(ViscosityDimensions));
       }
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     ViscoelasticOperator op(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     Fingerprint fingerprint(kLmax, op.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -144,19 +146,26 @@ struct Scene {
 
 /// The objective the measurements define, evaluated on snapshots.
 inline double Objective(const Scene& setup,
-                 const std::vector<SeaLevelEvolution::Snapshot>& snapshots,
+                 const std::vector<Evolution::Snapshot>& snapshots,
                  const std::map<std::size_t, Measurement>& measurements) {
   auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
-    if (!m.seaLevelDual.empty()) {
-      total += setup.Surface(m.seaLevelDual, snap.seaLevelChange);
+    if (!m.relativeSeaLevelDual.empty()) {
+      total += setup.Surface(m.relativeSeaLevelDual, snap.relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       total += setup.Surface(m.displacementDual, snap.displacement);
     }
     if (!m.potentialDual.empty()) {
       total += setup.Surface(m.potentialDual, snap.potential);
+    }
+    if (!m.tangentialPotentialDual.empty()) {
+      total +=
+          setup.Surface(m.tangentialPotentialDual, snap.tangentialPotential);
+    }
+    if (!m.toroidalPotentialDual.empty() && !snap.toroidalPotential.empty()) {
+      total += setup.Surface(m.toroidalPotentialDual, snap.toroidalPotential);
     }
     for (auto j = 0; j < 3; ++j) {
       total += m.angularVelocityDual[j] * snap.angularVelocity[j];
@@ -199,9 +208,9 @@ inline std::map<std::size_t, Measurement> FullMeasurements(const Scene& setup,
                                                     std::mt19937& rng,
                                                     std::size_t last) {
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = setup.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = setup.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = setup.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   middle.displacementDual = setup.Smooth(rng, -0.5);
   measurements[last / 2 + 1] = std::move(middle);
   Measurement end;
@@ -212,9 +221,72 @@ inline std::map<std::size_t, Measurement> FullMeasurements(const Scene& setup,
   return measurements;
 }
 
-/// pyslfp's marine-grounded cap on a uniform ocean (the initial-sea-level
-/// tests' scene): a 5 km cap at 60N 85W on a 3000 m ocean, complete at
-/// 10 ka and melting linearly to nothing.
+/// A time grid of `steps` equal steps over [0, span] with node `at` (0 <
+/// at < steps) repeated: an earthquake there, node `at` its left limit and
+/// node `at` + 1 its right, a zero-length step between.
+inline std::vector<double> OnsetGrid(int steps, double span, int at) {
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= steps; ++n) {
+    times.push_back(span * n / steps);
+    if (n == at) times.push_back(times.back());
+  }
+  return times;
+}
+
+/// Interior sources given node by node on a grid with a repeated node:
+/// the plain callback reads the last node at a time, the left limit
+/// (Forcing::sourcesBefore) the first.
+inline Evolution::Forcing SourcesByNode(
+    std::vector<double> times, std::vector<std::vector<PointSource>> perNode) {
+  auto find = [times](double t, bool first) {
+    auto found = times.size();
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * std::abs(times.back())) {
+        found = n;
+        if (first) break;
+      }
+    }
+    if (found == times.size()) {
+      throw std::runtime_error("the test history is read off its nodes");
+    }
+    return found;
+  };
+  return {.sources = [find, perNode](double t) { return perNode[find(t, false)]; },
+          .sourcesBefore = [find, perNode](double t) {
+            return perNode[find(t, true)];
+          }};
+}
+
+/// A term given node by node on a grid with a repeated node, as
+/// SourcesByNode: `plain` reads the last node at a time, `before` (its left
+/// limit, Forcing::directLoadBefore and its kin) the first.
+template <class T>
+struct ByNode {
+  std::function<T(double)> plain;
+  std::function<T(double)> before;
+
+  ByNode(std::vector<double> times, std::vector<T> perNode) {
+    auto find = [times](double t, bool first) {
+      auto found = times.size();
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        if (std::abs(t - times[n]) <= 1e-12 * std::abs(times.back())) {
+          found = n;
+          if (first) break;
+        }
+      }
+      if (found == times.size()) {
+        throw std::runtime_error("the test history is read off its nodes");
+      }
+      return found;
+    };
+    plain = [find, perNode](double t) { return perNode[find(t, false)]; };
+    before = [find, perNode](double t) { return perNode[find(t, true)]; };
+  }
+};
+
+/// A marine-grounded cap on a uniform ocean (the initial-sea-level tests'
+/// scene): a 5 km cap at 60N 85W on a 3000 m ocean, complete at 10 ka and
+/// melting linearly to nothing.
 struct MarineCap {
   std::vector<double> ice0, sea0, times;
   double span = 0.0;

@@ -5,11 +5,13 @@ response to unit surface tractions, without and with gravity, on solid
 spherical models.  This script writes two solid decks -- the homogeneous
 and two-solid models of AdGIA's benchmark ladder
 (`AdGIA/benchmarks/common/models.py`), full precision -- reads each back
-with planetmodel, and records pyslfp's traction numbers on the uniform
-lmax mesh rule, the same rule sl3dpp's RadialMesh implements, so both
-codes solve the identical discrete problem and agreement is expected
-near machine precision. tests/TestTractionNumbers.cpp holds the C++ to
-it.
+with planetmodel, and records pyslfp's traction numbers
+(`traction_numbers`) on the uniform lmax mesh rule, the same rule
+sl3dpp's RadialMesh implements, so both codes solve the identical
+discrete problem and agreement is expected near machine precision. The
+table holds, per model, without and with gravity, the radius and h_u,
+l_u, h_v and l_v at degrees 0 to 8, in SI (m per Pa; NaN at an excluded
+degree). tests/TestTractionNumbers.cpp holds the C++ to it.
 
 Run in this directory's environment (pyproject.toml):
 

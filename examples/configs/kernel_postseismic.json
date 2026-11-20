@@ -1,0 +1,38 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.postseismic.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 32},
+  "times": {"unit": "yr", "at": [0.0, 2.0, 5.0, 10.0, 20.0, 40.0, 70.0, 100.0]},
+  "forcing": {
+    "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
+                           "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
+                           "length_km": 600.0, "width_km": 150.0,
+                           "moment_nm": 2.0e22,
+                           "patches_along_strike": 6, "patches_down_dip": 2},
+                 "onset": 0.0}]
+  },
+  "ocean": {
+    "at": "start",
+    "date_kyr_bp": 0.0,
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "output": {"surface": "out/kernel_postseismic/run.nc"},
+  "trajectory": {"directory": "out/kernel_postseismic/trajectory"},
+  "kernels": {
+    "method": "discrete",
+    "parameters": ["moment", "viscosity"],
+    "measurements": [
+      {"type": "displacement_vector_point", "name": "gps_east",
+       "latitude": -23.0, "longitude": 290.0, "direction": {"east": 1},
+       "time": 20.0},
+      {"type": "displacement_point", "name": "gps_up",
+       "latitude": -23.0, "longitude": 290.0, "time": 20.0},
+      {"type": "relative_sea_level_point", "name": "tide_gauge",
+       "latitude": -23.65, "longitude": 289.6, "time": 100.0}
+    ],
+    "output": "out/kernel_postseismic"
+  }
+}

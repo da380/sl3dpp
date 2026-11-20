@@ -6,11 +6,8 @@ target_compile_definitions(fortran_gate PRIVATE
 add_executable(step_timing step_timing.cpp)
 target_link_libraries(step_timing PRIVATE sl3dpp::sl3dpp)
 
-# The serial prototype of the radially substructured degree solve
+# The library's substructured solves on the real degree systems
 # (docs/radial-partitioning.md).
-add_executable(substructure_prototype substructure_prototype.cpp)
-target_link_libraries(substructure_prototype PRIVATE sl3dpp::sl3dpp)
-# ... and the library's substructured solves on the real degree systems.
 add_executable(substructure_timing substructure_timing.cpp)
 target_link_libraries(substructure_timing PRIVATE sl3dpp::sl3dpp)
 # ... and distributed over MPI ranks (mpiexec), with SL3DPP_WITH_MPI.

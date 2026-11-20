@@ -5,7 +5,9 @@
 #include <format>
 #include <numbers>
 #include <stdexcept>
+#include <string_view>
 
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -46,21 +48,96 @@ void AddColumns(std::vector<double>& x, const std::vector<double>& units,
 // The per-degree workspace and the flavour struct live in
 // detail/ViscoelasticDegree.hpp, shared with the adjoint sweeps.
 
+namespace {
+
+/// The rheology an operator steps: the one given, or with the internal
+/// variables at the GLL nodes and a perturbation of the moduli there, the
+/// rheology with its nodal moduli scaled (the points are the nodes).
+std::shared_ptr<const Rheology> SteppedRheology(
+    const Rheology& rheology, const ViscoelasticOperator::Options& options) {
+  const auto& moduli = options.moduli;
+  if (moduli.Empty() || options.memory_points != MemoryPointSet::Gll) {
+    return std::make_shared<const Rheology>(rheology);
+  }
+  const auto size = rheology.BaseMaterial().Rho().size();
+  if ((!moduli.shear.empty() && moduli.shear.size() != size) ||
+      (!moduli.bulk.empty() && moduli.bulk.size() != size)) {
+    throw std::invalid_argument(
+        "a perturbation of the moduli has (element, point) entries");
+  }
+  MaterialDirection d;
+  const auto kappa = rheology.Kappa();
+  const auto muU = rheology.MuUnrelaxed();
+  d.kappa.assign(size, 0.0);
+  d.mu.assign(size, 0.0);
+  for (auto i = std::size_t{0}; i < size; ++i) {
+    if (!moduli.bulk.empty()) d.kappa[i] = moduli.bulk[i] * kappa[i];
+    if (!moduli.shear.empty()) d.mu[i] = moduli.shear[i] * muU[i];
+  }
+  auto branches = std::vector<Rheology::Branch>{};
+  for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
+    branches.push_back(rheology.BranchAt(k));
+    if (moduli.shear.empty()) continue;
+    for (auto i = std::size_t{0}; i < size; ++i) {
+      branches.back().mu[i] *= 1.0 + moduli.shear[i];
+    }
+  }
+  auto shifted =
+      Rheology::Create(rheology.BaseMaterial().Shifted(d, 1.0), std::move(branches));
+  if (!shifted) {
+    throw std::invalid_argument(
+        "the perturbed moduli do not make a rheology");
+  }
+  return std::make_shared<const Rheology>(std::move(*shifted));
+}
+
+}  // namespace
+
 ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
                                            Options options)
-    : rheology_(std::make_shared<const Rheology>(rheology)),
+    : rheology_(SteppedRheology(rheology, options)),
       lmax_(lmax),
       options_(options),
       points_(std::make_unique<const MemoryPoints>(MemoryPoints::Of(
           options.memory_points, rheology.BaseMaterial().Mesh()))) {
   if (lmax < 0) throw std::invalid_argument("lmax must be non-negative");
   const auto gll = options.memory_points == MemoryPointSet::Gll;
+  const auto& moduli = options_.moduli;
+  const auto pointCount =
+      static_cast<std::size_t>(rheology.BaseMaterial().Mesh().ElementCount()) *
+      points_->count;
+  if ((!moduli.shear.empty() && moduli.shear.size() != pointCount) ||
+      (!moduli.bulk.empty() && moduli.bulk.size() != pointCount)) {
+    throw std::invalid_argument(
+        "a perturbation of the moduli has (element, point) entries");
+  }
   auto sample = [&](const std::vector<double>& nodal) {
     if (gll) return nodal;
     auto out = points_->Interpolate(nodal);
     for (auto& v : out) v = std::max(v, 0.0);
     return out;
   };
+  auto atPoints = [&](std::span<const double> nodal) {
+    return gll ? std::vector<double>(nodal.begin(), nodal.end())
+               : points_->Interpolate(nodal);
+  };
+  // The reference's moduli at the points, before any perturbation.
+  muUnrelaxedAtPoints_ = atPoints(rheology.MuLongTerm());
+  kappaAtPoints_ = atPoints(rheology.Kappa());
+  const auto longTermAtPoints = muUnrelaxedAtPoints_;
+  for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
+    branchFraction_.push_back(sample(rheology.BranchAt(k).mu));
+    for (auto i = std::size_t{0}; i < pointCount; ++i) {
+      muUnrelaxedAtPoints_[i] += branchFraction_.back()[i];
+    }
+  }
+  for (auto& fraction : branchFraction_) {
+    for (auto i = std::size_t{0}; i < pointCount; ++i) {
+      fraction[i] = muUnrelaxedAtPoints_[i] > 0.0
+                        ? fraction[i] / muUnrelaxedAtPoints_[i]
+                        : 0.0;
+    }
+  }
   for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
     pointMu_.push_back(sample(rheology_->BranchAt(k).mu));
     pointItau_.push_back(sample(rheology_->BranchAt(k).itau));
@@ -70,16 +147,77 @@ ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
     // the branches' at the points (MemoryPoints.hpp).
     nodalMaterial_ =
         std::make_unique<const Material>(rheology_->LongTermMaterial());
-    elasticShear_.assign(static_cast<std::size_t>(
-                             rheology.BaseMaterial().Mesh().ElementCount()) *
-                             points_->count,
-                         0.0);
+    elasticShear_.assign(pointCount, 0.0);
+    if (!moduli.shear.empty()) {
+      // The branches scaled at the points; the long-term shear's
+      // perturbation a point term that every operator carries whole.
+      longTermShearShift_.resize(pointCount);
+      for (auto i = std::size_t{0}; i < pointCount; ++i) {
+        longTermShearShift_[i] = moduli.shear[i] * longTermAtPoints[i];
+        elasticShear_[i] = longTermShearShift_[i];
+      }
+      for (auto& mu : pointMu_) {
+        for (auto i = std::size_t{0}; i < pointCount; ++i) {
+          mu[i] *= 1.0 + moduli.shear[i];
+        }
+      }
+    }
+    if (!moduli.bulk.empty()) {
+      pointBulk_.resize(pointCount);
+      for (auto i = std::size_t{0}; i < pointCount; ++i) {
+        pointBulk_[i] = moduli.bulk[i] * kappaAtPoints_[i];
+      }
+    }
     for (const auto& mu : pointMu_) {
       for (auto i = std::size_t{0}; i < mu.size(); ++i)
         elasticShear_[i] += mu[i];
     }
-    elasticPointShear_ = {points_.get(), elasticShear_};
+    elasticPointShear_ = {points_.get(), elasticShear_, pointBulk_};
   }
+}
+
+PointMaterialDirection AtMemoryPoints(const MemoryPoints& points,
+                                      const MaterialDirection& nodal) {
+  const auto gll = points.set == MemoryPointSet::Gll;
+  auto at = [&](const std::vector<double>& a) {
+    return a.empty() || gll ? a : points.Interpolate(a);
+  };
+  return {.kappa = at(nodal.kappa), .mu = at(nodal.mu)};
+}
+
+double RelaxationSite::StepRatio(std::span<const double> times,
+                                 double unit) const {
+  if (!std::isfinite(time)) return 0.0;
+  auto longest = 0.0;
+  for (auto n = std::size_t{1}; n < times.size(); ++n) {
+    longest = std::max(longest, times[n] - times[n - 1]);
+  }
+  return longest * unit / time;
+}
+
+RelaxationSite ViscoelasticOperator::ShortestRelaxation() const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  const auto np = static_cast<std::size_t>(points_->count);
+  const auto radii = points_->Radii(mesh);
+  auto site = RelaxationSite{};
+  auto largest = 0.0;
+  for (auto k = std::size_t{0}; k < pointItau_.size(); ++k) {
+    for (auto i = std::size_t{0}; i < pointItau_[k].size(); ++i) {
+      const auto itau = pointItau_[k][i];
+      // ties to the innermost point, as Viscoelastic3D's
+      const auto shorter =
+          itau > largest || (itau == largest && radii[i] < site.radius);
+      if (!(pointMu_[k][i] > 0.0) || !(itau > 0.0) || !shorter) continue;
+      largest = itau;
+      const auto e = static_cast<int>(i / np);
+      site.branch = k;
+      site.element = e;
+      site.layer = mesh.LayerOf(e);
+      site.radius = radii[i];
+    }
+  }
+  if (largest > 0.0) site.time = 1.0 / largest;
+  return site;
 }
 
 ViscoelasticOperator::~ViscoelasticOperator() = default;
@@ -87,6 +225,10 @@ ViscoelasticOperator::ViscoelasticOperator(ViscoelasticOperator&&) noexcept =
     default;
 ViscoelasticOperator& ViscoelasticOperator::operator=(
     ViscoelasticOperator&&) noexcept = default;
+
+const DegreeOperator& ViscoelasticOperator::UnrelaxedSystem(int l) const {
+  return Deg(l).system;
+}
 
 std::pair<int, int> ViscoelasticOperator::MemoryElements(int l) const {
   const auto& deg = Deg(l);
@@ -106,9 +248,24 @@ ViscoelasticOperator::Degree& ViscoelasticOperator::Deg(int l) const {
   return *found->second;
 }
 
+namespace {
+/// The refusal of a multi-stage scheme where one set of step weights or
+/// one effective operator is asked for at a step of nonzero length.
+void RefuseMultiStage(Scheme scheme, double dt, std::string_view what) {
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(std::format(
+        "Sdirk2 has no {} at a step of nonzero length: it steps in two "
+        "backward Euler stages of length gamma dt (StepRecipe.hpp), each "
+        "BackwardEuler's at that length",
+        what));
+  }
+}
+}  // namespace
+
 const std::vector<ViscoelasticOperator::BranchWeights>&
 ViscoelasticOperator::WeightsOfOrder(Scheme scheme, double dt,
                                      int order) const {
+  RefuseMultiStage(scheme, dt, "the step weights");
   auto& cache = order == 0   ? weights_
                 : order == 1 ? weightDerivatives_
                              : weightSecondDerivatives_;
@@ -166,6 +323,10 @@ ViscoelasticOperator::SchemeWeightSecondDerivativesOf(Scheme scheme,
 
 std::vector<double> ViscoelasticOperator::PointShearModulus(Scheme scheme,
                                                             double dt) const {
+  // a zero-length step's weights are one: the elastic operators' own
+  if (dt == 0.0 && options_.memory_points != MemoryPointSet::Gll) {
+    return elasticShear_;
+  }
   const auto& weights = SchemeWeightsOf(scheme, dt);
   auto s = std::vector<double>(
       static_cast<std::size_t>(BaseMaterial().Mesh().ElementCount()) *
@@ -178,6 +339,9 @@ std::vector<double> ViscoelasticOperator::PointShearModulus(Scheme scheme,
                                  : 1.0 - weights[k].beta[i];
       s[i] += pointMu_[k][i] * unrelaxed;
     }
+  }
+  for (auto i = std::size_t{0}; i < longTermShearShift_.size(); ++i) {
+    s[i] += longTermShearShift_[i];
   }
   return s;
 }
@@ -235,12 +399,15 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
   if (scheme == Scheme::ExponentialEuler) {
     throw std::invalid_argument("no effective operator for ExponentialEuler");
   }
+  RefuseMultiStage(scheme, dt, "one effective material");
   if (options_.memory_points != MemoryPointSet::Gll) {
     throw std::logic_error(
         "with internal variables away from the GLL nodes a step's "
         "effective solid is the long-term material plus a shear at the "
         "memory points (MemoryPoints.hpp), not a material");
   }
+  // a zero-length step's weights are one: the unrelaxed material itself
+  if (dt == 0.0) return BaseMaterial();
   const auto& weights = SchemeWeightsOf(scheme, dt);
   auto w = std::vector<std::vector<double>>{};
   for (const auto& branch : weights) {
@@ -257,18 +424,18 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
   return BaseMaterial().WithModuli(rheology_->EffectiveModuli(w)).value();
 }
 
-ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
+std::shared_ptr<ViscoelasticOperator::Flavour> ViscoelasticOperator::FlavourOf(
     Scheme scheme, double dt) const {
   const auto key = std::pair(static_cast<int>(scheme), dt);
   for (auto it = flavours_.begin(); it != flavours_.end(); ++it) {
     if (it->first == key) {
       flavours_.splice(flavours_.begin(), flavours_, it);
-      return *flavours_.front().second;
+      return flavours_.front().second;
     }
   }
   constexpr auto kFlavourCache = std::size_t{4};
   while (flavours_.size() >= kFlavourCache) flavours_.pop_back();
-  auto flavour = std::make_unique<Flavour>();
+  auto flavour = std::make_shared<Flavour>();
   if (options_.memory_points == MemoryPointSet::Gll) {
     flavour->material =
         std::make_unique<Material>(EffectiveMaterial(scheme, dt));
@@ -277,10 +444,11 @@ ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
     // points.
     flavour->material = std::make_unique<Material>(NodalMaterial());
     flavour->pointShearModulus = PointShearModulus(scheme, dt);
-    flavour->pointShear = {points_.get(), flavour->pointShearModulus};
+    flavour->pointShear = {points_.get(), flavour->pointShearModulus,
+                           pointBulk_};
   }
-  flavours_.emplace_front(key, std::move(flavour));
-  return *flavours_.front().second;
+  flavours_.emplace_front(key, flavour);
+  return flavour;
 }
 
 const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
@@ -296,11 +464,66 @@ const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
                                                 : nullptr,
+                             .gravitating = options_.gravitating,
                              .cuts = options_.radial_cuts}))
             .first;
   }
   return found->second;
 }
+
+namespace {
+/// The refusal of what only the problem with gravity has.
+void RequireGravity(const ViscoelasticOperator& op, std::string_view what) {
+  if (!op.Gravitating()) {
+    throw std::invalid_argument(std::format(
+        "{} needs gravity: the operator solves the problem without it, "
+        "forced by the load channel (a surface mass's weight) and interior "
+        "sources (ViscoelasticStep::AddForce)",
+        what));
+  }
+}
+
+/// Without gravity the tide channel is refused: an external potential
+/// acts through the potential, which the problem has not.
+void RefuseTideWithoutGravity(const ViscoelasticOperator& op,
+                              const LoadCallable& tide) {
+  if (tide && !op.Gravitating()) {
+    throw std::invalid_argument(
+        "a tide channel (an external potential) needs gravity: the operator "
+        "solves the problem without it");
+  }
+}
+
+/// The load channel's columns at a degree and time (FetchColumns).
+/// Without gravity its degree-1 columns are removed: a degree-1 traction
+/// exerts a net force on the body, which nothing balances, and the load is
+/// projected on the loads that exert none (Evolution.hpp).
+std::optional<std::vector<double>> LoadColumns(const ViscoelasticOperator& op,
+                                               const LoadCallable& load, int l,
+                                               double t, int ncols) {
+  auto columns = FetchColumns(load, l, t, ncols);
+  if (columns && l == 1 && !op.Gravitating()) {
+    std::ranges::fill(*columns, 0.0);
+  }
+  return columns;
+}
+
+/// The tide channel's columns at a degree and time (FetchColumns). Its
+/// degree-1 columns must vanish: a tide is taken relative to the centre
+/// of mass (kLowestTideDegree), the channel's degree 0 the spherical
+/// mean of a centrifugal change.
+std::optional<std::vector<double>> TideColumns(const LoadCallable& tide, int l,
+                                               double t, int ncols) {
+  auto columns = FetchColumns(tide, l, t, ncols);
+  if (columns && l == 1 &&
+      std::ranges::any_of(*columns, [](double v) { return v != 0.0; })) {
+    throw std::invalid_argument(
+        "a tide channel has no degree-1 part: tides are taken relative to "
+        "the centre of mass, its degree-1 columns must vanish");
+  }
+  return columns;
+}
+}  // namespace
 
 const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
                                                                int l) const {
@@ -311,15 +534,29 @@ const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
     const auto& system =
         flavour == nullptr ? deg.system : EffectiveSystem(*flavour, l);
     auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
-    std::ranges::copy(deg.loadVec, rhs.begin());
-    std::ranges::copy(deg.tideVec, rhs.begin() + deg.ndof);
-    found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    if (options_.gravitating) {
+      std::ranges::copy(deg.loadVec, rhs.begin());
+      std::ranges::copy(deg.tideVec, rhs.begin() + deg.ndof);
+      found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    } else if (l == 1) {
+      // without gravity the degree-1 load is refused (LoadColumns) and
+      // there is no tide: no response to solve
+      found = cache.emplace(l, std::move(rhs)).first;
+    } else {
+      // without gravity the load's weight alone, the normal traction g
+      // pressing on the surface per unit surface density, -g a^2 on U(a)
+      // (DegreeOperator::Load on the system without the potential); no
+      // tide
+      std::ranges::copy(deg.loadVec, rhs.begin());
+      found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    }
   }
   return found->second;
 }
 
 const std::vector<double>& ViscoelasticOperator::SplitUnitResponses(
     Flavour* flavour, int l) const {
+  RequireGravity(*this, "a surface load's split responses");
   auto& deg = Deg(l);
   auto& cache =
       flavour == nullptr ? unrelaxedSplitUnits_ : flavour->splitUnits;
@@ -329,28 +566,47 @@ const std::vector<double>& ViscoelasticOperator::SplitUnitResponses(
         flavour == nullptr ? deg.system : EffectiveSystem(*flavour, l);
     const auto force = deg.system.Load(LoadPart::Force);
     const auto potential = deg.system.Load(LoadPart::Potential);
-    auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
+    const auto tangential = deg.system.Tangential();
+    auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 3, 0.0);
     std::ranges::copy(force, rhs.begin());
     std::ranges::copy(potential, rhs.begin() + deg.ndof);
-    found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    std::ranges::copy(tangential, rhs.begin() + 2 * deg.ndof);
+    found = cache.emplace(l, system.Solve(rhs, 3)).first;
   }
   return found->second;
 }
 
-void ViscoelasticOperator::AddChannels(std::vector<double>& x, int l,
-                                       Flavour* flavour, double t,
-                                       const LoadCallable& load,
-                                       const LoadCallable& tide,
-                                       int ncols) const {
-  if (!load && !tide) return;
-  const auto& deg = Deg(l);
-  const auto& units = UnitResponses(flavour, l);
-  if (auto columns = FetchColumns(load, l, t, ncols)) {
-    AddColumns(x, units, 0, deg.ndof, *columns, ncols);
+namespace {
+/// A degree's column count in a state: the count it carries, or, of a
+/// state without one, the size of its memory over `perColumn`, the
+/// memory's size per column.
+int ColumnsOf(const ViscoelasticState& state, int l, std::size_t memory,
+              std::size_t perColumn) {
+  if (const auto found = state.columns.find(l); found != state.columns.end()) {
+    return found->second;
   }
-  if (auto columns = FetchColumns(tide, l, t, ncols)) {
-    AddColumns(x, units, 1, deg.ndof, *columns, ncols);
+  if (perColumn == 0) {
+    throw std::logic_error(
+        "a state of a rheology without relaxation branches carries its "
+        "column counts (ViscoelasticOperator::ZeroState)");
   }
+  return static_cast<int>(memory / perColumn);
+}
+}  // namespace
+
+ViscoelasticState CombinedState(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms) {
+  if (terms.empty()) {
+    throw std::invalid_argument("a combined state takes at least one state");
+  }
+  using Fields = std::map<int, std::vector<double>>;
+  auto fields = std::vector<std::pair<double, const Fields*>>{};
+  for (const auto& [a, state] : terms) fields.emplace_back(a, &state->m);
+  ViscoelasticState out;
+  out.m = CombineFields<Fields>(fields);
+  out.columns = terms.front().second->columns;
+  out.t = terms.front().second->t;
+  return out;
 }
 
 ViscoelasticState ViscoelasticOperator::ZeroState(
@@ -359,6 +615,7 @@ ViscoelasticState ViscoelasticOperator::ZeroState(
   const auto K = rheology_->BranchCount();
   for (auto l = 0; l <= lmax_; ++l) {
     const auto& deg = Deg(l);
+    state.columns[l] = ncols(l);
     state.m[l].assign(K * 3 * deg.NodalSize(ncols(l)), 0.0);
   }
   return state;
@@ -379,6 +636,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     std::optional<std::vector<double>> load, tide;
     std::vector<double> x;
   };
+  RefuseTideWithoutGravity(*this, tide);
   const auto K = rheology_->BranchCount();
   auto tasks = std::vector<Task>{};
   for (const auto& [l, m] : state.m) {
@@ -387,11 +645,11 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     task.m = &m;
     task.deg = &Deg(l);
     task.ncols =
-        static_cast<int>(m.size() / (K * 3 * task.deg->ne * task.deg->np));
+        ColumnsOf(state, l, m.size(), K * 3 * task.deg->ne * task.deg->np);
     if (load || tide) {
       task.units = &UnitResponses(nullptr, l);
-      task.load = FetchColumns(load, l, state.t, task.ncols);
-      task.tide = FetchColumns(tide, l, state.t, task.ncols);
+      task.load = LoadColumns(*this, load, l, state.t, task.ncols);
+      task.tide = TideColumns(tide, l, state.t, task.ncols);
     }
     tasks.push_back(std::move(task));
   }
@@ -503,7 +761,11 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
                                    const ViscoelasticState& state, double dt,
                                    Scheme scheme, const LoadCallable& load,
                                    const LoadCallable& tide)
-    : op_(&op), scheme_(scheme), dt_(dt), t_(state.t + dt) {
+    : op_(&op),
+      flavour_(op.FlavourOf(scheme, dt)),
+      scheme_(scheme),
+      dt_(dt),
+      t_(state.t + dt) {
   const auto& weights = op.SchemeWeightsOf(scheme, dt);
   auto dStart = std::map<int, std::vector<double>>{};
   if (scheme == Scheme::ExponentialTrapezoid) {
@@ -516,7 +778,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
   auto degs = std::vector<const ViscoelasticOperator::Degree*>{};
   for (const auto& [l, m] : state.m) {
     const auto& deg = op.Deg(l);
-    ncols_[l] = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+    ncols_[l] = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
     inputs.emplace_back(l, &m);
     degs.push_back(&deg);
   }
@@ -562,7 +824,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
 const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     const {
   if (memorySolutions_.empty()) {
-    auto& flavour = op_->FlavourOf(scheme_, dt_);
+    auto& flavour = *flavour_;
     // One task per degree, the workspaces and effective systems resolved
     // first: the memory force through the effective system.
     auto inputs = std::vector<std::pair<int, const std::vector<double>*>>{};
@@ -654,7 +916,6 @@ ViscoelasticStep::Finish(const LoadCallable& load,
                          const LoadCallable& tide) const {
   const auto& op = *op_;
   const auto& weights = op.SchemeWeightsOf(scheme_, dt_);
-  auto& flavour = op.FlavourOf(scheme_, dt_);
   const auto& memory = MemorySolutions();
   const auto K = op.GetRheology().BranchCount();
 
@@ -670,6 +931,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     std::optional<std::vector<double>> load, tide;
     std::vector<double> x, d1, mNew;
   };
+  RefuseTideWithoutGravity(op, tide);
   auto tasks = std::vector<Task>{};
   for (const auto& [l, mem] : mem_) {
     Task task;
@@ -678,9 +940,9 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     task.deg = &op.Deg(l);
     task.ncols = ncols_.at(l);
     if (load || tide) {
-      task.units = &op.UnitResponses(&flavour, l);
-      task.load = FetchColumns(load, l, t_, task.ncols);
-      task.tide = FetchColumns(tide, l, t_, task.ncols);
+      task.units = &op.UnitResponses(flavour_.get(), l);
+      task.load = LoadColumns(op, load, l, t_, task.ncols);
+      task.tide = TideColumns(tide, l, t_, task.ncols);
     }
     tasks.push_back(std::move(task));
   }
@@ -721,6 +983,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
 
   ViscoelasticState out;
   out.t = t_;
+  out.columns = ncols_;
   auto solutions = std::map<int, std::vector<double>>{};
   for (auto& task : tasks) {
     out.m.emplace(task.l, std::move(task.mNew));
@@ -738,24 +1001,33 @@ ViscoelasticStep ViscoelasticOperator::StartStep(
         "a two-phase step is implicit: ExponentialTrapezoid or "
         "BackwardEuler");
   }
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
-  return ViscoelasticStep(*this, state, dt, scheme, load, tide);
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(
+        "an opened step is one stage, ExponentialTrapezoid or BackwardEuler: "
+        "Sdirk2 is opened stage by stage, each a BackwardEuler step "
+        "(StepRecipe.hpp)");
+  }
+  // a zero-length step is the elastic solve with the memory held
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
+  return ViscoelasticStep(*this, state, dt, ZeroLengthScheme(scheme), load,
+                          tide);
 }
 
 std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
 ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
                            Scheme scheme, const LoadCallable& load,
                            const LoadCallable& tide) const {
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   if (scheme == Scheme::ExponentialEuler) {
     auto dStart = StartStrain(state, load, tide);
     const auto& weights = SchemeWeightsOf(Scheme::ExponentialTrapezoid, dt);
     const auto K = rheology_->BranchCount();
     ViscoelasticState out;
     out.t = state.t + dt;
+    out.columns = state.columns;
     for (const auto& [l, m] : state.m) {
       const auto& deg = Deg(l);
-      const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+      const int ncols = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
       const std::size_t block = deg.NodalSize(ncols);
       auto mNew = std::vector<double>(m.size());
       for (auto k = std::size_t{0}; k < K; ++k) {
@@ -782,61 +1054,25 @@ ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
     // the displacement is not consistent with the new state
     return {std::move(out), SolveElastic(state, load, tide)};
   }
+  if (IsMultiStage(scheme)) {
+    // stage by stage, each closed under the channels at its own end time
+    auto solutions = std::map<int, std::vector<double>>{};
+    auto out = StepByRecipe(
+        RecipeOf(scheme, dt), dt, state,
+        [&](const ViscoelasticState& from, const RecipeStage& stage,
+            double length, std::size_t) {
+          auto [next, x] =
+              ViscoelasticStep(*this, from, length, stage.family, load, tide)
+                  .Finish(load, tide);
+          solutions = std::move(x);
+          return std::move(next);
+        },
+        [](std::span<const std::pair<double, const ViscoelasticState*>> terms,
+           const RecipeStage&) { return CombinedState(terms); });
+    return {std::move(out), std::move(solutions)};
+  }
   return ViscoelasticStep(*this, state, dt, scheme, load, tide)
       .Finish(load, tide);
-}
-
-std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
-ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
-                               Scheme scheme, const LoadCallable& load,
-                               const LoadCallable& tide) const {
-  if (scheme == Scheme::ExponentialEuler) {
-    throw std::invalid_argument(
-        "a step inverts for ExponentialTrapezoid or BackwardEuler");
-  }
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
-  if (!state.HasStrain()) {
-    throw std::invalid_argument(
-        "the state must carry its strain cache; reconstruct from a "
-        "recorded state or a completed step");
-  }
-  if (scheme == Scheme::ExponentialTrapezoid) {
-    // the same update at -dt with the start and end strains swapped
-    return ViscoelasticStep(*this, state, -dt, scheme, {}, {})
-        .Finish(load, tide);
-  }
-  // backward Euler inverts explicitly: m^n = (1 + h) m^{n+1} - h d^{n+1}
-  const auto K = rheology_->BranchCount();
-  ViscoelasticState prev;
-  prev.t = state.t - dt;
-  for (const auto& [l, m] : state.m) {
-    const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
-    const std::size_t block = deg.NodalSize(ncols);
-    const auto& d1 = state.strain.at(l);
-    auto mPrev = std::vector<double>(m.size());
-    for (auto k = std::size_t{0}; k < K; ++k) {
-      for (auto s = 0; s < 3; ++s) {
-        for (auto e = 0; e < deg.ne; ++e) {
-          for (auto q = 0; q < deg.np; ++q) {
-            const double h =
-                dt * deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
-            const std::size_t node =
-                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
-            const std::size_t at = (k * 3 + s) * block + node;
-            for (auto c = 0; c < ncols; ++c) {
-              mPrev[at + c] =
-                  (1.0 + h) * m[at + c] - h * d1[s * block + node + c];
-            }
-          }
-        }
-      }
-    }
-    prev.m.emplace(l, std::move(mPrev));
-  }
-  auto solutions = SolveElastic(prev, load, tide);
-  prev.strain = Strain(solutions);
-  return {std::move(prev), std::move(solutions)};
 }
 
 ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
@@ -859,7 +1095,7 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
   auto count = std::size_t{0};
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+    const int ncols = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
     const std::size_t block = deg.NodalSize(ncols);
     const auto& mNew = newState.m.at(l);
     for (auto k = std::size_t{0}; k < K; ++k) {
@@ -904,6 +1140,10 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
 
 const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                                               double dt) const {
+  RequireGravity(*this, "the Love numbers of the sea level equation");
+  // a zero-length step's solid is the unrelaxed one
+  if (dt == 0.0) return ElasticLoveNumbers();
+  RefuseMultiStage(scheme, dt, "one effective solid");
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {
@@ -917,13 +1157,13 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                      .parallel = options_.parallel}))
                   .first;
     } else {
-      const auto& flavour = FlavourOf(scheme, dt);
+      const auto flavour = FlavourOf(scheme, dt);
       found = effectiveLove_
                   .emplace(key, ComputeLoveNumbers(
                                     NodalMaterial(), lmax_,
                                     {.eps = options_.eps,
                                      .truncation = options_.truncation,
-                                     .point_shear = &flavour.pointShear,
+                                     .point_shear = &flavour->pointShear,
                                      .parallel = options_.parallel}))
                   .first;
     }
@@ -932,6 +1172,7 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
 }
 
 const LoveNumbers& ViscoelasticOperator::ElasticLoveNumbers() const {
+  RequireGravity(*this, "the Love numbers of the sea level equation");
   const auto key = std::pair(-1, 0.0);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {

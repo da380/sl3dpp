@@ -3,8 +3,7 @@
 /**
  * @file Viscoelastic.hpp
  * @brief The radial viscoelastic core: state, slaved degree solves,
- * steppers. Corresponds to pyslfp's `viscoelastic/operator.py`;
- * non-dimensional throughout.
+ * steppers; non-dimensional throughout.
  *
  * The state is the internal variables alone; the displacement is slaved
  * through elastic solves (AdGIA's layering). Per branch and degree the
@@ -24,9 +23,11 @@
  *                   + k^2 S_k e_S(U', V') + k^2 (k^2 - 2) M_k V' ] dr.
  *
  * Steppers: backward Euler, exponential Euler, and the exponential
- * trapezoid (default; second order, no stability limit, one solve per
- * step), with the weight algebra of StepWeights.hpp and one factorised
- * banded system per degree and (scheme, dt) flavour, cached and reused.
+ * trapezoid (second order, no stability limit, one solve per step), with
+ * the weight algebra of StepWeights.hpp and one factorised banded system
+ * per degree and (scheme, dt) flavour, cached and reused; and Sdirk2
+ * (the default; second order, L-stable, two solves per step), stepped as
+ * two backward Euler stages of one flavour (StepRecipe.hpp).
  * Each degree's columns are independent right-hand sides: one column for
  * a Love-number history, 2 (l + 1) for the full set of spherical-harmonic
  * orders (the real and imaginary blocks of the m >= 0 coefficients).
@@ -45,12 +46,15 @@
  */
 
 #include <complex>
+#include <cstddef>
 #include <functional>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/DegreeOperator.hpp"
@@ -62,7 +66,11 @@
 namespace sl3dpp {
 
 /// A load channel: columns of a degree's coefficient forcing at a time,
-/// or std::nullopt where the channel is silent at that degree.
+/// or std::nullopt where the channel is silent at that degree. A tide
+/// channel's degree-1 columns must vanish (a tide is taken relative to
+/// the centre of mass, SeaLevel.hpp's kLowestTideDegree), and are
+/// refused otherwise; its degree 0 carries the spherical mean of a
+/// centrifugal change.
 using LoadCallable =
     std::function<std::optional<std::vector<double>>(int l, double t)>;
 
@@ -71,6 +79,11 @@ using LoadCallable =
 /// a load jump at exactly t must be followed by Invalidate().
 struct ViscoelasticState {
   std::map<int, std::vector<double>> m;  ///< (K, 3, ne, ngll, ncols)
+  /// Each degree's column count. The operator's states carry it
+  /// (ZeroState sets it, the steps hand it on); a state without it has
+  /// its counts read off the sizes of `m`, which a rheology with no
+  /// relaxation branch (an elastic body, whose `m` is empty) cannot give.
+  std::map<int, int> columns;
   double t = 0.0;
   std::map<int, std::vector<double>> strain;  ///< cache; empty = none
 
@@ -78,7 +91,74 @@ struct ViscoelasticState {
   void Invalidate() { strain.clear(); }
 };
 
+/// The state whose internal variables are sum_j a_j m_j over the terms
+/// (a_j, state_j), states of one layout: a multi-stage step's memory state
+/// (StepRecipe.hpp). It takes the first state's columns and time and has
+/// no strain cache.
+[[nodiscard]] ViscoelasticState CombinedState(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms);
+
 class ViscoelasticStep;
+
+/// A direction in the material for the time-stepped problem: the
+/// perturbations of kappa and mu at the memory points, (element, point)
+/// over the whole mesh, in material units — absolute, where
+/// ViscoelasticOperator::Options::moduli is relative. They enter as that
+/// option's perturbation does (the branch moduli as fixed fractions of
+/// the unrelaxed shear at the points, the relaxation times held), so a
+/// derivative along the direction is the derivative of the stepper under
+/// Options::moduli = eps * direction / modulus at eps = 0. Either may be
+/// empty.
+struct PointMaterialDirection {
+  std::vector<double> kappa, mu;
+
+  [[nodiscard]] bool Empty() const { return kappa.empty() && mu.empty(); }
+};
+
+/// A nodal direction (Material.hpp) as a direction for the time-stepped
+/// problem: the moduli interpolated to the memory points through each
+/// element's basis (the nodal arrays themselves at the GLL points).
+[[nodiscard]] PointMaterialDirection AtMemoryPoints(
+    const MemoryPoints& points, const MaterialDirection& nodal);
+
+/// The shortest relaxation time of an operator's rheology as the operator
+/// steps it (ViscoelasticOperator::ShortestRelaxation, Viscoelastic3D::
+/// ShortestRelaxation), and where it is: 1 / itau of the branch at the
+/// memory point where it is largest over every branch and every point the
+/// branch is active at (and, in 3D, every point of the memory node's
+/// angular grid, the lateral viscosity sampled), with the branch, the
+/// point's element, its layer and radius; of equal times, the innermost
+/// point's (in 3D then the least colatitude, then the least longitude),
+/// the earlier branch's at one point. Non-dimensional, in the
+/// operator's (material) time and length units; nothing relaxing, `time`
+/// infinite and the rest zero.
+///
+/// It is the scale the continuous adjoint's steps are held to: after each
+/// measurement the continuous adjoint state relaxes on it, and the
+/// continuous kernels are accurate once the steps are short against it
+/// (docs/adjoints.md §1). StepRatio gives a run's longest step against it.
+struct RelaxationSite {
+  double time = std::numeric_limits<double>::infinity();
+  std::size_t branch = 0;
+  int element = 0;
+  int layer = 0;
+  double radius = 0.0;
+  /// In 3D, whether the time varies over the memory node's angular grid
+  /// (a lateral viscosity), and then the colatitude and longitude
+  /// (radians) of the grid point where it is shortest; false and zero
+  /// where it is uniform there, and in 1D.
+  bool lateral = false;
+  double colatitude = 0.0;
+  double longitude = 0.0;
+
+  /// The longest step of an increasing time grid over `time`, the grid's
+  /// times multiplied by `unit` being in the operator's time unit (for
+  /// the sea level solver's grid, the solver's time scale over the
+  /// material's). A repeated node is a step of zero length. Zero when
+  /// nothing relaxes or the grid has fewer than two nodes.
+  [[nodiscard]] double StepRatio(std::span<const double> times,
+                                 double unit = 1.0) const;
+};
 
 class ViscoelasticOperator {
  public:
@@ -91,13 +171,44 @@ class ViscoelasticOperator {
     bool parallel = true;
     /// Where the internal variables live within each element
     /// (MemoryPoints.hpp): the interior Gauss points (the default, ~20%
-    /// fewer, docs/design.md) or the GLL nodes (pyslfp's and the Fortran's,
-    /// for like-for-like comparisons).
+    /// fewer, docs/design.md) or the GLL nodes (for like-for-like
+    /// comparisons with codes that place the internal variables there).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
     /// Radial cuts for every degree system (DegreeOperator::Options::cuts,
     /// RadialMesh::BalancedCuts): solved by substructuring over the
     /// segments, the same answers to rounding. Empty, the direct solves.
     std::vector<int> radial_cuts{};
+    /// Perturbations of the ELASTIC moduli, relative and sampled at the
+    /// memory points, (element, point) over the whole mesh: the unrelaxed
+    /// shear becomes mu_U (1 + shear), every branch modulus scaled alike
+    /// (the branch fractions and the relaxation times held, as the
+    /// material derivatives hold them), and kappa becomes kappa (1 +
+    /// bulk); either may be empty. They enter as the 3D stepper's lateral
+    /// moduli do in the angle-uniform case (Viscoelastic3D::Options::
+    /// moduli): at Gauss points the branch moduli scaled at the points,
+    /// and the long-term shear's and the bulk modulus's perturbations as
+    /// point terms of the operators, shear and bulk times the nodal
+    /// modulus interpolated there; at the GLL points, where the points
+    /// are the nodes, the rheology with its nodal moduli scaled.
+    struct PointModuli {
+      std::vector<double> shear, bulk;
+      [[nodiscard]] bool Empty() const { return shear.empty() && bulk.empty(); }
+    };
+    PointModuli moduli{};
+    /// false: the problem without gravity (DegreeOperator::Options::
+    /// gravitating), every system of the displacement alone, above degree
+    /// zero stopping at the top of the outermost fluid region, and at
+    /// degree 1 in the frame of the centre of mass. The steps are then
+    /// forced by the load channel and through AddForce (interior sources).
+    /// The load channel is a surface mass's weight, the normal traction
+    /// g sigma pressing on the surface, g the material's surface gravity
+    /// (DegreeOperator::Load on the system without the potential, the
+    /// forcing of the non-gravitating traction numbers times g); its
+    /// degree-1 columns are removed (a degree-1 traction exerts a net
+    /// force, which nothing balances: the load is projected on the loads
+    /// that exert none). A tide channel is refused, and so are the Love
+    /// numbers of the sea level equation.
+    bool gravitating = true;
   };
 
   /// The rheology is copied into immutable shared storage, so the
@@ -121,6 +232,12 @@ class ViscoelasticOperator {
     return nodalMaterial_ ? *nodalMaterial_ : rheology_->BaseMaterial();
   }
   [[nodiscard]] int LMax() const { return lmax_; }
+  [[nodiscard]] const Options& GetOptions() const { return options_; }
+  /// Whether the systems carry gravity (Options::gravitating).
+  [[nodiscard]] bool Gravitating() const { return options_.gravitating; }
+  /// The unrelaxed spheroidal system of a degree: its dof map, and the
+  /// solve of a force on it (a point source's, PointSource.hpp).
+  [[nodiscard]] const DegreeOperator& UnrelaxedSystem(int l) const;
 
   /// The undisturbed state at t = 0 with ncols(l) columns per degree.
   [[nodiscard]] ViscoelasticState ZeroState(
@@ -161,30 +278,26 @@ class ViscoelasticOperator {
   /// read at the start and/or end time). Returns the new state (with its
   /// strain cache for the implicit schemes) and the last degree solutions
   /// (consistent with the new state; for the exponential Euler, the
-  /// start-of-step solutions).
+  /// start-of-step solutions). dt >= 0: a step of zero length is, by every
+  /// scheme, the elastic solve with the memory held (StepWeights.hpp at
+  /// h = 0; its flavour's systems, unit responses and Love numbers the
+  /// unrelaxed ones), what a jump of the forcing takes. Under Sdirk2 the
+  /// step is its two backward Euler stages (StepRecipe.hpp), each closed
+  /// under the channels at its own end time.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
   Step(const ViscoelasticState& state, double dt,
-       Scheme scheme = Scheme::ExponentialTrapezoid,
+       Scheme scheme = Scheme::Sdirk2,
        const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
-
-  /// The exact algebraic inverse of Step for the trapezoid and backward
-  /// Euler: the state one dt EARLIER with consistent solutions and
-  /// strain cache (the load channels given are the earlier time's). The
-  /// state must carry its strain cache. Dissipation runs the other way,
-  /// so roundoff is amplified by exp(h) per branch and node; a
-  /// checkpointing driver budgets the accumulated h between stores.
-  [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
-  StepBack(const ViscoelasticState& state, double dt,
-           Scheme scheme = Scheme::ExponentialTrapezoid,
-           const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
 
   /// Opens an implicit or trapezoid step before the end-time loads are
   /// known: the sea-level driver reads the step's memory responses,
   /// closes its equilibrium with the matching effective Love numbers, and
-  /// completes the step with ViscoelasticStep::Finish.
+  /// completes the step with ViscoelasticStep::Finish. dt >= 0, as Step's.
+  /// The step opened is one stage: a multi-stage scheme (Sdirk2) is opened
+  /// stage by stage by its driver (StepRecipe.hpp), and refused here but
+  /// at dt = 0, where every scheme's step is backward Euler's.
   [[nodiscard]] ViscoelasticStep StartStep(
-      const ViscoelasticState& state, double dt,
-      Scheme scheme = Scheme::ExponentialTrapezoid,
+      const ViscoelasticState& state, double dt, Scheme scheme,
       const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
 
   /// One trial trapezoid step with the embedded ETD1 error estimate:
@@ -205,12 +318,16 @@ class ViscoelasticOperator {
   // ----------------------------------------------------------
 
   /// The material of a step's effective elastic solve: branch k weighted
-  /// by 1/(1 + h_k) (backward Euler) or phi1(h_k) (trapezoid).
+  /// by 1/(1 + h_k) (backward Euler) or phi1(h_k) (trapezoid); at dt = 0,
+  /// every weight one, the unrelaxed material itself. A multi-stage scheme
+  /// has none but at dt = 0 (its stages', BackwardEuler's at their length).
   [[nodiscard]] Material EffectiveMaterial(Scheme scheme, double dt) const;
 
   /// The Love numbers of the step's effective solid (SI, as
-  /// ComputeLoveNumbers), cached per (scheme, dt); and the unrelaxed
-  /// solid's, cached once.
+  /// ComputeLoveNumbers), cached per (scheme, dt), the unrelaxed solid's at
+  /// dt = 0; and the unrelaxed solid's, cached once. Refused without
+  /// gravity, and for a multi-stage scheme but at dt = 0, as
+  /// EffectiveMaterial.
   [[nodiscard]] const LoveNumbers& EffectiveLoveNumbers(Scheme scheme,
                                                         double dt) const;
   [[nodiscard]] const LoveNumbers& ElasticLoveNumbers() const;
@@ -228,6 +345,12 @@ class ViscoelasticOperator {
   [[nodiscard]] double MinRelaxationTime() const {
     return rheology_->MinRelaxationTime();
   }
+
+  /// The shortest relaxation time at the memory points (PointItau where
+  /// PointMu is positive), and where it is (RelaxationSite). At the GLL
+  /// points it is the rheology's MinRelaxationTime; at Gauss points the
+  /// branches' interpolated inverse times', which the steps use.
+  [[nodiscard]] RelaxationSite ShortestRelaxation() const;
 
   /// The memory points the internal variables live on.
   [[nodiscard]] const MemoryPoints& Points() const { return *points_; }
@@ -248,13 +371,36 @@ class ViscoelasticOperator {
     return pointItau_.at(k);
   }
 
+  /// The reference's unrelaxed shear and bulk moduli at the memory
+  /// points, (element, point) over the whole mesh, before any
+  /// perturbation of Options::moduli: nodal at the GLL points; at Gauss
+  /// points the long-term shear and the bulk modulus interpolated, plus
+  /// the branches' shear at the points as the operators carry it. What a
+  /// relative perturbation multiplies.
+  [[nodiscard]] std::span<const double> UnrelaxedShearAtPoints() const {
+    return muUnrelaxedAtPoints_;
+  }
+  [[nodiscard]] std::span<const double> BulkModulusAtPoints() const {
+    return kappaAtPoints_;
+  }
+  /// Branch k's share of the unrelaxed shear at the memory points,
+  /// mu_k / mu_U there (zero where mu_U vanishes): what a perturbation of
+  /// the unrelaxed shear gives the branch, and what Options::moduli
+  /// leaves unchanged.
+  [[nodiscard]] std::span<const double> BranchFractionAtPoints(
+      std::size_t k) const {
+    return branchFraction_.at(k);
+  }
+
   /// The branches' shear modulus at the memory points that a step's
   /// effective operators integrate there, sum_k mu_k w_k with w_k the
   /// branch's unrelaxed fraction (1/(1 + h) for backward Euler, 1 - beta
-  /// for the trapezoid), (element, point) over the whole mesh. Away from
+  /// for the trapezoid), plus a perturbation of the long-term shear
+  /// (Options::moduli), (element, point) over the whole mesh. Away from
   /// the GLL nodes the effective operators are NodalMaterial's plus this
   /// term (PointShear); at the GLL points that is EffectiveMaterial's
-  /// assembly.
+  /// assembly. At dt = 0 the elastic operators' own (ElasticPointShear),
+  /// every weight one.
   [[nodiscard]] std::vector<double> PointShearModulus(Scheme scheme,
                                                       double dt) const;
   /// The elastic operators' point shear, sum_k mu_k at the points; null
@@ -288,6 +434,7 @@ class ViscoelasticOperator {
   friend class AdjointSolver;    // the sweeps transpose these internals
   friend class AdjointSolver3D;  // and the 3D continuous sweep's jump
   friend class TangentLinearSolver;  // the forward-mode drives
+  friend class ToroidalViscoelastic;  // the toroidal partner shares these
 
   /// Per-degree workspace: the unrelaxed system over the degree's element
   /// subset, and the strain operators and branch data over its memory
@@ -298,21 +445,30 @@ class ViscoelasticOperator {
   struct Flavour;
 
   [[nodiscard]] Degree& Deg(int l) const;
-  [[nodiscard]] Flavour& FlavourOf(Scheme scheme, double dt) const;
+  /// The (scheme, dt) flavour, from a cache of the four most recently used
+  /// (a variable-dt run would otherwise keep every dt's factorisations).
+  /// The cache and every holder share its ownership: what is taken from
+  /// it (EffectiveSystem, UnitResponses, SplitUnitResponses, the toroidal
+  /// partner's effective systems) lives as long as the flavour is held,
+  /// whatever the cache evicts meanwhile, so a caller holds the pointer
+  /// for as long as it uses any of it.
+  [[nodiscard]] std::shared_ptr<Flavour> FlavourOf(Scheme scheme,
+                                                   double dt) const;
+  /// The flavour's effective system of a degree, built on first use; a
+  /// reference into the flavour.
   [[nodiscard]] const DegreeOperator& EffectiveSystem(Flavour& flavour,
                                                       int l) const;
   /// The flavour's unit load and tide responses at one degree, columns
-  /// (load, tide); flavour nullptr means the unrelaxed system.
+  /// (load, tide); flavour nullptr means the unrelaxed system. A
+  /// reference into the flavour, or into the operator's unrelaxed cache.
   [[nodiscard]] const std::vector<double>& UnitResponses(Flavour* flavour,
                                                          int l) const;
   /// The flavour's responses to the SPLIT unit-load channels, columns
-  /// (traction-only, attraction-only): what the continuous adjoint's jump
-  /// needs for displacement and potential measurements.
+  /// (traction-only, attraction-only, the unit tangential traction):
+  /// what the continuous adjoint's jump needs for displacement and
+  /// potential measurements. Held as UnitResponses' are.
   [[nodiscard]] const std::vector<double>& SplitUnitResponses(Flavour* flavour,
                                                               int l) const;
-  void AddChannels(std::vector<double>& x, int l, Flavour* flavour, double t,
-                   const LoadCallable& load, const LoadCallable& tide,
-                   int ncols) const;
   [[nodiscard]] std::map<int, std::vector<double>> StartStrain(
       const ViscoelasticState& state, const LoadCallable& load,
       const LoadCallable& tide) const;
@@ -349,13 +505,20 @@ class ViscoelasticOperator {
   std::unique_ptr<const Material> nodalMaterial_;
   std::vector<double> elasticShear_;
   PointShear elasticPointShear_;
+  /// The reference's unrelaxed shear and bulk moduli at the memory
+  /// points, and away from the GLL nodes the perturbations of
+  /// Options::moduli that enter as point terms: the long-term shear's
+  /// (it does not relax) and the bulk modulus's.
+  std::vector<double> muUnrelaxedAtPoints_, kappaAtPoints_;
+  std::vector<std::vector<double>> branchFraction_;
+  std::vector<double> longTermShearShift_, pointBulk_;
   /// The branch moduli and inverse relaxation times at the memory points,
   /// (element, point) over the whole mesh: interpolated from the nodal
   /// arrays (clamped at zero against overshoot), the nodal arrays
   /// themselves at the GLL points.
   std::vector<std::vector<double>> pointMu_, pointItau_;
   mutable std::map<int, std::unique_ptr<Degree>> degrees_;
-  mutable std::list<std::pair<std::pair<int, double>, std::unique_ptr<Flavour>>>
+  mutable std::list<std::pair<std::pair<int, double>, std::shared_ptr<Flavour>>>
       flavours_;  // LRU, most recent at front
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>> weights_;
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
@@ -363,7 +526,6 @@ class ViscoelasticOperator {
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
       weightSecondDerivatives_;
   mutable std::map<std::pair<int, double>, LoveNumbers> effectiveLove_;
-  mutable std::vector<double> unitUnrelaxed_;  // placeholder, see cpp
   mutable std::map<int, std::vector<double>> unrelaxedUnits_;
   mutable std::map<int, std::vector<double>> unrelaxedSplitUnits_;
 };
@@ -422,6 +584,9 @@ class ViscoelasticStep {
                    const LoadCallable& load, const LoadCallable& tide);
 
   const ViscoelasticOperator* op_;
+  /// The step's flavour, held for the step's life: its effective systems
+  /// and unit responses whatever the operator's cache evicts meanwhile.
+  std::shared_ptr<ViscoelasticOperator::Flavour> flavour_;
   Scheme scheme_;
   double dt_;
   double t_;
