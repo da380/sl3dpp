@@ -77,7 +77,7 @@ set(SL3DPP_GAUSSQUAD_PIN "bd4f51c2330dfd4901b141e61f8a136f70e96d2a")
 set(SL3DPP_INTERPOLATION_PIN "0935579fbfc69fea3ddf9850abb691d56a5514b9")
 set(SL3DPP_FFTWPP_PIN "aca248ba98cd3e4e73cb3713c6da5882678003b5")
 set(SL3DPP_GSHTRANS_PIN "c71313c52cd22a53b48b25302ab4afc20e158e32")
-set(SL3DPP_PLANETMODEL_PIN "b359d3043029f9f5445964be635fb360b80e20c7")
+set(SL3DPP_PLANETMODEL_PIN "e43027b5e142363a5fa89a6ec3ad940ccdbdbbf2")  # v2.1.1
 
 # The revision each library is fetched at: the override when one is set,
 # else the pin.
