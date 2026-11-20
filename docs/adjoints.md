@@ -634,9 +634,11 @@ model, and a 3D kernel's reduction per node (`…Spherical`,
 `SphericalMean`) is its mean over the sphere, the kernel of an
 angle-uniform perturbation.
 
-The values are non-dimensional in the material's scheme: the
-objective's unit per unit of the parameter and of volume. The programs
-write them in SI, the objective's unit per parameter unit per m³.
+The values are non-dimensional: the objective in the unit its duals
+give it, per unit of the parameter and of volume in the material's
+scheme ([library.md](library.md), "Units of the derivative results").
+The programs write them in SI, the objective's unit per parameter unit
+per m³.
 
 The discrete and the continuous sweeps both approximate these
 functions. The sweeps accumulate the gradient with respect to each

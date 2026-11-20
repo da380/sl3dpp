@@ -142,7 +142,9 @@ surface file, and `examples/Common.hpp` reads one.
   interface. The time-dependent drivers (`Evolution`,
   `Evolution3D`, `AdjointSolver`, `AdjointSolver3D`) take and return
   times, loads and fields in the sea-level solver's units: convert with
-  `solver.SolverScales()`. Their time grids increase, a time repeated
+  `solver.SolverScales()`. The kernels in the Earth's parameters are in
+  the material's units (Units of the derivative results, below). Their
+  time grids increase, a time repeated
   once for a jump of the forcing (an earthquake's onset, a step load, a
   step of the ice or the tide): its left limit, then its right
   ([design.md](design.md) §5), the forcing's left limits its callbacks
@@ -167,3 +169,54 @@ surface file, and `examples/Common.hpp` reads one.
   its radial cuts, segments and `Collectives`, which `Distributed.hpp`
   fills from a communicator ([radial-partitioning.md](radial-partitioning.md)
   §9).
+
+### Units of the derivative results
+
+The derivative classes return their kernels in the library's units and
+convert nothing; `sl3d kernel` applies the factors below before it
+writes its files. A kernel is the change of the objective per unit of a
+parameter and per unit of surface or volume, so three units fix its own.
+
+- **The objective** J is in the unit its duals give it. The duals are in
+  the solver's units, so a dual of unit surface integral (`CapMeanDual`,
+  `PointDual`) gives J in the solver's unit of the field it reads. With
+  f_J the SI value of one unit of J, such a J has f_J = `S.Length()`
+  for a sea level or a displacement, `S.Factor(PotentialDimensions)` for
+  a potential and `1 / S.Time()` for a rotation rate.
+- **The solver's scales** `S = solver.SolverScales()` hold the times and
+  every kernel in the surface forcing.
+- **The material's scales** `M = op.BaseMaterial().ModelScales()` hold
+  the parameter and the volume of every kernel in the Earth's
+  parameters, the objective staying in its duals' unit.
+
+Both are geophysical scales (G = 1): the solver's on
+`SeaLevelParameters::mean_radius`, the material's on the deck's outer
+radius or `EarthModel::Options::scales`. Their units of time agree
+unless those options set another, and their units of length differ by
+the ratio of the two radii.
+
+A kernel in SI is the library's value times the factor of its row, L and
+T the `Length()` and `Time()` of the row's scales. The surface members
+are `Kernels`' (in 3D, `Kernels3D::ice`'s):
+
+| Member | Kernel in | Scales | Factor to SI | SI unit |
+| --- | --- | --- | --- | --- |
+| `times` | | S | T | s |
+| `thickness`, `baseline`, `instantaneous`, `rate` | the ice thickness | S | f_J / L³ | [J] m⁻³ |
+| `initialSeaLevel`; `CalibratedKernels::multiplier` | the initial sea level; the sea level a run is calibrated to | S | f_J / L³ | [J] m⁻³ |
+| `solidSurfaceChangeKernels` | a layer's height on the solid surface | S | f_J / L³ | [J] m⁻³ |
+| `density` | the ice thickness, per unit time | S | f_J / (L³ T) | [J] m⁻³ s⁻¹ |
+| `directLoadKernels`, `directLoadOutsideWaterBudgetKernels` | a surface load | S | f_J / `S.Mass()` | [J] kg⁻¹ |
+| `tideKernels` | the tidal potential's coefficients, paired over the unit sphere | S | f_J / `S.Factor(PotentialDimensions)` | [J] m⁻² s² |
+| `momentKernels` | a moment tensor | S | f_J / `S.Factor({.mass = 1, .length = 2, .time = -2})` | [J] N⁻¹ m⁻¹ |
+| `itauKernel`; `itauKernel3D`, `itauKernelSpherical` | a branch's inverse relaxation time | M | f_J T / L³ | [J] s m⁻³ |
+| `Viscosity(rheology)` | a branch's viscosity | M | f_J / (`M.Factor(ViscosityDimensions)` L³) | [J] Pa⁻¹ s⁻¹ m⁻³ |
+| `logViscosityKernel3D` | the log viscosity | M | f_J / L³ | [J] m⁻³ |
+| `kappaKernel`, `muKernel`; `kappaKernel3D`, `muKernel3D` and their `…Spherical` | the bulk and the unrelaxed shear modulus | M | f_J / (`M.Factor(ModulusDimensions)` L³) | [J] Pa⁻¹ m⁻³ |
+
+`KernelDerivatives` and `KernelDerivatives3D` hold the derivative of
+each kernel along a direction, the direction in the library's units (its
+forcing in the solver's, its `itau` and moduli in the material's): each
+member converts as the kernel of its name does. A tangent run's
+snapshots are in the solver's units as a forward run's are, and a
+measurement's change along the direction is in J's unit.

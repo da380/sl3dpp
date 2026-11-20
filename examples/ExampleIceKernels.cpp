@@ -192,7 +192,8 @@ int main(int argc, char** argv) {
 
     // The radial viscosity kernel as a density in radius: the kernel is
     // a density per unit volume, so the shell's 4 pi r^2 times it, with
-    // eta and radius in SI. dJ = int K(r) d eta(r) dr.
+    // J (a length in the solver's units), eta and radius in SI.
+    // dJ = int K(r) d eta(r) dr.
     const auto eta = kernels.Viscosity(earth.rheology);
     const auto etaSi = matScales.Factor(ViscosityDimensions);
     const auto rSi = matScales.Length();
@@ -203,7 +204,7 @@ int main(int argc, char** argv) {
         if (earth.rheology.BranchAt(0).itau[i] <= 0.0) continue;
         const auto r = mesh.Radius(e, q);
         rows.push_back({r * rSi / 1.0e3,  // km
-                        4.0 * std::numbers::pi * r * r * eta[0][i] /
+                        length * 4.0 * std::numbers::pi * r * r * eta[0][i] /
                             (etaSi * rSi)});
       }
     }

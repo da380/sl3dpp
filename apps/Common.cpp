@@ -1351,7 +1351,6 @@ CalibrationOptions CalibrationOptionsOf(const Run& run) {
   options.iterations = run.ocean->calibration_iterations;
   options.rtol = run.ocean->calibration_rtol;
   // the gradient's sweep is the library's default, the discrete adjoint
-  // (ReadRun refuses the gradient under a scheme of several stages)
   options.adjoint.rtol = run.solver.rtol;
   options.adjoint3D.rtol = run.solver.rtol;
   options.adjoint3D.coupled_rtol = run.solver.step_rtol;
